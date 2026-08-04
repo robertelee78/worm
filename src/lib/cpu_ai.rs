@@ -1320,4 +1320,43 @@ mod tests {
         let agg = predict_player_move(&crate::WormGame::new(), &brain, &tail);
         assert!((0.0..=1.0).contains(&agg.confidence));
     }
+
+    /* ----------------------------- Spike 2 ----------------------------- */
+
+    #[test]
+    fn spike_2_transition_features_encode_corner_patterns() {
+        // With a populated player_tail, the 4x4 transition matrix in slots
+        // 13..29 should capture direction changes (e.g. Right -> Up).
+        let game = WormGame::new();
+        let dirs = [Direction::Up, Direction::Right, Direction::Down, Direction::Left];
+        let mut tail: VecDeque<Direction> = VecDeque::new();
+
+        // Simulate the corner pattern: Right -> Up -> Left -> Down (clockwise)
+        tail.push_back(Direction::Right);
+        tail.push_back(Direction::Up);
+        tail.push_back(Direction::Left);
+        tail.push_back(Direction::Down);
+        tail.push_back(Direction::Right);
+
+        // Cap tail length like the brain does.
+        while tail.len() > 5 { tail.pop_front(); }
+
+        let ctx = encode_player_context(&game, &tail);
+
+        // Transition matrix: slot 13 + from*4 + to
+        // Right(3) -> Up(0): should have weight
+        let right_to_up = ctx[13 + 3 * 4 + 0];
+        let up_to_left = ctx[13 + 0 * 4 + 2];
+        let left_to_down = ctx[13 + 2 * 4 + 1];
+        let down_to_right = ctx[13 + 1 * 4 + 3];
+
+        assert!(right_to_up > 0.0, "Right->Up transition should be encoded");
+        assert!(up_to_left > 0.0, "Up->Left transition should be encoded");
+        assert!(left_to_down > 0.0, "Left->Down transition should be encoded");
+        assert!(down_to_right > 0.0, "Down->Right transition should be encoded");
+
+        // Diagonal transitions shouldn't appear in a wall-follower.
+        let right_to_down = ctx[13 + 3 * 4 + 1];
+        assert!(right_to_down == 0.0, "Right->Down should be zero (not a wall-follow turn)");
+    }
 }
