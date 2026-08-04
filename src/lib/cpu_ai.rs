@@ -44,6 +44,9 @@ const FOOD_GRAB_RANGE: f32 = 10.0;    // cells: attract CPU toward food within t
 const FOOD_GRAB_WEIGHT: f32 = 150.0;  // scales (RANGE - dist); positive pull toward food
 const HUNT_RANGE: f32 = 14.0;    // cells: pursue the player head to try for the kill
 const HUNT_WEIGHT: f32 = 160.0;  // scales (HUNT_RANGE - dist); positive pull toward the player
+const POWERUP_GRAB_RANGE: f32 = 12.0;  // cells: attract CPU toward power-ups
+const POWERUP_GRAB_WEIGHT: f32 = 90.0; // scales (RANGE - dist); weaker than food
+const BOMB_DANGER_WEIGHT: f32 = 250.0; // scales (RADIUS+1 - dist) inside a blast zone
 
 /// Retention cap — mirrors rps-ai's 5000 window. The seq counter keeps climbing
 /// past this; that is what recency decay ages against, NOT the episode count.
@@ -263,18 +266,21 @@ fn index_dir(i: usize) -> Direction {
 }
 
 /// Whether stepping one cell in `dir` from `(hx,hy)` is free and in-bounds.
+/// Cell-based: holes and the outer corridor are legal space; walls, trails and
+/// live bombs are fatal.
 pub fn free_step(game: &WormGame, hx: u16, hy: u16, dir: Direction) -> bool {
     let (dx, dy) = dir.as_delta();
-    let nx = (hx as i16 + dx) as i32;
-    let ny = (hy as i16 + dy) as i32;
-    if nx < 1 || ny < 1 || nx as u16 >= game.width - 1 || ny as u16 >= game.height - 1 {
+    let nx = hx as i16 + dx;
+    let ny = hy as i16 + dy;
+    if nx < 0 || ny < 0 || nx >= game.width as i16 || ny >= game.height as i16 {
         return false;
     }
-    let cell = game.grid[ny as usize][nx as usize];
-    cell == CellType::Empty || cell == CellType::Food
+    game.passable(nx as u16, ny as u16)
 }
 
 /// BFS flood-fill open space — the survival prior. The k-NN vote must beat this.
+/// Cell-based: corridors and holes count as open space (they are genuinely
+/// escapable), walls/trails/bombs do not.
 pub fn count_open_space(game: &WormGame, start_x: u16, start_y: u16) -> f32 {
     let mut visited = vec![vec![false; game.width as usize]; game.height as usize];
     let mut queue: VecDeque<(u16, u16)> = VecDeque::new();
@@ -290,11 +296,9 @@ pub fn count_open_space(game: &WormGame, start_x: u16, start_y: u16) -> f32 {
         for (dx, dy) in &neighbors {
             let nx = x as i16 + dx;
             let ny = y as i16 + dy;
-            if nx >= 2 && nx < game.width as i16 - 2 && ny >= 2 && ny < game.height as i16 - 2 {
+            if nx >= 1 && nx < game.width as i16 - 1 && ny >= 1 && ny < game.height as i16 - 1 {
                 let (nx, ny) = (nx as u16, ny as u16);
-                if !visited[ny as usize][nx as usize]
-                    && game.grid[ny as usize][nx as usize] == CellType::Empty
-                {
+                if !visited[ny as usize][nx as usize] && game.passable(nx, ny) {
                     visited[ny as usize][nx as usize] = true;
                     queue.push_back((nx, ny));
                 }
@@ -339,7 +343,8 @@ fn directional_player_distance(game: &WormGame, hx: u16, hy: u16, cap: f32) -> [
     out
 }
 
-/// Distance to the nearest wall per direction.
+/// Distance to the nearest wall per direction. Cell-based: stops at any Wall
+/// cell (arena wall or outer frame); holes and corridor are open.
 fn wall_distance(game: &WormGame, hx: u16, hy: u16) -> [f32; 4] {
     let dirs = [Direction::Up, Direction::Down, Direction::Left, Direction::Right];
     let mut out = [0.0f32; 4];
@@ -351,7 +356,10 @@ fn wall_distance(game: &WormGame, hx: u16, hy: u16) -> [f32; 4] {
         loop {
             x += dx;
             y += dy;
-            if x < 1 || y < 1 || x as u16 >= game.width - 1 || y as u16 >= game.height - 1 {
+            if x < 0 || y < 0 || x >= game.width as i16 || y >= game.height as i16 {
+                break;
+            }
+            if game.grid[y as usize][x as usize] == CellType::Wall {
                 break;
             }
             dist += 1.0;
@@ -506,7 +514,10 @@ fn nearest_trail_distance(game: &WormGame, hx: u16, hy: u16, max_range: f32) -> 
                 break;
             }
             let cell = game.grid[y as usize][x as usize];
-            if cell != CellType::Empty && cell != CellType::Food {
+            if !matches!(
+                cell,
+                CellType::Empty | CellType::Food | CellType::Hole | CellType::PowerUp
+            ) {
                 out[i] = dist;
                 break;
             }
@@ -816,7 +827,7 @@ pub fn sample_with_temperature(
 ///   score = survival       (safety floor — avoid walls/traps)
 ///         + food_pull       (scoring — points come from eating food)
 ///         + hunt_pull       (scoring — points come from killing the player)
-pub fn score_direction(game: &WormGame, dir: Direction, _herding: bool, predicted_player_dir: Direction, pred_confidence: f32) -> f32 {
+pub fn score_direction(game: &WormGame, dir: Direction, _herding: bool, predicted_player_dir: Direction, _pred_confidence: f32) -> f32 {
     let cpu = &game.cycles[1];
     let (hx, hy) = cpu.head;
     let (dx, dy) = dir.as_delta();
@@ -864,12 +875,47 @@ pub fn score_direction(game: &WormGame, dir: Direction, _herding: bool, predicte
     let intercept_rep = (nx as i16 - predicted_px as i16).unsigned_abs() as f32
         + (ny as i16 - predicted_py as i16).unsigned_abs() as f32;
     let intercept_pull = if intercept_rep <= HUNT_RANGE {
-        (HUNT_RANGE - intercept_rep) * HUNT_WEIGHT * 0.6 * pred_confidence
+        (HUNT_RANGE - intercept_rep) * HUNT_WEIGHT * 0.6
     } else {
         0.0
     };
 
-    norm_open * 2000.0 + food_pull + hunt_pull + intercept_pull
+    // Bomb danger: armed bombs blast a Chebyshev BOMB_RADIUS_CELLS zone — route
+    // around it. Flat strong penalty; planting with an escape line then leaving
+    // the zone is exactly the survival pressure this encodes.
+    let mut bomb_penalty = 0.0;
+    for b in &game.bombs {
+        let d = (nx as i16 - b.x as i16)
+            .abs()
+            .max((ny as i16 - b.y as i16).abs()) as f32;
+        let radius = crate::game::BOMB_RADIUS_CELLS as f32;
+        if d <= radius {
+            bomb_penalty += (radius + 1.0 - d) * BOMB_DANGER_WEIGHT;
+        }
+    }
+
+    // Power-up pull: only while not already holding one (no hoarding).
+    let mut powerup_pull = 0.0;
+    if game.cycles[1].held_powerup.is_none() {
+        let d = nearest_powerup_scalar(game, nx, ny);
+        if d <= POWERUP_GRAB_RANGE {
+            powerup_pull = (POWERUP_GRAB_RANGE - d) * POWERUP_GRAB_WEIGHT;
+        }
+    }
+
+    norm_open * 2000.0 + food_pull + hunt_pull + intercept_pull + powerup_pull - bomb_penalty
+}
+
+/// Manhattan distance from (nx,ny) to the nearest live power-up (1000 if none).
+fn nearest_powerup_scalar(game: &WormGame, nx: u16, ny: u16) -> f32 {
+    let mut best = 1000.0;
+    for &(px, py, _) in &game.powerups {
+        let man = ((px as i16 - nx as i16).abs() + (py as i16 - ny as i16).abs()) as f32;
+        if man < best {
+            best = man;
+        }
+    }
+    best
 }
 
 fn nearest_food_scalar(game: &WormGame, nx: u16, ny: u16) -> f32 {
@@ -884,6 +930,101 @@ fn nearest_food_scalar(game: &WormGame, nx: u16, ny: u16) -> f32 {
 }
 
 /* ------------------------------ decide procedure ------------------------------ */
+
+/// Should cycle `who` fire its held power-up this frame? A simple shot-quality
+/// heuristic — the same one the bench player uses, so power-up play is
+/// symmetric between adaptive and naive opponents.
+pub fn should_fire(game: &WormGame, who: usize, rng_fn: &mut impl FnMut(f32, f32) -> f32) -> bool {
+    use crate::PowerUpKind;
+    let kind = match game.cycles[who].held_powerup {
+        Some(k) => k,
+        None => return false,
+    };
+    if game.game_over || !game.cycles[who].alive {
+        return false;
+    }
+    let me = game.cycles[who].head;
+    let opp = game.cycles[1 - who].head;
+    let dir = game.cycles[who].direction;
+    let (dx, dy) = dir.as_delta();
+    match kind {
+        PowerUpKind::Laser => {
+            // Fire only with a clear line at the opponent along our facing.
+            let in_line = (dx != 0 && opp.1 == me.1 && (opp.0 as i16 - me.0 as i16) * dx > 0)
+                || (dy != 0 && opp.0 == me.0 && (opp.1 as i16 - me.1 as i16) * dy > 0);
+            if !in_line {
+                return false;
+            }
+            let (mut x, mut y) = (me.0 as i16, me.1 as i16);
+            loop {
+                x += dx;
+                y += dy;
+                if (x, y) == (opp.0 as i16, opp.1 as i16) {
+                    return true;
+                }
+                if x < 0 || y < 0 || x >= game.width as i16 || y >= game.height as i16 {
+                    return false;
+                }
+                if game.grid[y as usize][x as usize] == CellType::Wall {
+                    return false;
+                }
+            }
+        }
+        PowerUpKind::TriShot => {
+            // Opponent in the forward cone within bolt range.
+            let cheby = (opp.0 as i16 - me.0 as i16)
+                .abs()
+                .max((opp.1 as i16 - me.1 as i16).abs());
+            let ahead = (opp.0 as i16 - me.0 as i16) * dx + (opp.1 as i16 - me.1 as i16) * dy;
+            cheby <= (crate::game::TRI_SHOT_RANGE as i16 - 1) && ahead > 0
+        }
+        PowerUpKind::Bomb => {
+            // Plant when the opponent is close AND we have a real escape route.
+            let cheby = (opp.0 as i16 - me.0 as i16)
+                .abs()
+                .max((opp.1 as i16 - me.1 as i16).abs());
+            if cheby > 6 {
+                return false;
+            }
+            let nx = (me.0 as i16 + dx) as i32;
+            let ny = (me.1 as i16 + dy) as i32;
+            if nx < 0 || ny < 0 || nx >= game.width as i32 || ny >= game.height as i32 {
+                return false;
+            }
+            let (ux, uy) = (nx as u16, ny as u16);
+            game.passable(ux, uy) && count_open_space(game, ux, uy) > 150.0
+        }
+        PowerUpKind::WallPunch => {
+            // Fire at a nearby wall when cramped (or rarely, for map variety).
+            let (mut x, mut y) = (me.0 as i16, me.1 as i16);
+            let mut wall_close = false;
+            for _ in 0..5 {
+                x += dx;
+                y += dy;
+                if x < 0 || y < 0 || x >= game.width as i16 || y >= game.height as i16 {
+                    break;
+                }
+                if game.grid[y as usize][x as usize] == CellType::Wall {
+                    wall_close = game.is_arena_wall(x as u16, y as u16);
+                    break;
+                }
+            }
+            if !wall_close {
+                return false;
+            }
+            let nx = (me.0 as i16 + dx) as i32;
+            let ny = (me.1 as i16 + dy) as i32;
+            let open_ahead = if nx >= 0 && ny >= 0 && nx < game.width as i32 && ny < game.height as i32
+                && game.passable(nx as u16, ny as u16)
+            {
+                count_open_space(game, nx as u16, ny as u16)
+            } else {
+                0.0
+            };
+            open_ahead < 250.0 || rng_fn(0.0, 1.0) < 0.03
+        }
+    }
+}
 
 /// Faithful to rps-ai's `think` + `decide`: memory-driven read, confidence-gated,
 /// blended with a base-rate prior, temperature-sampled with 5% explore.

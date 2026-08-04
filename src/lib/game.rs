@@ -59,7 +59,9 @@ pub enum PowerUpKind {
     WallPunch,
 }
 
-/// A live tri-shot bolt.
+/// A live tri-shot bolt. `owner` is the cycle that fired it — bolts pass
+/// through their shooter's head (they spawn on it and both advance one cell
+/// per frame), but kill other heads and sever any trail they strike.
 #[derive(Clone, Debug)]
 pub struct Projectile {
     pub x: u16,
@@ -67,6 +69,7 @@ pub struct Projectile {
     pub dx: i16,
     pub dy: i16,
     pub steps_left: u8,
+    pub owner: usize,
 }
 
 /// A planted bomb counting down to detonation.
@@ -660,15 +663,26 @@ impl WormGame {
                         self.detonate(b.x, b.y);
                     }
                 }
-                // Kill on contact with the opponent head.
-                let opp = 1 - who;
-                if self.cycles[opp].alive && beam.contains(&self.cycles[opp].head) {
-                    let (ox, oy) = self.cycles[opp].head;
-                    self.add_impact_particles(ox, oy, self.cycles[opp].color);
-                    self.cycles[opp].alive = false;
-                    self.game_over = true;
-                    self.winner = Some(who);
-                    play_beep_sequence(&[440, 330, 220, 110], &[80, 80, 80, 160]);
+                // Head contact kills the opponent; trail contact severs the
+                // tail at the struck cell (any cycle's — the beam can cross the
+                // shooter's own trail on a ricochet through a hole).
+                for c in 0..2 {
+                    if !self.cycles[c].alive {
+                        continue;
+                    }
+                    if c != who && beam.contains(&self.cycles[c].head) {
+                        self.kill_cycle(c, who);
+                        continue;
+                    }
+                    let sever_k = self.cycles[c]
+                        .positions
+                        .iter()
+                        .position(|p| beam.contains(p));
+                    if let Some(k) = sever_k {
+                        if k > 0 {
+                            self.sever_trail(c, k);
+                        }
+                    }
                 }
                 // Beam flash particles along the whole path.
                 for &(bx, by) in &beam {
@@ -693,6 +707,7 @@ impl WormGame {
                         dx: ddx,
                         dy: ddy,
                         steps_left: TRI_SHOT_RANGE,
+                        owner: who,
                     });
                 }
                 play_beep(1200, 40);
@@ -747,14 +762,43 @@ impl WormGame {
         out
     }
 
+    /// Kill cycle `c`, crediting the win to `winner`.
+    fn kill_cycle(&mut self, c: usize, winner: usize) {
+        let (hx, hy) = self.cycles[c].head;
+        self.add_impact_particles(hx, hy, self.cycles[c].color);
+        self.cycles[c].alive = false;
+        self.game_over = true;
+        self.winner = Some(winner);
+        play_beep_sequence(&[440, 330, 220, 110], &[80, 80, 80, 160]);
+    }
+
+    /// Sever cycle `c`'s trail at positions index `k`: everything from k to the
+    /// tail tip is destroyed and the victim loses one point per cell lost.
+    /// (Missile rule: only head hits kill; body hits amputate the tail.)
+    pub fn sever_trail(&mut self, c: usize, k: usize) {
+        let cycle = &mut self.cycles[c];
+        if k == 0 || k >= cycle.positions.len() {
+            return;
+        }
+        let lost = (cycle.positions.len() - k) as u32;
+        let cut_point = cycle.positions[k];
+        for &(px, py) in &cycle.positions[k..] {
+            self.grid[py as usize][px as usize] = CellType::Empty;
+        }
+        cycle.positions.truncate(k);
+        cycle.score = cycle.score.saturating_sub(lost);
+        self.add_impact_particles(cut_point.0, cut_point.1, (255, 200, 120));
+        play_beep(520, 40);
+    }
+
     /// Advance live tri-shot bolts one cell; bolts die on walls or at max range,
-    /// and kill any head they enter.
+    /// kill other cycles' heads they enter, and sever any trail they strike.
     pub fn advance_projectiles(&mut self) {
         let mut i = 0;
         while i < self.projectiles.len() {
-            let (x, y, dx, dy) = {
+            let (x, y, owner) = {
                 let p = &self.projectiles[i];
-                (p.x as i16 + p.dx, p.y as i16 + p.dy, p.dx, p.dy)
+                (p.x as i16 + p.dx, p.y as i16 + p.dy, p.owner)
             };
             let dead_cell = x < 0
                 || y < 0
@@ -766,13 +810,30 @@ impl WormGame {
                 continue;
             }
             let (ux, uy) = (x as u16, y as u16);
-            let hit = (0..2).find(|&c| self.cycles[c].alive && self.cycles[c].head == (ux, uy));
-            if let Some(c) = hit {
-                self.add_impact_particles(ux, uy, self.cycles[c].color);
-                self.cycles[c].alive = false;
-                self.game_over = true;
-                self.winner = Some(1 - c);
-                play_beep_sequence(&[440, 330, 220, 110], &[80, 80, 80, 160]);
+            // Head hit kills — except the shooter's own head, which the bolt
+            // harmlessly crosses (it spawned there; both advance one cell/frame).
+            let head_hit = (0..2).find(|&c| {
+                c != owner && self.cycles[c].alive && self.cycles[c].head == (ux, uy)
+            });
+            if let Some(c) = head_hit {
+                self.kill_cycle(c, owner);
+                self.projectiles.remove(i);
+                continue;
+            }
+            // Trail hit severs the tail at the struck cell (either cycle's).
+            let trail_hit = (0..2).filter_map(|c| {
+                if !self.cycles[c].alive {
+                    return None;
+                }
+                self.cycles[c]
+                    .positions
+                    .iter()
+                    .position(|&p| p == (ux, uy))
+                    .map(|k| (c, k))
+            })
+            .next();
+            if let Some((c, k)) = trail_hit {
+                self.sever_trail(c, k);
                 self.projectiles.remove(i);
                 continue;
             }
@@ -856,6 +917,19 @@ impl WormGame {
             };
             play_beep_sequence(&[440, 330, 220, 110], &[100, 100, 100, 200]);
         }
+        // Surviving cycles caught in the blast lose the tail from the
+        // head-closest blasted cell onward (same missile sever rule).
+        for c in 0..2 {
+            if !self.cycles[c].alive {
+                continue;
+            }
+            let sever_k = self.cycles[c].positions.iter().position(|&(px, py)| {
+                (px as i32 - cx).abs().max((py as i32 - cy).abs()) <= r
+            });
+            if let Some(k) = sever_k {
+                self.sever_trail(c, k);
+            }
+        }
     }
 
     /// Spawn one random power-up on a free interior cell (never in the corridor).
@@ -936,7 +1010,15 @@ impl WormGame {
                             (200, 0, (200 as f32 * pulse) as u8, '▓')
                         }
                     }
-                    CellType::Wall => (0, 80, 80, '·'),
+                    CellType::Wall => {
+                        if self.is_arena_wall(x as u16, y as u16) {
+                            // The punchable arena wall — solid so holes read as gaps.
+                            (30, 150, 150, '▓')
+                        } else {
+                            // Outer screen frame (drawn over by the border glyphs).
+                            (0, 80, 80, '·')
+                        }
+                    }
                     CellType::Food => {
                         let num = self
                             .food_items
@@ -950,7 +1032,7 @@ impl WormGame {
                         let intensity = ((pulse * 255.0) as u8).max(100);
                          (r.max(intensity), g.max(intensity), b.max(intensity), ch)
                      }
-                     CellType::Hole => (60, 60, 60, '·'),
+                     CellType::Hole => (60, 60, 60, ' '),
                      CellType::PowerUp => {
                          let pu = self
                              .powerups
@@ -958,11 +1040,12 @@ impl WormGame {
                              .find(|&&(px, py, _)| px as usize == x && py as usize == y)
                              .map(|&(_, _, k)| k)
                              .unwrap_or(PowerUpKind::Laser);
-                         let ch = match pu {
-                             PowerUpKind::Laser => '⚡',
-                             PowerUpKind::TriShot => '⚡',
-                         };
-                         (200, 200, 0, ch)
+                         match pu {
+                             PowerUpKind::Laser => (255, 255, 80, 'L'),
+                             PowerUpKind::TriShot => (255, 170, 40, 'T'),
+                             PowerUpKind::Bomb => (255, 70, 70, 'B'),
+                             PowerUpKind::WallPunch => (90, 255, 90, 'P'),
+                         }
                      }
                  };
 
@@ -1015,6 +1098,28 @@ impl WormGame {
             }
         }
 
+        // Draw live projectiles (tri-shot bolts)
+        for p in &self.projectiles {
+            execute!(
+                stdout,
+                MoveTo(p.x, p.y),
+                SetForegroundColor(Color::Rgb { r: 255, g: 255, b: 160 }),
+                Print("*")
+            ).unwrap();
+        }
+
+        // Draw planted bombs — pulse faster as the fuse burns down
+        for b in &self.bombs {
+            let hot = b.fuse % 2 == 0;
+            let (r, g, bl) = if hot { (255, 90, 60) } else { (255, 220, 200) };
+            execute!(
+                stdout,
+                MoveTo(b.x, b.y),
+                SetForegroundColor(Color::Rgb { r, g, b: bl }),
+                Print("●")
+            ).unwrap();
+        }
+
         // Draw UI bar
         let bar_color = if self.game_over {
             Color::Rgb { r: 255, g: 85, b: 128 }
@@ -1027,10 +1132,12 @@ impl WormGame {
             SetForegroundColor(bar_color),
             MoveTo(0, self.height),
             Print(format!(
-                "╔{}╗ P1 (CYAN): {:4} │ P2 (MAGENTA): {:4} │ SCORE: {:5} │ SPEED: {:3}% │ FOOD: {:2} │ TIME: {}",
+                "╔{}╗ P1 (CYAN): {:4} [{:8}] │ P2 (MAGENTA): {:4} [{:8}] │ SCORE: {:5} │ SPEED: {:3}% │ FOOD: {:2} │ TIME: {}",
                 "═".repeat((self.width.saturating_sub(1)) as usize),
                 self.cycles[0].score,
+                Self::powerup_name(self.cycles[0].held_powerup),
                 self.cycles[1].score,
+                Self::powerup_name(self.cycles[1].held_powerup),
                 self.score,
                 100 - (self.frame_count / 60).min(50) as u32,
                 self.food_items.len(),
@@ -1043,7 +1150,7 @@ impl WormGame {
             stdout,
             SetForegroundColor(Color::Rgb { r: 255, g: 85, b: 128 }),
             MoveTo(0, self.height + 1),
-            Print("←→ ARROW KEYS or WASD: Move │ R: Restart │ Q: Quit │ EAT NUMBERS TO GROW • COLLIDE TO DIE"),
+            Print("←→ ARROWS/WASD: Move │ SPACE: Fire power-up │ R: Restart │ Q: Quit │ EAT NUMBERS • GRAB L/T/B/P"),
             ResetColor,
         ).unwrap();
 

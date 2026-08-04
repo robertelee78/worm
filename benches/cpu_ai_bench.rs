@@ -6,12 +6,15 @@
 //! opponents are real players and we score **survival** (moves) and **food**,
 //! the two quantities the reward function is actually optimizing.
 
-use worm::{CellType, Direction, WormGame};
+use rand::RngExt;
+use worm::{Direction, WormGame};
 
 mod ai {
     use super::*;
 
     /// Naive right-hand wall follower (baseline opponent / non-adaptive CPU).
+    /// Cell-based passability: it can use corridors and punched holes, matching
+    /// the game's real collision rules.
     pub fn wall_follow(game: &WormGame) -> Direction {
         let cpu = &game.cycles[1];
         let head = cpu.head;
@@ -42,11 +45,12 @@ mod ai {
 
         for dir in [right_dir, current_dir, left_dir, back_dir] {
             let (dx, dy) = dir.as_delta();
-            let new_x = (head.0 as i16 + dx).max(1).min((game.width - 2) as i16) as u16;
-            let new_y = (head.1 as i16 + dy).max(1).min((game.height - 2) as i16) as u16;
-            if new_x >= 1 && new_x < game.width - 1 && new_y >= 1 && new_y < game.height - 1
-                && game.grid[new_y as usize][new_x as usize] == CellType::Empty
-            {
+            let nx = head.0 as i16 + dx;
+            let ny = head.1 as i16 + dy;
+            if nx < 0 || ny < 0 || nx >= game.width as i16 || ny >= game.height as i16 {
+                continue;
+            }
+            if game.passable(nx as u16, ny as u16) {
                 return dir;
             }
         }

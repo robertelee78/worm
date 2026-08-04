@@ -95,6 +95,7 @@ fn main() -> std::io::Result<()> {
                 // Regular character
                 match input_buf[processed] as char {
                     'q' | 'Q' => quit = true,
+                    ' ' => { game.fire_powerup(0); }
                     'h' => game.change_direction(Direction::Left),
                     'j' => game.change_direction(Direction::Down),
                     'k' => game.change_direction(Direction::Up),

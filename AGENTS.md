@@ -14,10 +14,30 @@ every decision → encode situation → recall similar pasts → vote → act
 
 ```
 cargo build                          # debug build
-cargo test --lib --tests             # 10 unit/integration tests
+cargo test --lib --tests             # 24 tests (10 original + 4 cpu_ai + 14 power-ups)
 cargo bench --bench cpu_ai_bench     # THE behavioural gate (harness=false, runs main)
-cargo run --release                  # play it
+cargo run --release                  # play it (arrow keys + space to fire)
 ```
+
+## Gameplay (post-ADR-002)
+
+Arena topology (when terminal ≥10×10):
+- **Ring 0** (frame): outer border, always Wall
+- **Ring 1** (corridor): empty ring — the pacman tunnel between holes
+- **Ring 2** (arena wall): punchable Wall; `WallPunch` turns it into a `Hole`
+- **Center**: play arena where food/power-ups spawn
+
+Four power-ups (space to fire):
+- **Laser**: hitscan beam, kills on head contact, detonates bombs in path,
+  stops at first wall. Consumed on use.
+- **TriShot**: 3 bolts (straight + diagonals), range 7, pass through shooter's
+  own head but kill/sever others. Die at range limit or walls.
+- **Bomb**: plants at current cell, 3s fuse → Chebyshev radius 10 detonation.
+  Kills heads, severs tails from nearest blasted cell, chains to other bombs.
+- **WallPunch**: punches a Hole through the arena wall (ring 2 only).
+
+Sever rule (all weapons): head hit = kill; trail hit = sever tail + deduct
+1 point/cell lost.
 
 ## The benchmark rule (load-bearing, from /opt/rps-ai/CLAUDE.md)
 
@@ -30,8 +50,10 @@ The bench pits the adaptive CPU against scripted opponents and scores
    to familiar and spends it.
 4. A change ships only if the bench improves: adaptive must beat naive.
 
-Current baseline (2026-08-04): adaptive **-8.6 moves / -8.1 food** vs naive
-wall-follower. The learning half is currently a net drag.
+Current baseline (2026-08-04): adaptive **-39.1 moves / -40.1 food** vs naive
+wall-follower (post power-ups + corridor in ADR-002). The corridor topology
+gives the naive bot escape routes the adaptive scorer doesn't value yet;
+the opponent-centric encoder (ADR-001) is the remedy, not a rollback.
 
 ## The mission: dual live memory
 
