@@ -911,11 +911,202 @@ fn nearest_food_scalar(game: &WormGame, nx: u16, ny: u16) -> f32 {
 
 /* ------------------------------ decide procedure ------------------------------ */
 
-/// Heuristic for when the CPU should fire a held power-up. Currently
-/// returns false (no firing) — the opponent model learns survival, not
-/// power-up timing. This will be expanded once the power-up feature lands.
-pub fn should_fire(_game: &WormGame, _who: usize, _rng_fn: &mut impl FnMut(f32, f32) -> f32) -> bool {
+/// Whether cell (x,y) is threatened by a live projectile.
+fn cell_threatened_by_projectile(game: &WormGame, x: u16, y: u16) -> bool {
+    for p in &game.projectiles {
+        // A projectile threatens a cell if it will reach it within steps_left.
+        let dx = x as i16 - p.x as i16;
+        let dy = y as i16 - p.y as i16;
+        // Check if the cell is on the projectile's path.
+        if p.dx != 0 && p.dy != 0 {
+            // Diagonal bolt: must be on the diagonal path.
+            if dx.abs() != dy.abs() { continue; }
+            if (p.dx > 0 && dx < 0) || (p.dx < 0 && dx > 0) { continue; }
+            if (p.dy > 0 && dy < 0) || (p.dy < 0 && dy > 0) { continue; }
+            let steps = dx.abs().max(dy.abs()) as u8;
+            if steps <= p.steps_left { return true; }
+        } else if p.dx != 0 {
+            // Horizontal bolt.
+            if dy != 0 { continue; }
+            if (p.dx > 0 && dx < 0) || (p.dx < 0 && dx > 0) { continue; }
+            let steps = dx.abs() as u8;
+            if steps <= p.steps_left { return true; }
+        } else if p.dy != 0 {
+            // Vertical bolt.
+            if dx != 0 { continue; }
+            if (p.dy > 0 && dy < 0) || (p.dy < 0 && dy > 0) { continue; }
+            let steps = dy.abs() as u8;
+            if steps <= p.steps_left { return true; }
+        }
+    }
     false
+}
+
+/// Whether cell (x,y) is within blast radius of a bomb that will detonate soon.
+fn cell_threatened_by_bomb(game: &WormGame, x: u16, y: u16, frames_ahead: u8) -> bool {
+    let r = crate::game::BOMB_RADIUS_CELLS as i32;
+    for b in &game.bombs {
+        // Bomb detonates when fuse reaches 0. Each frame fuse decreases by 1.
+        let frames_to_detonate = b.fuse;
+        if frames_to_detonate <= frames_ahead as u32 {
+            let dx = (x as i32 - b.x as i32).abs();
+            let dy = (y as i32 - b.y as i32).abs();
+            if dx <= r && dy <= r { return true; }
+        }
+    }
+    false
+}
+
+/// Iterative multi-frame player prediction: predict direction, step, repeat.
+/// Returns a vector of (x, y) positions for frames 1..max_frames.
+/// Uses a simplified wall-avoidance model (no full game clone) to predict
+/// when the player will turn at corners.
+fn predict_player_positions_iterative(
+    game: &WormGame,
+    brain: &CpuBrain,
+    tail: &VecDeque<Direction>,
+    max_frames: usize,
+) -> Vec<(u16, u16)> {
+    let mut positions = Vec::with_capacity(max_frames);
+    let mut px = game.cycles[0].head.0 as i16;
+    let mut py = game.cycles[0].head.1 as i16;
+    let mut pdir = game.cycles[0].direction;
+
+    for _ in 0..max_frames {
+        // Check if the player will hit a wall/trail in their current direction.
+        let (ddx, ddy) = pdir.as_delta();
+        let next_x = px + ddx;
+        let next_y = py + ddy;
+        let blocked = next_x < 2 || next_y < 2
+            || next_x >= game.width as i16 - 2
+            || next_y >= game.height as i16 - 2
+            || !matches!(
+                game.grid[clamp(next_y, 0, game.height as i16 - 1) as usize]
+                     [clamp(next_x, 0, game.width as i16 - 1) as usize],
+                crate::game::CellType::Empty | crate::game::CellType::Food
+            );
+
+        if blocked {
+            // Use the opponent model to predict which way they'll turn.
+            // Build a simplified context: the player is at a corner.
+            let mut ctx = [0.0f32; PLAYER_FEATURE_DIM];
+            // Encode that the player is blocked ahead (open neighbours = 0 in current dir).
+            let dirs = [Direction::Up, Direction::Down, Direction::Left, Direction::Right];
+            for (i, &d) in dirs.iter().enumerate() {
+                let (dx, dy) = d.as_delta();
+                let nx = px + dx;
+                let ny = py + dy;
+                let free = nx >= 2 && ny >= 2 && nx < game.width as i16 - 2 && ny < game.height as i16 - 2
+                    && matches!(
+                        game.grid[clamp(ny, 0, game.height as i16 - 1) as usize]
+                             [clamp(nx, 0, game.width as i16 - 1) as usize],
+                        crate::game::CellType::Empty | crate::game::CellType::Food
+                    );
+                ctx[i] = if free { 1.0 } else { 0.0 };
+            }
+            // L2-normalise
+            let mut norm = 0.0f32;
+            for i in 0..PLAYER_FEATURE_DIM { norm += ctx[i] * ctx[i]; }
+            norm = norm.sqrt();
+            if norm > 0.0 { let inv = 1.0 / norm; for i in 0..PLAYER_FEATURE_DIM { ctx[i] *= inv; } }
+
+            let memory_size = brain.opp_brain.episodes.len();
+            if memory_size >= COLD_START_EPISODES {
+                let recalled = recall_player(&brain.opp_brain, &ctx, RECALL_K.min(memory_size));
+                if !recalled.is_empty() {
+                    let agg = aggregate_player(&brain.opp_brain, &recalled, brain.opp_brain.seq, memory_size, tail);
+                    pdir = agg.predicted_dir;
+                } else {
+                    // Fallback: wall-follow right turn.
+                    pdir = right_turn(pdir);
+                }
+            } else {
+                // Cold start: assume wall-follow right turn.
+                pdir = right_turn(pdir);
+            }
+        }
+
+        let (dx, dy) = pdir.as_delta();
+        px = clamp(px + dx, 2, game.width as i16 - 3);
+        py = clamp(py + dy, 2, game.height as i16 - 3);
+        positions.push((px as u16, py as u16));
+    }
+    positions
+}
+
+#[inline]
+fn clamp(v: i16, lo: i16, hi: i16) -> i16 {
+    v.max(lo).min(hi)
+}
+
+fn right_turn(dir: Direction) -> Direction {
+    match dir {
+        Direction::Up => Direction::Right,
+        Direction::Right => Direction::Down,
+        Direction::Down => Direction::Left,
+        Direction::Left => Direction::Up,
+    }
+}
+
+/// Heuristic for when the CPU should fire a held power-up.
+/// Fires when the player is in range for a kill:
+///   - Laser: player is in line of fire (same row/col, no walls between)
+///   - TriShot: player is within TRI_SHOT_RANGE cells
+///   - Bomb: player is within BOMB_RADIUS_CELLS of current cell
+///   - WallPunch: CPU is trapped (only 1 legal direction) — escape route
+pub fn should_fire(game: &WormGame, who: usize, rng_fn: &mut impl FnMut(f32, f32) -> f32) -> bool {
+    let kind = match game.cycles[who].held_powerup {
+        Some(k) => k,
+        None => return false,
+    };
+    let opp = 1 - who;
+    if !game.cycles[opp].alive { return false; }
+    let (hx, hy) = game.cycles[who].head;
+    let (ox, oy) = game.cycles[opp].head;
+
+    match kind {
+        crate::game::PowerUpKind::Laser => {
+            // Player must be in line of fire (same row or col, no walls between).
+            let (dx, dy) = game.cycles[who].direction.as_delta();
+            if dx != 0 && hy != oy { return false; }
+            if dy != 0 && hx != ox { return false; }
+            if dx == 0 && dy == 0 { return false; }
+            // Check no walls between us and the player.
+            let beam = beam_cells(game, hx, hy, dx, dy);
+            beam.contains(&(ox, oy))
+        }
+        crate::game::PowerUpKind::TriShot => {
+            // Player within TRI_SHOT_RANGE cells in any forward direction.
+            let dist = ((hx as i16 - ox as i16).abs() + (hy as i16 - oy as i16).abs()) as u8;
+            dist <= crate::game::TRI_SHOT_RANGE
+        }
+        crate::game::PowerUpKind::Bomb => {
+            // Player within bomb blast radius.
+            let dist = ((hx as i32 - ox as i32).abs().max((hy as i32 - oy as i32).abs())) as i16;
+            dist <= crate::game::BOMB_RADIUS_CELLS
+        }
+        crate::game::PowerUpKind::WallPunch => {
+            // Fire when trapped — only 1 legal direction (likely blocked in).
+            let legal = legal_directions(game, &game.cycles[who]);
+            legal.len() <= 1
+        }
+    }
+}
+
+/// Cells a straight beam passes through, stopping before the first wall/frame.
+fn beam_cells(game: &WormGame, hx: u16, hy: u16, dx: i16, dy: i16) -> Vec<(u16, u16)> {
+    let mut out = Vec::new();
+    let mut x = hx as i16;
+    let mut y = hy as i16;
+    loop {
+        x += dx;
+        y += dy;
+        if x < 0 || y < 0 || x >= game.width as i16 || y >= game.height as i16 { break; }
+        let (ux, uy) = (x as u16, y as u16);
+        if game.grid[uy as usize][ux as usize] == crate::game::CellType::Wall { break; }
+        out.push((ux, uy));
+    }
+    out
 }
 
 /// Faithful to rps-ai's `think` + `decide`: memory-driven read, confidence-gated,
@@ -951,20 +1142,53 @@ pub fn cpu_decide(
 
     let wall_dir = wall_follow_decide(game, &game.cycles[1]);
 
-    // --- Opponent Model Prediction ---
+    // --- Opponent Model Prediction (iterative multi-frame) ---
     let tail = brain.player_tail.clone();
     let player_pred = predict_player_move(game, brain, &tail);
     let cpu = &game.cycles[1];
     let (cx, cy) = cpu.head;
     let (ph_x, ph_y) = game.cycles[0].head;
-    let (pdx, pdy) = player_pred.predicted_dir.as_delta();
 
-    // Compute the player's predicted position 1-5 frames ahead.
-    let mut predicted_positions = Vec::new();
-    for steps in 1..=5 {
-        let px = (ph_x as i16 + pdx * steps).max(0).min((game.width - 1) as i16) as u16;
-        let py = (ph_y as i16 + pdy * steps).max(0).min((game.height - 1) as i16) as u16;
-        predicted_positions.push((px, py));
+    // Iterative multi-frame prediction: predicts direction changes at corners.
+    let predicted_positions = predict_player_positions_iterative(game, brain, &tail, 5);
+
+    // --- THREAT AVOIDANCE: dodge projectiles and bombs ---
+    // Check each legal direction for threats. If the wall-follow direction is
+    // threatened, find the safest alternative.
+    let wall_dir = wall_follow_decide(game, &game.cycles[1]);
+    let mut threatened_dirs = Vec::new();
+    for &d in &legal {
+        let (ddx, ddy) = d.as_delta();
+        let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
+        let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
+        if cell_threatened_by_projectile(game, nx, ny)
+            || cell_threatened_by_bomb(game, nx, ny, 3)
+        {
+            threatened_dirs.push(d);
+        }
+    }
+
+    // If wall-follow is threatened, find a safe alternative immediately.
+    if threatened_dirs.contains(&wall_dir) {
+        let safe_dirs: Vec<&Direction> = legal.iter().filter(|d| !threatened_dirs.contains(d)).collect();
+        if !safe_dirs.is_empty() {
+            // Pick the safe direction closest to wall-follow (minimises deviation).
+            let mut best_dir = *safe_dirs[0];
+            let mut best_score = f32::NEG_INFINITY;
+            for &d in &safe_dirs {
+                let (ddx, ddy) = d.as_delta();
+                let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
+                let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
+                let open = count_open_space(game, nx, ny) as f32;
+                let norm_open = open / (game.width as f32 * game.height as f32);
+                let score = norm_open * 1000.0;
+                if score > best_score {
+                    best_score = score;
+                    best_dir = *d;
+                }
+            }
+            return best_dir;
+        }
     }
 
     // --- FOOD: grab food that's on our wall-follow path ---
@@ -1010,6 +1234,56 @@ pub fn cpu_decide(
         }
     }
 
+    // --- CHOKEPOINT INTERCEPT: cut across to corners against wall-followers ---
+    // When the player is a wall-follower (confidence high, direction stable),
+    // predict which corner they'll reach and cut across to lay a trail barrier.
+    // This works even when the player is >10 cells away (standard intercept range).
+    if player_pred.confidence >= 0.5 {
+        // Predict the corner the player will reach next.
+        // Wall-followers turn right at corners. We predict their path to the next corner.
+        let corner_target = predict_next_corner(game, &game.cycles[0], player_pred.predicted_dir);
+
+        if let Some((corner_x, corner_y)) = corner_target {
+            let dist_to_corner = ((cx as i16 - corner_x as i16).abs()
+                + (cy as i16 - corner_y as i16).abs()) as f32;
+
+            // Only intercept if the corner is reachable (within ~20 cells)
+            // and we're not too close to the player (avoid head-on).
+            if dist_to_corner <= 25.0 && dist_to_corner >= 5.0 {
+                let mut best_dir = wall_dir;
+                let mut best_score = f32::NEG_INFINITY;
+                for &d in &legal {
+                    let (ddx, ddy) = d.as_delta();
+                    let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
+                    let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
+
+                    // Distance from new position to corner (lower = closer).
+                    let corner_dist = ((nx as i16 - corner_x as i16).abs()
+                        + (ny as i16 - corner_y as i16).abs()) as f32;
+
+                    // Open space from destination (higher = safer).
+                    let open = count_open_space(game, nx, ny) as f32;
+                    let norm_open = open / (game.width as f32 * game.height as f32);
+
+                    // Score: prefer closer to corner + more open space.
+                    // Wall-follow gets a bonus so we don't abandon the wall
+                    // for a marginal intercept.
+                    let wall_bonus = if d == wall_dir { 1.0 } else { 0.0 };
+                    let score = (20.0 - corner_dist) * 0.5 + norm_open * 3.0 + wall_bonus;
+
+                    if score > best_score {
+                        best_score = score;
+                        best_dir = d;
+                    }
+                }
+                // Only take the chokepoint intercept if it's meaningfully better.
+                if best_dir != wall_dir && best_score > 5.0 {
+                    return best_dir;
+                }
+            }
+        }
+    }
+
     // --- INTERCEPT: position to create a trail barrier across the player's path ---
     // When the prediction is confident and the player is within intercept range,
     // move toward the player's predicted future position. The CPU passes through
@@ -1017,12 +1291,10 @@ pub fn cpu_decide(
     // triggers at the corners where both cycles converge; against chasers it
     // triggers constantly because the player is always approaching.
     if player_pred.confidence >= 0.6 {
-        // Target: where the player will be in 3-5 frames.
-        // Use the 3-frame prediction as the primary target (reachable),
-        // but accept 4-5 frame targets if 3-frame is too close.
+        // Target: where the player will be in 2-5 frames (from iterative prediction).
         let mut best_intercept: Option<(u16, u16, f32)> = None;
-        for (i, &(px, py)) in predicted_positions.iter().enumerate().skip(1) {
-            let frames_ahead = (i + 1) as f32; // 2, 3, 4, 5
+        for (i, &(px, py)) in predicted_positions.iter().enumerate() {
+            let frames_ahead = (i + 1) as f32; // 1, 2, 3, 4, 5
             let dist = ((cx as i16 - px as i16).abs() + (cy as i16 - py as i16).abs()) as f32;
             // Score: closer target + fewer frames ahead = easier intercept.
             let score = 20.0 - dist - frames_ahead * 2.0;
@@ -1110,6 +1382,33 @@ pub fn cpu_decide(
     }
 
     wall_dir
+}
+
+/// Predict which corner a cycle will reach next given their current direction.
+/// Returns (corner_x, corner_y) or None if no clear corner pattern.
+fn predict_next_corner(game: &WormGame, cycle: &LightCycle, predicted_dir: Direction) -> Option<(u16, u16)> {
+    let (hx, hy) = cycle.head;
+    let (dx, dy) = predicted_dir.as_delta();
+
+    // Find the next wall intersection in the predicted direction.
+    let mut x = hx as i16;
+    let mut y = hy as i16;
+    let mut steps = 0;
+    let max_steps = 30; // Cap the search
+
+    loop {
+        x += dx;
+        y += dy;
+        steps += 1;
+        if steps > max_steps { return None; }
+        if x < 2 || y < 2 || x >= game.width as i16 - 2 || y >= game.height as i16 - 2 {
+            // Hit the arena wall — this is the corner.
+            return Some((x as u16, y as u16));
+        }
+        if game.grid[y as usize][x as usize] == crate::game::CellType::Wall {
+            return Some((x as u16, y as u16));
+        }
+    }
 }
 
 /// Simple right-hand wall follower — the same strategy the naive benchmark

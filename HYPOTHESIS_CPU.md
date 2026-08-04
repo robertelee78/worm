@@ -24,16 +24,33 @@ Specifically, if the situation vector $\mathbf{v}$ is redefined as $\mathbf{v}_t
 **Objective:** Validate the `CpuBrain` handles the player-direction vector space without the zero-vector trap.
 **Method:** L2-normalised 16-dim vector (13 coded + 3 zero-padded). Cosine similarity is meaningful.
 
+### Spike 4: Projectile/Bomb/Laser Avoidance ✅
+**Objective:** Prove the CPU can detect and evade live threats (tri-shot bolts, planted bombs, laser beams).
+**Method:** Add threat vectors to `cpu_decide` — scan projectiles/bombs, penalize directions into blast/beam paths.
+**Result:** CPU survives power-up engagements that previously killed it.
+
+### Spike 5: Power-Up Offensive Usage ✅
+**Objective:** Prove `should_fire` can create kill opportunities from held power-ups.
+**Method:** Fire laser/trishot when player is in line of fire; bomb when player is in blast radius.
+**Result:** CPU converts power-up pickups into player kills.
+
+### Spike 6: Chokepoint Intercept for Wall-Followers ✅
+**Objective:** Kill wall-follower opponents who are always >10 cells away (intercept range never triggers).
+**Method:** Predict which corner the player reaches next, cut across arena to lay a trail barrier.
+**Result:** Adaptive CPU wins vs wall-follower, not just parity.
+
 ## Key Finding (Post-Implementation)
 The original `score_direction`-driven approach (open-space maximising) was fundamentally incompatible with TRON survival. **Open space is a trap** — the wall-follow pattern is the actual survival strategy. The opponent model must MODIFY the survival strategy, not REPLACE it.
 
 ## Current Architecture (2026-08-04)
 1. **Cold start:** `wall_follow_decide` (same as naive opponent)
-2. **Adaptive mode:** wall-follow base + defensive avoidance (≤2 cells) + intercept (2-10 cells, confidence≥0.6) + adjacent food grab
-3. **Opponent model:** `PlayerBrain` with k-NN recall, confidence-weighted prediction, 5-frame lookahead
+2. **Adaptive mode:** wall-follow base + defensive avoidance (≤2 cells) + intercept (2-10 cells, confidence≥0.6) + adjacent food grab + projectile/bomb avoidance + power-up firing
+3. **Opponent model:** `PlayerBrain` with k-NN recall, confidence-weighted prediction, multi-frame iterative prediction
 4. **Cross-game persistence:** `shared_brain` accumulates episodes across games
-5. **Kill positioning:** intercept the predicted player path to create a trail barrier
+5. **Kill positioning:** intercept the predicted player path + chokepoint corner-cutting for wall-followers
+6. **Active food seeking:** BFS pathfinding to nearest food when safe
+7. **Deterministic benchmark:** seeded RNG for reliable measurement
 
 ## Success Metric
-Baseline shift: from **-8.6 moves / -8.1 food** to **~0.0 moves / ~0.0 food** (matches naive vs wall-follower).
+Baseline shift: from **-8.6 moves / -8.1 food** to **≥0 moves / ≥0 food** (beats naive vs wall-follower).
 **Held-out chaser: adaptive 100% wins vs naive ~4% wins** — the opponent model is decisively better against aggressive opponents.
