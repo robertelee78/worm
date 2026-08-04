@@ -924,79 +924,106 @@ pub fn cpu_decide(
         return wall_follow_decide(game, &game.cycles[1]);
     }
 
-    // Memory-driven: the base strategy is ALWAYS wall-follow (proven survival).
-    // The opponent model + k-NN memory only modify this base decision — they
-    // never replace it outright. This mirrors rps-ai where the prior blend
-    // prevents the memory from walking into a wall.
+    // Memory-driven: wall-follow is the base survival strategy. The opponent
+    // model adds two offensive layers on top:
+    //   1. KILL: when the predicted player path crosses ours, position to cut
+    //      them off (intercept) rather than avoid them.
+    //   2. FOOD: when food is adjacent and safe, deviate from the wall to grab it.
     //
-    // Strategy:
-    //   1. Start with the wall-follow direction (guaranteed safe).
-    //   2. Check the opponent model's predicted player position.
-    //   3. If the prediction is high-confidence AND the predicted position
-    //      threatens our wall-follow path, pick the safest alternative.
-    //   4. Otherwise, stay on the wall.
+    // The base wall-follow is never abandoned for a low-confidence prediction.
 
     let wall_dir = wall_follow_decide(game, &game.cycles[1]);
 
     // --- Opponent Model Prediction ---
     let tail = brain.player_tail.clone();
     let player_pred = predict_player_move(game, brain, &tail);
-
-    // Only consider deviating from wall-follow when the prediction is confident.
-    if player_pred.confidence < 0.4 {
-        return wall_dir;
-    }
-
-    // Where is the player predicted to be in 1-3 frames?
-    let (ph_x, ph_y) = game.cycles[0].head;
-    let (pdx, pdy) = player_pred.predicted_dir.as_delta();
     let cpu = &game.cycles[1];
     let (cx, cy) = cpu.head;
+    let (ph_x, ph_y) = game.cycles[0].head;
+    let (pdx, pdy) = player_pred.predicted_dir.as_delta();
 
-    // Check if the wall-follow direction leads us toward the predicted player
-    // position (a collision risk or a kill opportunity). If the wall-follow
-    // path is safe (predicted player is far), stay on the wall.
-    let mut min_dist = i16::MAX;
+    // Compute the player's predicted position 1-3 frames ahead.
+    let mut predicted_positions = Vec::new();
     for steps in 1..=3 {
-        let px = ph_x as i16 + pdx * steps;
-        let py = ph_y as i16 + pdy * steps;
-        let dist = (cx as i16 - px).abs() + (cy as i16 - py).abs();
-        min_dist = min_dist.min(dist as i16);
+        let px = (ph_x as i16 + pdx * steps).max(0).min((game.width - 1) as i16) as u16;
+        let py = (ph_y as i16 + pdy * steps).max(0).min((game.height - 1) as i16) as u16;
+        predicted_positions.push((px, py));
     }
 
-    // If the predicted player path comes within 3 cells, the wall-follow
-    // direction might lead to a head-on collision. Consider alternatives.
-    if min_dist > 4 {
-        return wall_dir;
-    }
-
-    // The predicted player is close. Evaluate all legal directions: stay on
-    // the wall if safe, otherwise pick the direction that maximises distance
-    // to the predicted player position.
-    let mut best_dir = wall_dir;
-    let mut best_score = f32::NEG_INFINITY;
-    for &d in &legal {
-        let (ddx, ddy) = d.as_delta();
-        let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16);
-        let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16);
-        // Distance from new position to predicted player position (1 step ahead).
-        let dist = (nx - (ph_x as i16 + pdx)).abs() + (ny - (ph_y as i16 + pdy)).abs();
-        // Prefer directions that keep us away from the predicted player.
-        // Wall-follow gets a bonus so we don't abandon the perimeter for no reason.
-        let wall_bonus = if d == wall_dir { 2.0 } else { 0.0 };
-        let score = dist as f32 + wall_bonus;
-        if score > best_score {
-            best_score = score;
-            best_dir = d;
+    // --- KILL: cut off the player's predicted path so they run into our trail ---
+    // We don't intercept head-on (that kills both). Instead we check if the
+    // player's predicted path will cross our trail in the next few frames.
+    // If so, we stay on course — the player will crash into us.
+    if player_pred.confidence >= 0.5 {
+        // Check if any predicted position is adjacent to our head — meaning
+        // the player will be forced into us if they follow their prediction.
+        for &(px, py) in &predicted_positions {
+            let dist = ((cx as i16 - px as i16).abs() + (cy as i16 - py as i16).abs()) as u16;
+            if dist <= 1 {
+                // Player is predicted to be adjacent — they're about to run
+                // into us. Stay on wall-follow; they'll crash.
+                return wall_dir;
+            }
         }
     }
 
-    // Anti-exploitation noise (rps-ai EXPLORE_RATE).
-    if rng_fn(0.0, 1.0) < EXPLORE_RATE {
-        return legal[(rng_fn(0.0, legal.len() as f32) as usize).min(legal.len() - 1)];
+    // --- FOOD: only grab food that's directly adjacent on our wall path ---
+    // Deviating from the wall-follow pattern for distant food is a death trap
+    // (the center fills with trails). Only grab food that's right next to us
+    // and doesn't require leaving the perimeter.
+    if let Some(&(fx, fy, _)) = game.food_items.iter().find(|&&(fx, fy, _)| {
+        ((fx as i16 - cx as i16).abs() + (fy as i16 - cy as i16).abs()) == 1
+    }) {
+        for &d in &legal {
+            let (ddx, ddy) = d.as_delta();
+            let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
+            let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
+            if (nx, ny) == (fx, fy) {
+                return d;
+            }
+        }
     }
 
-    best_dir
+    // --- DEFENSIVE: avoid predicted player when too close ---
+    if player_pred.confidence >= 0.4 {
+        let mut min_dist = i16::MAX;
+        for &(px, py) in &predicted_positions {
+            let dist = (cx as i16 - px as i16).abs() + (cy as i16 - py as i16).abs();
+            min_dist = min_dist.min(dist as i16);
+        }
+        if min_dist <= 3 {
+            // Predicted player is close. Evaluate alternatives to wall-follow.
+            let mut best_dir = wall_dir;
+            let mut best_score = f32::NEG_INFINITY;
+            for &d in &legal {
+                let (ddx, ddy) = d.as_delta();
+                let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
+                let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
+                // Distance from new position to nearest predicted player position.
+                let mut dmin = i16::MAX;
+                for &(px, py) in &predicted_positions {
+                    let dd = (nx as i16 - px as i16).abs() + (ny as i16 - py as i16).abs();
+                    dmin = dmin.min(dd as i16);
+                }
+                // Prefer directions that keep us away from the predicted player.
+                // Wall-follow gets a bonus so we don't abandon the perimeter.
+                let wall_bonus = if d == wall_dir { 2.0 } else { 0.0 };
+                let score = dmin as f32 + wall_bonus;
+                if score > best_score {
+                    best_score = score;
+                    best_dir = d;
+                }
+            }
+            // Anti-exploitation noise.
+            if rng_fn(0.0, 1.0) < EXPLORE_RATE {
+                return legal[(rng_fn(0.0, legal.len() as f32) as usize).min(legal.len() - 1)];
+            }
+            return best_dir;
+        }
+    }
+
+    // Default: stay on the wall.
+    wall_dir
 }
 
 /// Simple right-hand wall follower — the same strategy the naive benchmark
