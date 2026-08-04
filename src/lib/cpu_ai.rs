@@ -51,8 +51,10 @@ const MAX_EPISODES: usize = 800;
 
 pub const CPU_FEATURE_DIM: usize = 25;
 /// Dimensionality of the opponent-centric context vector. Slots 0..13 are
-/// coded; 13..16 are zero-padding (see encode_player_context).
-pub const PLAYER_FEATURE_DIM: usize = 16;
+/// coded; 13..29 encode a 4×4 player direction-transition matrix
+/// (previous direction → current direction, order-matters for corner patterns);
+/// 29..32 are zero-padding.
+pub const PLAYER_FEATURE_DIM: usize = 32;
 
 /// A learned episode: the situation vector, the direction that won from it, the
 /// reward that move earned (survival frames + food), and a monotonic seq.
@@ -448,7 +450,11 @@ pub fn encode_situation(game: &WormGame, brain: &CpuBrain) -> [f32; CPU_FEATURE_
 /// Phase depth is intentionally omitted here because the player's *intent*
 /// does not depend on the clock — it depends on topology. We rely on the
 /// global `WormGame::frame_count` implicitly via episode `seq` for recency.
-pub fn encode_player_context(game: &WormGame) -> [f32; PLAYER_FEATURE_DIM] {
+/// Encode a player-centric situation vector. The player's recent direction
+/// history (from `player_tail`) is encoded as a 4×4 transition matrix in slots
+/// 13..29: (prev_dir → curr_dir), capturing corner behaviour. This is the
+/// order-matters analogue of rps-ai's `bg` bigram block.
+pub fn encode_player_context(game: &WormGame, tail: &VecDeque<Direction>) -> [f32; PLAYER_FEATURE_DIM] {
     let mut vector = [0.0f32; PLAYER_FEATURE_DIM];
     let player = &game.cycles[0];
     let (hx, hy) = player.head;
@@ -475,6 +481,20 @@ pub fn encode_player_context(game: &WormGame) -> [f32; PLAYER_FEATURE_DIM] {
     let ph = game.cycles[1].head;
     let manhattan = ((ph.0 as i16 - hx as i16).abs() + (ph.1 as i16 - hy as i16).abs()) as f32;
     vector[12] = ((12.0 - manhattan).max(0.0)) / 12.0;
+
+    // 13..29 4×4 direction-transition matrix (prev_dir → curr_dir).
+    // rps-ai: "Transitions, e.g. 'RP,PP' — this is the block that carries order,
+    // which the frequency histogram below throws away."
+    // We use the player_tail (recent directions) to build observed transitions:
+    // for each adjacent pair (tail[i-1], tail[i]), increment the corresponding
+    // cell. This captures corner patterns like "Right→Up" (bottom-right corner).
+    let dirs_arr = [Direction::Up, Direction::Down, Direction::Left, Direction::Right];
+    let tail_vec: Vec<Direction> = tail.iter().copied().collect();
+    for w in tail_vec.windows(2) {
+        let from_idx = dirs_arr.iter().position(|&d| d == w[0]).unwrap_or(3);
+        let to_idx = dirs_arr.iter().position(|&d| d == w[1]).unwrap_or(3);
+        vector[13 + from_idx * 4 + to_idx] += 1.0;
+    }
 
     // L2-normalise
     let mut norm = 0.0f32;
@@ -673,7 +693,7 @@ fn aggregate_player(
 /// Public entry point: predict the player's next direction.
 pub fn predict_player_move(game: &WormGame, brain: &CpuBrain, tail: &VecDeque<Direction>) -> PlayerAggregate {
     let memory_size = brain.opp_brain.episodes.len();
-    let context = encode_player_context(game);
+    let context = encode_player_context(game, &brain.player_tail);
 
     if memory_size < COLD_START_EPISODES {
         return aggregate_player(&brain.opp_brain, &[], brain.opp_brain.seq, memory_size, tail);

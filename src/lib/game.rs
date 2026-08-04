@@ -95,6 +95,9 @@ pub struct Particle {
 pub struct LightCycle {
     pub head: (u16, u16),
     pub direction: Direction,
+    /// The direction the cycle was moving before this turn. Used by the CPU
+    /// opponent model to encode direction-transition patterns (corner behaviour).
+    pub prev_direction: Direction,
     pub color: (u8, u8, u8),
     pub alive: bool,
     pub is_player: bool,
@@ -113,6 +116,7 @@ impl LightCycle {
         Self {
             head: (x, y),
             direction: dir,
+            prev_direction: dir,
             color,
             alive: true,
             is_player,
@@ -130,6 +134,14 @@ impl LightCycle {
             (Direction::Left, Direction::Right) | (Direction::Right, Direction::Left) => {}
             _ => self.direction = new_dir,
         }
+    }
+
+    /// Record a direction change by snapshotting the current direction into
+    /// prev_direction before applying the new one. Called once per frame
+    /// from the game loop to track the player's actual movement history
+    /// (not just explicit changes), so the CPU model sees continuous motion.
+    pub fn snapshot_direction(&mut self) {
+        self.prev_direction = self.direction;
     }
 }
 
@@ -550,7 +562,7 @@ impl WormGame {
         // Encode the player-centric context and record the player's observed
         // next-direction so the k-NN opponent model can learn the transition.
         // (rps-ai learns from what the HUMAN played next, not what the AI did.)
-        let player_ctx = crate::cpu_ai::encode_player_context(self);
+        let player_ctx = crate::cpu_ai::encode_player_context(self, &self.cpu_brain.player_tail);
         crate::cpu_ai::record_player_episode(
             &mut self.cpu_brain,
             player_ctx,
