@@ -1,0 +1,21 @@
+[package]
+name = "worm"
+version = "2026.0.1"
+edition = "2021"
+
+[[bin]]
+name = "worm"
+path = "src/main.rs"
+
+[lib]
+name = "worm"
+path = "src/lib/mod.rs"
+
+[[bench]]
+name = "cpu_ai_bench"
+harness = false
+
+[dependencies]
+crossterm = "0.28"
+libc = "0.2"
+rand = "0.10.2"
