@@ -529,10 +529,7 @@ impl WormGame {
                 return false;
             }
         }
-        let cpu_dir = {
-            let herding = self.difficulty >= 3;
-            crate::cpu_ai::cpu_decide(self, herding)
-        };
+        let cpu_dir = crate::cpu_ai::cpu_decide(self);
         self.cycles[1].change_direction(cpu_dir);
 
         // Retract CPU tail first (unless owed growth cells) so the vacated cell
@@ -848,9 +845,9 @@ impl WormGame {
     pub fn advance_projectiles(&mut self) {
         let mut i = 0;
         while i < self.projectiles.len() {
-            let (x, y, dx, dy) = {
+            let (x, y) = {
                 let p = &self.projectiles[i];
-                (p.x as i16 + p.dx, p.y as i16 + p.dy, p.dx, p.dy)
+                (p.x as i16 + p.dx, p.y as i16 + p.dy)
             };
             let dead_cell = x < 0
                 || y < 0

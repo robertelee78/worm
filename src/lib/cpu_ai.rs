@@ -33,17 +33,10 @@ const DECAY_TAU: f32 = 150.0;     // exp(-age/DECAY_TAU)
 const MATCH_BONUS: f32 = 1.0;     // trailing-match re-rank multiplier
 const SUPPORT_TARGET: f32 = 5.0;  // effective-N full-support threshold
 const COLD_START_EPISODES: usize = 60;
-const MEMORY_BLEND_CAP: f32 = 0.2; // memory is a subtle refinement, not a primary driver — arena state changes every frame
-const TEMPERATURE: f32 = 0.5;     // sampling temperature
 const EXPLORE_RATE: f32 = 0.05;   // outright random legal throw rate
 const RECALL_K: usize = 16;
 const CLEAR_BIAS: f32 = 0.125;    // prior saturation point (1/8 bias over 4 dirs)
 const PRIOR_DECAY: f32 = 0.99;    // EMA prior (~100-round window)
-
-const FOOD_GRAB_RANGE: f32 = 10.0;    // cells: attract CPU toward food within this
-const FOOD_GRAB_WEIGHT: f32 = 150.0;  // scales (RANGE - dist); positive pull toward food
-const HUNT_RANGE: f32 = 14.0;    // cells: pursue the player head to try for the kill
-const HUNT_WEIGHT: f32 = 160.0;  // scales (HUNT_RANGE - dist); positive pull toward the player
 
 /// Retention cap — mirrors rps-ai's 5000 window. The seq counter keeps climbing
 /// past this; that is what recency decay ages against, NOT the episode count.
@@ -875,86 +868,6 @@ pub fn sample_with_temperature(
 
 /* --------------------------- move scoring --------------------------- */
 
-/// Score every legal direction from the CPU's current head by the survival+food+
-/// kill composite that the k-NN vote then re-weights. This is the TRON-specific
-/// reward function rps-ai's "next move that won" generalizes to.
-///
-///   score = survival       (safety floor — avoid walls/traps)
-///         + food_pull       (scoring — points come from eating food)
-///         + hunt_pull       (scoring — points come from killing the player)
-pub fn score_direction(game: &WormGame, dir: Direction, _herding: bool, predicted_player_dir: Direction, pred_confidence: f32) -> f32 {
-    let cpu = &game.cycles[1];
-    let (hx, hy) = cpu.head;
-    let (dx, dy) = dir.as_delta();
-    let nx = (hx as i16 + dx).max(0).min((game.width - 1) as i16) as u16;
-    let ny = (hy as i16 + dy).max(0).min((game.height - 1) as i16) as u16;
-    if !free_step(game, hx, hy, dir) {
-        return f32::NEG_INFINITY;
-    }
-
-    // Safety floor: open space from the destination, normalised by arena size.
-    // Keeps the CPU from boxing itself into a dead-end it can't escape.
-    let open = count_open_space(game, nx, ny);
-    let norm_open = open / (game.width as f32 * game.height as f32);
-
-    // Food pull: reward getting closer to the nearest food. Positive and bounded
-    // (FOOD_GRAB_RANGE * FOOD_GRAB_WEIGHT at the food itself), so it is a strong
-    // draw within range but can't outmuscle the safety floor enough to send the
-    // CPU through a wall.
-    let food_rep = nearest_food_scalar(game, nx, ny);
-    let food_pull = if food_rep <= FOOD_GRAB_RANGE {
-        (FOOD_GRAB_RANGE - food_rep) * FOOD_GRAB_WEIGHT
-    } else {
-        0.0
-    };
-
-    // Kill pull: pursuit the player's head for a win, but only at close range
-    // and with a weaker multiplier so it never overrides safety. The strong
-    // survival term (norm_open * 2000) always dominates at range.
-    let ph = game.cycles[0].head;
-    let hunt_rep = (nx as i16 - ph.0 as i16).unsigned_abs() as f32
-        + (ny as i16 - ph.1 as i16).unsigned_abs() as f32;
-    let hunt_pull = if hunt_rep <= 6.0 {
-        (6.0 - hunt_rep) * 200.0
-    } else {
-        0.0
-    };
-
-    // Intercept pull: reward moving towards where the player is predicted to be,
-    // but ONLY when it doesn't compromise survival. We scale this by prediction
-    // confidence (cold start → 0, warm memory → 1) and by the open space at the
-    // destination, so the CPU won't chase a prediction into a dead-end.
-    let (pdx, pdy) = predicted_player_dir.as_delta();
-    let predicted_px = (ph.0 as i16 + pdx * 3).max(0).min((game.width - 1) as i16) as u16;
-    let predicted_py = (ph.1 as i16 + pdy * 3).max(0).min((game.height - 1) as i16) as u16;
-    let intercept_rep = (nx as i16 - predicted_px as i16).unsigned_abs() as f32
-        + (ny as i16 - predicted_py as i16).unsigned_abs() as f32;
-    let intercept_pull = if intercept_rep <= HUNT_RANGE && pred_confidence > 0.3 {
-        // Open space at the destination: only pull if there's room to maneuver.
-        let dest_open = count_open_space(game, nx, ny) as f32;
-        dest_open / (game.width as f32 * game.height as f32)
-            * (HUNT_RANGE - intercept_rep)
-            * HUNT_WEIGHT
-            * 0.4
-            * pred_confidence
-    } else {
-        0.0
-    };
-
-    norm_open * 2000.0 + food_pull
-}
-
-fn nearest_food_scalar(game: &WormGame, nx: u16, ny: u16) -> f32 {
-    let mut best = 1000.0;
-    for f in &game.food_items {
-        let man = ((f.0 as i16 - nx as i16).abs() + (f.1 as i16 - ny as i16).abs()) as f32;
-        if man < best {
-            best = man;
-        }
-    }
-    best
-}
-
 /* ------------------------------ decide procedure ------------------------------ */
 
 /// Whether cell (x,y) is threatened by a live projectile.
@@ -1159,7 +1072,6 @@ fn beam_cells(game: &WormGame, hx: u16, hy: u16, dx: i16, dy: i16) -> Vec<(u16, 
 /// blended with a base-rate prior, temperature-sampled with 5% explore.
 pub fn cpu_decide(
     game: &mut WormGame,
-    herding: bool,
 ) -> Direction {
     let brain = &game.cpu_brain;
     let legal = legal_directions(game, &game.cycles[1]);
@@ -1185,14 +1097,11 @@ pub fn cpu_decide(
     // only modifies it defensively (avoid predicted collisions) and
     // opportunistically (grab adjacent food).
 
-    let wall_dir = wall_follow_decide(game, &game.cycles[1]);
-
     // --- Opponent Model Prediction (iterative multi-frame) ---
     let tail = brain.player_tail.clone();
     let player_pred = predict_player_move(game, brain, &tail);
     let cpu = &game.cycles[1];
     let (cx, cy) = cpu.head;
-    let (ph_x, ph_y) = game.cycles[0].head;
 
     // Iterative multi-frame prediction: predicts direction changes at corners.
     let predicted_positions = predict_player_positions_iterative(game, brain, &tail, 5);
@@ -1512,31 +1421,6 @@ pub fn wall_follow_decide(game: &WormGame, cpu: &LightCycle) -> Direction {
     current_dir
 }
 
-/// Score-based fallback for cold starts / low confidence: pick the highest-scoring
-/// legal direction, with a little noise so it isn't deterministic.
-pub fn score_based_decide(
-    game: &mut WormGame,
-    brain: &CpuBrain,
-    legal: &[Direction],
-    herding: bool,
-) -> Direction {
-    // Predict the player's move for the scoring function. On cold start the prediction
-    // will be a flat prior, defaulting to argmax (likely the player's current dir),
-    // which is acceptable for the survival-first fallback.
-    let tail = brain.player_tail.clone();
-    let pred = predict_player_move(game, brain, &tail).predicted_dir;
-    let mut best = legal[0];
-    let mut best_score = f32::NEG_INFINITY;
-    for &dir in legal {
-        let score = score_direction(game, dir, herding, pred, 0.0) + game.rng_f32(0.0, 0.5);
-        if score > best_score {
-            best_score = score;
-            best = dir;
-        }
-    }
-    best
-}
-
 /// Legal directions: no 180° reversal, in-bounds and free.
 pub fn legal_directions(game: &WormGame, cpu: &LightCycle) -> Vec<Direction> {
     let dirs = [Direction::Up, Direction::Down, Direction::Left, Direction::Right];
@@ -1684,7 +1568,6 @@ mod tests {
         // With a populated player_tail, the 4x4 transition matrix in slots
         // 13..29 should capture direction changes (e.g. Right -> Up).
         let game = WormGame::new();
-        let dirs = [Direction::Up, Direction::Right, Direction::Down, Direction::Left];
         let mut tail: VecDeque<Direction> = VecDeque::new();
 
         // Simulate the corner pattern: Right -> Up -> Left -> Down (clockwise)
