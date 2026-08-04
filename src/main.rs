@@ -103,6 +103,7 @@ fn main() -> std::io::Result<()> {
                     'a' => game.change_direction(Direction::Left),
                     's' => game.change_direction(Direction::Down),
                     'd' => game.change_direction(Direction::Right),
+                    ' ' => { let _ = game.fire_powerup(0); }
                     _ => {}
                 }
                 processed += 1;
