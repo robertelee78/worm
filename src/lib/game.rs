@@ -958,10 +958,12 @@ impl WormGame {
                              .find(|&&(px, py, _)| px as usize == x && py as usize == y)
                              .map(|&(_, _, k)| k)
                              .unwrap_or(PowerUpKind::Laser);
-                         let ch = match pu {
-                             PowerUpKind::Laser => '⚡',
-                             PowerUpKind::TriShot => '⚡',
-                         };
+                        let ch = match pu {
+                            PowerUpKind::Laser => '⚡',
+                            PowerUpKind::TriShot => '⚡',
+                            PowerUpKind::Bomb => '💣',
+                            PowerUpKind::WallPunch => '🔨',
+                        };
                          (200, 200, 0, ch)
                      }
                  };

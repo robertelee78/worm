@@ -842,29 +842,35 @@ pub fn score_direction(game: &WormGame, dir: Direction, _herding: bool, predicte
         0.0
     };
 
-    // Kill pull: actively pursue the player's head so the CPU scores the win,
-    // not just survival. Positive within HUNT_RANGE; lets the CPU cut the player
-    // off instead of orbiting. This is what makes it *play to win*.
+    // Kill pull: pursuit the player's head for a win, but only at close range
+    // and with a weaker multiplier so it never overrides safety. The strong
+    // survival term (norm_open * 2000) always dominates at range.
     let ph = game.cycles[0].head;
     let hunt_rep = (nx as i16 - ph.0 as i16).unsigned_abs() as f32
         + (ny as i16 - ph.1 as i16).unsigned_abs() as f32;
-    let hunt_pull = if hunt_rep <= HUNT_RANGE {
-        (HUNT_RANGE - hunt_rep) * HUNT_WEIGHT
+    let hunt_pull = if hunt_rep <= 6.0 {
+        (6.0 - hunt_rep) * 200.0
     } else {
         0.0
     };
 
-    // Intercept pull: reward moving towards where the player is predicted to be.
-    // This is scaled by the prediction confidence so that on cold-start (or when
-    // the opponent model is uncertain), the CPU does not blindly chase a guess
-    // into a dead-end — it falls back to pure survival scoring instead.
+    // Intercept pull: reward moving towards where the player is predicted to be,
+    // but ONLY when it doesn't compromise survival. We scale this by prediction
+    // confidence (cold start → 0, warm memory → 1) and by the open space at the
+    // destination, so the CPU won't chase a prediction into a dead-end.
     let (pdx, pdy) = predicted_player_dir.as_delta();
     let predicted_px = (ph.0 as i16 + pdx * 3).max(0).min((game.width - 1) as i16) as u16;
     let predicted_py = (ph.1 as i16 + pdy * 3).max(0).min((game.height - 1) as i16) as u16;
     let intercept_rep = (nx as i16 - predicted_px as i16).unsigned_abs() as f32
         + (ny as i16 - predicted_py as i16).unsigned_abs() as f32;
-    let intercept_pull = if intercept_rep <= HUNT_RANGE {
-        (HUNT_RANGE - intercept_rep) * HUNT_WEIGHT * 0.6 * pred_confidence
+    let intercept_pull = if intercept_rep <= HUNT_RANGE && pred_confidence > 0.3 {
+        // Open space at the destination: only pull if there's room to maneuver.
+        let dest_open = count_open_space(game, nx, ny) as f32;
+        dest_open / (game.width as f32 * game.height as f32)
+            * (HUNT_RANGE - intercept_rep)
+            * HUNT_WEIGHT
+            * 0.4
+            * pred_confidence
     } else {
         0.0
     };
@@ -884,6 +890,13 @@ fn nearest_food_scalar(game: &WormGame, nx: u16, ny: u16) -> f32 {
 }
 
 /* ------------------------------ decide procedure ------------------------------ */
+
+/// Heuristic for when the CPU should fire a held power-up. Currently
+/// returns false (no firing) — the opponent model learns survival, not
+/// power-up timing. This will be expanded once the power-up feature lands.
+pub fn should_fire(_game: &WormGame, _who: usize, _rng_fn: &mut impl FnMut(f32, f32) -> f32) -> bool {
+    false
+}
 
 /// Faithful to rps-ai's `think` + `decide`: memory-driven read, confidence-gated,
 /// blended with a base-rate prior, temperature-sampled with 5% explore.
