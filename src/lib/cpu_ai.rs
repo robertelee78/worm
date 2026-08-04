@@ -924,13 +924,10 @@ pub fn cpu_decide(
         return wall_follow_decide(game, &game.cycles[1]);
     }
 
-    // Memory-driven: wall-follow is the base survival strategy. The opponent
-    // model adds two offensive layers on top:
-    //   1. KILL: when the predicted player path crosses ours, position to cut
-    //      them off (intercept) rather than avoid them.
-    //   2. FOOD: when food is adjacent and safe, deviate from the wall to grab it.
-    //
-    // The base wall-follow is never abandoned for a low-confidence prediction.
+    // Memory-driven: wall-follow base + defensive avoidance + adjacent food.
+    // The wall-follow pattern is the survival strategy. The opponent model
+    // only modifies it defensively (avoid predicted collisions) and
+    // opportunistically (grab adjacent food).
 
     let wall_dir = wall_follow_decide(game, &game.cycles[1]);
 
@@ -950,27 +947,7 @@ pub fn cpu_decide(
         predicted_positions.push((px, py));
     }
 
-    // --- KILL: cut off the player's predicted path so they run into our trail ---
-    // We don't intercept head-on (that kills both). Instead we check if the
-    // player's predicted path will cross our trail in the next few frames.
-    // If so, we stay on course — the player will crash into us.
-    if player_pred.confidence >= 0.5 {
-        // Check if any predicted position is adjacent to our head — meaning
-        // the player will be forced into us if they follow their prediction.
-        for &(px, py) in &predicted_positions {
-            let dist = ((cx as i16 - px as i16).abs() + (cy as i16 - py as i16).abs()) as u16;
-            if dist <= 1 {
-                // Player is predicted to be adjacent — they're about to run
-                // into us. Stay on wall-follow; they'll crash.
-                return wall_dir;
-            }
-        }
-    }
-
     // --- FOOD: only grab food that's directly adjacent on our wall path ---
-    // Deviating from the wall-follow pattern for distant food is a death trap
-    // (the center fills with trails). Only grab food that's right next to us
-    // and doesn't require leaving the perimeter.
     if let Some(&(fx, fy, _)) = game.food_items.iter().find(|&&(fx, fy, _)| {
         ((fx as i16 - cx as i16).abs() + (fy as i16 - cy as i16).abs()) == 1
     }) {
@@ -984,37 +961,36 @@ pub fn cpu_decide(
         }
     }
 
-    // --- DEFENSIVE: avoid predicted player when too close ---
+    // --- DEFENSIVE: avoid predicted player when very close ---
+    // Only kicks in when the predicted player is about to collide with us.
+    // We pick the direction that maximises distance to the predicted player,
+    // with a strong wall-follow bonus so we don't abandon the perimeter
+    // unless there's a genuine collision risk.
     if player_pred.confidence >= 0.4 {
         let mut min_dist = i16::MAX;
         for &(px, py) in &predicted_positions {
             let dist = (cx as i16 - px as i16).abs() + (cy as i16 - py as i16).abs();
             min_dist = min_dist.min(dist as i16);
         }
-        if min_dist <= 3 {
-            // Predicted player is close. Evaluate alternatives to wall-follow.
+        if min_dist <= 2 {
             let mut best_dir = wall_dir;
             let mut best_score = f32::NEG_INFINITY;
             for &d in &legal {
                 let (ddx, ddy) = d.as_delta();
                 let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
                 let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
-                // Distance from new position to nearest predicted player position.
                 let mut dmin = i16::MAX;
                 for &(px, py) in &predicted_positions {
                     let dd = (nx as i16 - px as i16).abs() + (ny as i16 - py as i16).abs();
                     dmin = dmin.min(dd as i16);
                 }
-                // Prefer directions that keep us away from the predicted player.
-                // Wall-follow gets a bonus so we don't abandon the perimeter.
-                let wall_bonus = if d == wall_dir { 2.0 } else { 0.0 };
+                let wall_bonus = if d == wall_dir { 3.0 } else { 0.0 };
                 let score = dmin as f32 + wall_bonus;
                 if score > best_score {
                     best_score = score;
                     best_dir = d;
                 }
             }
-            // Anti-exploitation noise.
             if rng_fn(0.0, 1.0) < EXPLORE_RATE {
                 return legal[(rng_fn(0.0, legal.len() as f32) as usize).min(legal.len() - 1)];
             }
@@ -1022,7 +998,6 @@ pub fn cpu_decide(
         }
     }
 
-    // Default: stay on the wall.
     wall_dir
 }
 
