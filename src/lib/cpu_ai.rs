@@ -1054,7 +1054,7 @@ fn right_turn(dir: Direction) -> Direction {
 ///   - TriShot: player is within TRI_SHOT_RANGE cells
 ///   - Bomb: player is within BOMB_RADIUS_CELLS of current cell
 ///   - WallPunch: CPU is trapped (only 1 legal direction) — escape route
-pub fn should_fire(game: &WormGame, who: usize, rng_fn: &mut impl FnMut(f32, f32) -> f32) -> bool {
+pub fn should_fire(game: &mut WormGame, who: usize) -> bool {
     let kind = match game.cycles[who].held_powerup {
         Some(k) => k,
         None => return false,
@@ -1112,11 +1112,10 @@ fn beam_cells(game: &WormGame, hx: u16, hy: u16, dx: i16, dy: i16) -> Vec<(u16, 
 /// Faithful to rps-ai's `think` + `decide`: memory-driven read, confidence-gated,
 /// blended with a base-rate prior, temperature-sampled with 5% explore.
 pub fn cpu_decide(
-    game: &WormGame,
-    brain: &CpuBrain,
+    game: &mut WormGame,
     herding: bool,
-    rng_fn: &mut impl FnMut(f32, f32) -> f32,
 ) -> Direction {
+    let brain = &game.cpu_brain;
     let legal = legal_directions(game, &game.cycles[1]);
     if legal.is_empty() {
         return game.cycles[1].direction;
@@ -1374,8 +1373,8 @@ pub fn cpu_decide(
                     best_dir = d;
                 }
             }
-            if rng_fn(0.0, 1.0) < EXPLORE_RATE {
-                return legal[(rng_fn(0.0, legal.len() as f32) as usize).min(legal.len() - 1)];
+            if game.rng_f32(0.0, 1.0) < EXPLORE_RATE {
+                return legal[(game.rng_f32(0.0, legal.len() as f32) as usize).min(legal.len() - 1)];
             }
             return best_dir;
         }
@@ -1457,11 +1456,10 @@ pub fn wall_follow_decide(game: &WormGame, cpu: &LightCycle) -> Direction {
 /// Score-based fallback for cold starts / low confidence: pick the highest-scoring
 /// legal direction, with a little noise so it isn't deterministic.
 pub fn score_based_decide(
-    game: &WormGame,
+    game: &mut WormGame,
     brain: &CpuBrain,
     legal: &[Direction],
     herding: bool,
-    rng_fn: &mut impl FnMut(f32, f32) -> f32,
 ) -> Direction {
     // Predict the player's move for the scoring function. On cold start the prediction
     // will be a flat prior, defaulting to argmax (likely the player's current dir),
@@ -1471,7 +1469,7 @@ pub fn score_based_decide(
     let mut best = legal[0];
     let mut best_score = f32::NEG_INFINITY;
     for &dir in legal {
-        let score = score_direction(game, dir, herding, pred, 0.0) + rng_fn(0.0, 0.5);
+        let score = score_direction(game, dir, herding, pred, 0.0) + game.rng_f32(0.0, 0.5);
         if score > best_score {
             best_score = score;
             best = dir;

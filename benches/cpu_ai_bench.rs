@@ -135,8 +135,13 @@ enum Opponent {
 /// the cross-session persistence that rps-ai achieves via persistent storage.
 /// The returned `GameResult` includes the updated brain so it can be fed
 /// into the next game.
-fn run_single_game(cpu_adaptive: bool, opponent: Opponent, shared_brain: Option<worm::CpuBrain>) -> GameResult {
-    let mut game = WormGame::new();
+///
+/// `seed`: Optional RNG seed for deterministic benchmarks.
+fn run_single_game(cpu_adaptive: bool, opponent: Opponent, shared_brain: Option<worm::CpuBrain>, seed: Option<u64>) -> GameResult {
+    let mut game = match seed {
+        Some(s) => WormGame::with_seed(s),
+        None => WormGame::new(),
+    };
     // Inject the shared brain for adaptive runs to enable cross-game learning.
     if let Some(brain) = shared_brain {
         game.cpu_brain = brain;
@@ -185,6 +190,7 @@ fn main() {
     println!("===========================================================\n");
 
     const GAMES: usize = 100;
+    const SEED: u64 = 42; // Deterministic seed for reproducible benchmarks
 
     // --- FAMILIAR: wall-follower (for iterating, not evidence) ---
     println!("--- Familiar: wall-follower ---");
@@ -193,8 +199,8 @@ fn main() {
     let mut shared_brain = worm::CpuBrain::new();
 
     for i in 0..GAMES {
-        let n_result = run_single_game(false, Opponent::WallFollow, None);
-        let a_result = run_single_game(true, Opponent::WallFollow, Some(shared_brain));
+        let n_result = run_single_game(false, Opponent::WallFollow, None, Some(SEED + i as u64));
+        let a_result = run_single_game(true, Opponent::WallFollow, Some(shared_brain), Some(SEED + 1000 + i as u64));
         shared_brain = a_result.brain.expect("adaptive game should return its brain");
 
         naive.push(n_result.stats);
@@ -241,8 +247,8 @@ fn main() {
     let mut shared_brain2 = worm::CpuBrain::new();
 
     for i in 0..GAMES {
-        let n_result = run_single_game(false, Opponent::Chaser, None);
-        let a_result = run_single_game(true, Opponent::Chaser, Some(shared_brain2));
+        let n_result = run_single_game(false, Opponent::Chaser, None, Some(SEED + i as u64));
+        let a_result = run_single_game(true, Opponent::Chaser, Some(shared_brain2), Some(SEED + 1000 + i as u64));
         shared_brain2 = a_result.brain.expect("adaptive game should return its brain");
 
         naive2.push(n_result.stats);

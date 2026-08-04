@@ -1,5 +1,7 @@
 use std::time::Duration;
 use crossterm::terminal::size;
+use rand::rngs::StdRng;
+use rand::SeedableRng;
 
 pub const FRAME_DELAY_MS: u64 = 150;
 
@@ -171,6 +173,8 @@ pub struct WormGame {
     pub bombs: Vec<Bomb>,
     /// Frames until the next power-up spawn attempt.
     pub powerup_timer: u32,
+    /// Seeded RNG for deterministic benchmarks. None = thread RNG.
+    pub rng: Option<StdRng>,
 }
 
 #[derive(Clone)]
@@ -182,6 +186,28 @@ pub struct CPUPlayRecord {
 }
 
 impl WormGame {
+    /// Random range helper — uses seeded RNG when set, thread RNG otherwise.
+    pub fn rng_range<T, R>(&mut self, range: R) -> T
+    where
+        R: rand::distr::uniform::SampleRange<T>,
+        T: rand::distr::uniform::SampleUniform,
+    {
+        use rand::RngExt;
+        match self.rng.as_mut() {
+            Some(rng) => rng.random_range(range),
+            None => rand::rng().random_range(range),
+        }
+    }
+
+    /// Random float in [a, b) — uses seeded RNG when set, thread RNG otherwise.
+    pub fn rng_f32(&mut self, a: f32, b: f32) -> f32 {
+        use rand::RngExt;
+        match self.rng.as_mut() {
+            Some(rng) => rng.random_range(a..b),
+            None => rand::rng().random_range(a..b),
+        }
+    }
+
     pub fn new() -> Self {
         let dims = Dimensions::get_terminal_size();
 
@@ -230,6 +256,62 @@ impl WormGame {
             projectiles: Vec::new(),
             bombs: Vec::new(),
             powerup_timer: 60,
+            rng: None,
+        };
+        game.generate_food_items();
+        game
+    }
+
+    /// Create a game with a seeded RNG for deterministic benchmarks.
+    pub fn with_seed(seed: u64) -> Self {
+        let dims = Dimensions::get_terminal_size();
+
+        let center_x = dims.width / 2;
+        let center_y = dims.height / 2;
+        let spacing = 12;
+
+        let player = LightCycle::new(
+            center_x.saturating_sub(spacing),
+            center_y,
+            Direction::Right,
+            (0, 255, 255),
+            true,
+        );
+
+        let cpu = LightCycle::new(
+            center_x.saturating_add(spacing),
+            center_y,
+            Direction::Left,
+            (255, 0, 255),
+            false,
+        );
+
+        let width = dims.width;
+        let height = dims.height;
+        let grid = Self::build_grid(width, height);
+
+        let mut game = Self {
+            width,
+            height,
+            grid,
+            cycles: vec![player, cpu],
+            player: 0,
+            food_items: Vec::new(),
+            score: 0,
+            game_over: false,
+            particles: Vec::new(),
+            time: 0,
+            winner: None,
+            difficulty: 1,
+            frame_count: 0,
+            cpu_history: Vec::new(),
+            cpu_brain: crate::cpu_ai::CpuBrain::new(),
+            frames_since_cpu_move: 0,
+            powerups: Vec::new(),
+            projectiles: Vec::new(),
+            bombs: Vec::new(),
+            powerup_timer: 60,
+            rng: Some(StdRng::seed_from_u64(seed)),
         };
         game.generate_food_items();
         game
@@ -283,24 +365,22 @@ impl WormGame {
     /// so the board never has a fixed pattern — it stays "how many did we get"
     /// rather than a predictable spawn.
     pub fn generate_food_items(&mut self) {
-        use rand::RngExt;
-        let mut rng = rand::rng();
         // Food spawns inside the arena only — never in the outer corridor.
         let (xlo, xhi, ylo, yhi) = if self.has_corridor() {
             (4, self.width - 4, 4, self.height - 4)
         } else {
             (2, self.width.saturating_sub(2), 2, self.height.saturating_sub(2))
         };
-        let n = rng.random_range(1..=5);
+        let n = self.rng_range(1..=5);
         self.food_items.clear();
         for _ in 0..n {
             for _ in 0..200 {
-                let x = rng.random_range(xlo..xhi);
-                let y = rng.random_range(ylo..yhi);
+                let x = self.rng_range(xlo..xhi);
+                let y = self.rng_range(ylo..yhi);
                 if self.grid[y as usize][x as usize] == CellType::Empty
                     && !self.food_items.iter().any(|(fx, fy, _)| *fx == x && *fy == y)
                 {
-                    let num = rng.random_range(1..=9);
+                    let num = self.rng_range(1..=9);
                     self.food_items.push((x, y, num));
                     self.grid[y as usize][x as usize] = CellType::Food;
                     break;
@@ -310,10 +390,11 @@ impl WormGame {
         if self.food_items.is_empty() {
             // Guaranteed fallback so there is always food.
             for _ in 0..200 {
-                let x = rng.random_range(xlo..xhi);
-                let y = rng.random_range(ylo..yhi);
+                let x = self.rng_range(xlo..xhi);
+                let y = self.rng_range(ylo..yhi);
                 if self.grid[y as usize][x as usize] == CellType::Empty {
-                    self.food_items.push((x, y, rng.random_range(1..=9)));
+                    let num = self.rng_range(1..=9);
+                    self.food_items.push((x, y, num));
                     self.grid[y as usize][x as usize] = CellType::Food;
                     break;
                 }
@@ -322,20 +403,20 @@ impl WormGame {
     }
 
     fn add_impact_particles(&mut self, x: u16, y: u16, color: (u8, u8, u8)) {
-        use rand::RngExt;
-        let mut rng = rand::rng();
+        use std::f32::consts::TAU;
         for _ in 0..30 {
-            let angle: f32 = rng.random_range(0.0..std::f32::consts::TAU);
-            let speed = rng.random_range(0.5..2.5);
-            let hue_offset: f32 = rng.random_range(-30.0..30.0);
+            let angle: f32 = self.rng_f32(0.0, TAU);
+            let speed = self.rng_f32(0.5, 2.5);
+            let hue_offset: f32 = self.rng_f32(-30.0, 30.0);
             let base_hue = rgb_to_hue(color);
             let final_color = hsv_to_rgb((base_hue + hue_offset).rem_euclid(360.0), 0.9, 1.0);
+            let lifetime = self.rng_range(15..40);
             self.particles.push(Particle {
                 x: x as f32,
                 y: y as f32,
                 vx: angle.cos() * speed,
                 vy: angle.sin() * speed,
-                lifetime: rng.random_range(15..40),
+                lifetime,
                 color: final_color,
             });
         }
@@ -441,17 +522,17 @@ impl WormGame {
         }
 
         // CPU AI — faithful k-NN memory opponent (rps-ai mechanism).
-        use rand::RngExt;
-        let mut rng = rand::rng();
-        let mut rng_fn = |a: f32, b: f32| rng.random_range(a..b);
         // The CPU fires a held power-up when the heuristic sees a good shot.
-        if crate::cpu_ai::should_fire(self, 1, &mut rng_fn) {
+        if crate::cpu_ai::should_fire(self, 1) {
             self.fire_powerup(1);
             if self.game_over {
                 return false;
             }
         }
-        let cpu_dir = crate::cpu_ai::cpu_decide(self, &self.cpu_brain, self.difficulty >= 3, &mut rng_fn);
+        let cpu_dir = {
+            let herding = self.difficulty >= 3;
+            crate::cpu_ai::cpu_decide(self, herding)
+        };
         self.cycles[1].change_direction(cpu_dir);
 
         // Retract CPU tail first (unless owed growth cells) so the vacated cell
@@ -581,8 +662,7 @@ impl WormGame {
             self.powerup_timer -= 1;
         } else {
             self.spawn_powerup();
-            let mut rng = rand::rng();
-            self.powerup_timer = rng.random_range(80..160);
+            self.powerup_timer = self.rng_range(80..160);
         }
 
         true
@@ -876,21 +956,19 @@ impl WormGame {
 
     /// Spawn one random power-up on a free interior cell (never in the corridor).
     pub fn spawn_powerup(&mut self) {
-        use rand::RngExt;
         if self.powerups.len() >= MAX_POWERUPS_ON_BOARD {
             return;
         }
-        let mut rng = rand::rng();
         let (xlo, xhi, ylo, yhi) = if self.has_corridor() {
             (4, self.width - 4, 4, self.height - 4)
         } else {
             (2, self.width.saturating_sub(2), 2, self.height.saturating_sub(2))
         };
         for _ in 0..200 {
-            let x = rng.random_range(xlo..xhi);
-            let y = rng.random_range(ylo..yhi);
+            let x = self.rng_range(xlo..xhi);
+            let y = self.rng_range(ylo..yhi);
             if self.grid[y as usize][x as usize] == CellType::Empty {
-                let kind = match rng.random_range(0..4) {
+                let kind = match self.rng_range(0..4) {
                     0 => PowerUpKind::Laser,
                     1 => PowerUpKind::TriShot,
                     2 => PowerUpKind::Bomb,
