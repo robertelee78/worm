@@ -618,7 +618,11 @@ impl WormGame {
         self.winner = None;
         self.difficulty = 1;
         self.frame_count = 0;
-        self.cpu_brain = crate::cpu_ai::CpuBrain::new();
+        // Preserve the brain across restarts — this is in-game persistence.
+        // rps-ai: "what someone opens with is a habit, it is stored."
+        // The brain carries learned patterns from the previous game into the next,
+        // so the CPU starts the new game with experience. Only reset the
+        // CPU-sequence timer that gates recording (frames_since_cpu_move).
         self.frames_since_cpu_move = 0;
         self.cpu_history.clear();
         self.powerups.clear();
