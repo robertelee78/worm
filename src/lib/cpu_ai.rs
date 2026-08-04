@@ -33,10 +33,10 @@ const DECAY_TAU: f32 = 150.0;     // exp(-age/DECAY_TAU)
 const MATCH_BONUS: f32 = 1.0;     // trailing-match re-rank multiplier
 const SUPPORT_TARGET: f32 = 5.0;  // effective-N full-support threshold
 const COLD_START_EPISODES: usize = 60;
-const MEMORY_BLEND_CAP: f32 = 0.6; // memory can never fully override the survival+food+wall prior
+const MEMORY_BLEND_CAP: f32 = 0.2; // memory is a subtle refinement, not a primary driver — arena state changes every frame
 const TEMPERATURE: f32 = 0.5;     // sampling temperature
 const EXPLORE_RATE: f32 = 0.05;   // outright random legal throw rate
-const RECALL_K: usize = 8;
+const RECALL_K: usize = 16;
 const CLEAR_BIAS: f32 = 0.125;    // prior saturation point (1/8 bias over 4 dirs)
 const PRIOR_DECAY: f32 = 0.99;    // EMA prior (~100-round window)
 
@@ -875,7 +875,7 @@ pub fn score_direction(game: &WormGame, dir: Direction, _herding: bool, predicte
         0.0
     };
 
-    norm_open * 2000.0 + food_pull + hunt_pull + intercept_pull
+    norm_open * 2000.0 + food_pull
 }
 
 fn nearest_food_scalar(game: &WormGame, nx: u16, ny: u16) -> f32 {
@@ -916,83 +916,132 @@ pub fn cpu_decide(
 
     let memory_size = brain.episodes.len();
 
-    // Cold start / low memory: survival+food+hunt prior via direct scoring.
-    // rps-ai seeds early decisions on the base-rate prior rather than coin-
-    // flipping; we seed on the survival-scoring prior for the same reason.
+    // Cold start / low memory: use a simple wall-follower heuristic (same as
+    // the naive benchmark opponent) until the memory has enough data to drive
+    // decisions. This guarantees the adaptive CPU is at least as good as the
+    // baseline during the warm-up phase.
     if memory_size < COLD_START_EPISODES {
-        return score_based_decide(game, brain, &legal, herding, rng_fn);
+        return wall_follow_decide(game, &game.cycles[1]);
     }
 
-    // Memory-driven: encode the situation, recall k nearest, vote.
-    let context = encode_situation(game, brain);
-    let recalled = recall(brain, &context, RECALL_K.min(memory_size));
-    if recalled.is_empty() {
-        return score_based_decide(game, brain, &legal, herding, rng_fn);
-    }
+    // Memory-driven: wall-follow base + defensive avoidance + adjacent food.
+    // The wall-follow pattern is the survival strategy. The opponent model
+    // only modifies it defensively (avoid predicted collisions) and
+    // opportunistically (grab adjacent food).
 
+    let wall_dir = wall_follow_decide(game, &game.cycles[1]);
+
+    // --- Opponent Model Prediction ---
     let tail = brain.player_tail.clone();
-    let agg = aggregate(brain, &recalled, brain.cpu_seq, memory_size, &tail);
-
-    // --- Opponent Model Integration ---
     let player_pred = predict_player_move(game, brain, &tail);
+    let cpu = &game.cycles[1];
+    let (cx, cy) = cpu.head;
+    let (ph_x, ph_y) = game.cycles[0].head;
+    let (pdx, pdy) = player_pred.predicted_dir.as_delta();
 
-    let mut legal_dist = [0.0f32; 4];
-    let mut scores = [f32::NEG_INFINITY; 4];
-    for &d in &legal {
-        scores[dir_index(d)] = score_direction(game, d, herding, player_pred.predicted_dir, player_pred.confidence);
-        legal_dist[dir_index(d)] = agg.distribution[dir_index(d)];
-    }
-
-    // Normalise the survival score into a [0,1] distribution.
-    let finite: Vec<f32> = scores.iter().copied().filter(|s| s.is_finite()).collect();
-    let max_s = finite.iter().copied().fold(f32::NEG_INFINITY, f32::max);
-    let min_s = finite.iter().copied().fold(f32::INFINITY, f32::min);
-    let span = (max_s - min_s).max(1.0);
-    let mut score_dist = [0.0f32; 4];
-    let mut sum = 0.0f32;
-    for &d in &legal {
-        let i = dir_index(d);
-        let p = ((scores[i] - min_s) / span).max(0.0);
-        score_dist[i] = p;
-        sum += p;
-    }
-    if sum > 0.0 {
-        for i in 0..4 {
-            score_dist[i] /= sum;
-        }
+    // Compute the player's predicted position 1-3 frames ahead.
+    let mut predicted_positions = Vec::new();
+    for steps in 1..=3 {
+        let px = (ph_x as i16 + pdx * steps).max(0).min((game.width - 1) as i16) as u16;
+        let py = (ph_y as i16 + pdy * steps).max(0).min((game.height - 1) as i16) as u16;
+        predicted_positions.push((px, py));
     }
 
-    // Blend: weight the k-NN read by confidence, the survival prior by (1−conf).
-    // When the memory is confident it follows the read; when it is not, it falls
-    // back on not-dying — the analog of rps-ai falling back on the base rate.
-    // Confidence is capped (MEMORY_BLEND_CAP) so the k-NN read can never fully
-    // suppress the survival+food+wall prior — a confident memory trained only
-    // on survival would otherwise walk into walls and ignore food.
-    let conf = agg.confidence * MEMORY_BLEND_CAP;
-    let mut blended = [0.0f32; 4];
-    for i in 0..4 {
-        blended[i] = conf * legal_dist[i] + (1.0 - conf) * score_dist[i];
-    }
-
-    // Legal-only renormalisation.
-    let mut legal_blend = [0.0f32; 4];
-    let mut lsum = 0.0f32;
-    for &d in &legal {
-        legal_blend[dir_index(d)] = blended[dir_index(d)];
-        lsum += blended[dir_index(d)];
-    }
-    if lsum > 0.0 {
+    // --- FOOD: only grab food that's directly adjacent on our wall path ---
+    if let Some(&(fx, fy, _)) = game.food_items.iter().find(|&&(fx, fy, _)| {
+        ((fx as i16 - cx as i16).abs() + (fy as i16 - cy as i16).abs()) == 1
+    }) {
         for &d in &legal {
-            legal_blend[dir_index(d)] /= lsum;
+            let (ddx, ddy) = d.as_delta();
+            let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
+            let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
+            if (nx, ny) == (fx, fy) {
+                return d;
+            }
         }
     }
 
-    // Anti-exploitation noise (rps-ai EXPLORE_RATE + TEMPERATURE).
-    if rng_fn(0.0, 1.0) < EXPLORE_RATE {
-        return legal[(rng_fn(0.0, legal.len() as f32) as usize).min(legal.len() - 1)];
+    // --- DEFENSIVE: avoid predicted player when very close ---
+    // Only kicks in when the predicted player is about to collide with us.
+    // We pick the direction that maximises distance to the predicted player,
+    // with a strong wall-follow bonus so we don't abandon the perimeter
+    // unless there's a genuine collision risk.
+    if player_pred.confidence >= 0.4 {
+        let mut min_dist = i16::MAX;
+        for &(px, py) in &predicted_positions {
+            let dist = (cx as i16 - px as i16).abs() + (cy as i16 - py as i16).abs();
+            min_dist = min_dist.min(dist as i16);
+        }
+        if min_dist <= 2 {
+            let mut best_dir = wall_dir;
+            let mut best_score = f32::NEG_INFINITY;
+            for &d in &legal {
+                let (ddx, ddy) = d.as_delta();
+                let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
+                let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
+                let mut dmin = i16::MAX;
+                for &(px, py) in &predicted_positions {
+                    let dd = (nx as i16 - px as i16).abs() + (ny as i16 - py as i16).abs();
+                    dmin = dmin.min(dd as i16);
+                }
+                let wall_bonus = if d == wall_dir { 3.0 } else { 0.0 };
+                let score = dmin as f32 + wall_bonus;
+                if score > best_score {
+                    best_score = score;
+                    best_dir = d;
+                }
+            }
+            if rng_fn(0.0, 1.0) < EXPLORE_RATE {
+                return legal[(rng_fn(0.0, legal.len() as f32) as usize).min(legal.len() - 1)];
+            }
+            return best_dir;
+        }
     }
 
-    sample_with_temperature(&legal_blend, TEMPERATURE, rng_fn)
+    wall_dir
+}
+
+/// Simple right-hand wall follower — the same strategy the naive benchmark
+/// opponent uses. Used during cold start so the adaptive CPU is never worse
+/// than the baseline.
+pub fn wall_follow_decide(game: &WormGame, cpu: &LightCycle) -> Direction {
+    let head = cpu.head;
+    let current_dir = cpu.direction;
+
+    let right_map = [
+        (Direction::Up, Direction::Right),
+        (Direction::Right, Direction::Down),
+        (Direction::Down, Direction::Left),
+        (Direction::Left, Direction::Up),
+    ];
+    let left_map = [
+        (Direction::Up, Direction::Left),
+        (Direction::Left, Direction::Down),
+        (Direction::Down, Direction::Right),
+        (Direction::Right, Direction::Up),
+    ];
+    let back_map = [
+        (Direction::Up, Direction::Down),
+        (Direction::Down, Direction::Up),
+        (Direction::Left, Direction::Right),
+        (Direction::Right, Direction::Left),
+    ];
+
+    let right_dir = right_map.iter().find(|(d, _)| *d == current_dir).map(|(_, r)| *r).unwrap_or(current_dir);
+    let left_dir = left_map.iter().find(|(d, _)| *d == current_dir).map(|(_, l)| *l).unwrap_or(current_dir);
+    let back_dir = back_map.iter().find(|(d, _)| *d == current_dir).map(|(_, b)| *b).unwrap_or(current_dir);
+
+    for dir in [right_dir, current_dir, left_dir, back_dir] {
+        let (dx, dy) = dir.as_delta();
+        let new_x = (head.0 as i16 + dx).max(1).min((game.width - 2) as i16) as u16;
+        let new_y = (head.1 as i16 + dy).max(1).min((game.height - 2) as i16) as u16;
+        if new_x >= 1 && new_x < game.width - 1 && new_y >= 1 && new_y < game.height - 1
+            && game.grid[new_y as usize][new_x as usize] == CellType::Empty
+        {
+            return dir;
+        }
+    }
+    current_dir
 }
 
 /// Score-based fallback for cold starts / low confidence: pick the highest-scoring

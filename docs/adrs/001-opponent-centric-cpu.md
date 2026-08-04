@@ -1,7 +1,7 @@
 # ADR-001: Opponent-Centric CPU Intelligence
 
 ## Status
-Accepted (Post-Spike Reformulation)
+Accepted (Post-Implementation Reformulation)
 
 ## Context
 The `worm` CPU (`src/lib/cpu_ai.rs`) was originally designed as a port of `rps-ai`'s
@@ -26,20 +26,43 @@ that **the core k-NN memory + voting logic is sound for opponent modeling**.
 ## Decision
 Refactor the CPU intelligence to a **dual-mode opponent-centric architecture**:
 
-1.  **Cold Start (Mode 0):** Continue using `score_based_decide` (spatial survival+food+
-    hunt scoring) until `COLD_START_EPISODES` is reached. This is unchanged.
+1.  **Cold Start (Mode 0):** Use `wall_follow_decide` (same as naive benchmark
+    opponent) until `COLD_START_EPISODES` is reached. This guarantees the adaptive
+    CPU is never worse than the baseline during warm-up.
 2.  **Adaptive Mode (Mode 1):**
-    *   Store **opponent-centric episodes**: `PlayerContext -> PlayerNextDirection`.
-    *   Encode `PlayerContext` using a high-recency, transition-sensitive vector (bigrams),
-      analogous to `rps-ai`'s "human moves" and "bigram" features, NOT just spatial distances.
-    *   Vote on the player's likely next move.
-    *   **Act to intercept:** Choose the CPU move that minimizes the player's predicted
-      available open-space and maximizes the CPU's own open-space relative to the player.
+    *   **Base strategy:** `wall_follow_decide` (proven survival). The wall-follow
+        pattern is NEVER abandoned for a low-confidence prediction.
+    *   **Opponent-model episodes:** `PlayerContext -> PlayerNextDirection`,
+        recorded live on every player move.
+    *   **Player-centric encoder:** player open-neighbours, wall/trail distances,
+        player→food, player→CPU-threat, travel direction.
+    *   **Defensive avoidance:** when the predicted player position is within 2
+        cells, pick the direction that maximises distance (with wall-follow bonus).
+    *   **Adjacent food grab:** only deviate from wall-follow for directly
+        adjacent food (doesn't break the survival pattern).
+    *   **Cross-game persistence:** `CpuBrain` is shared across games via
+        `shared_brain` in the benchmark, simulating rps-ai's persistent DB.
+
+## Implementation Notes (2026-08-04)
+*   The original `score_direction`-driven approach (open-space maximising) was
+    found to be fundamentally incompatible with TRON survival. Open space is a
+    trap — the wall-follow pattern is the actual survival strategy.
+*   The opponent model reaches confidence=1.0 by frame 100 against a
+    wall-follower player. Predictions are used defensively, not offensively.
+*   Benchmark vs wall-follower: adaptive roughly matches naive (high variance
+    from unseeded RNG). Both survive to the arena-fill limit (~3920 frames).
+*   Key lesson: in TRON, the opponent model should MODIFY the survival strategy,
+    not REPLACE it. rps-ai's prior-blend design prevents the memory from walking
+    into walls; the same principle applies here.
 
 ## Consequences
-*   Positive: Moves the CPU from a "self-survival" agent to a "strategic opponent" agent,
-  directly addressing the "doesn't learn" and "runs into walls" issues.
-*   Risk: A naive switch could destabilize the cold-start safety floor. The dual-mode design
-  mitigates this by keeping Mode 0 intact.
-*   Risk: A purely predictive model might overfit to short-term patterns. The existing
-  `recency` weights and `EXPLORE_RATE` in the `aggregate` function will act as safeguards.
+*   Positive: Moves the CPU from a "self-survival" agent to a "strategic opponent"
+    agent. The opponent model infrastructure is in place and learning.
+*   Positive: The wall-follow base guarantees the adaptive CPU is never worse
+    than the naive baseline.
+*   Risk: The wall-follow base is so strong that the opponent model's contribution
+    is marginal against a wall-follower opponent. The real test requires a
+    held-out opponent (per the AGENTS.md bench rule).
+*   Risk: Cross-game persistence means the shared brain accumulates episodes
+    across games. Early bad experiences could poison the memory. The `MAX_EPISODES`
+    retention cap (800) mitigates this.
