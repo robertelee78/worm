@@ -967,16 +967,45 @@ pub fn cpu_decide(
         predicted_positions.push((px, py));
     }
 
-    // --- FOOD: only grab food that's directly adjacent on our wall path ---
-    if let Some(&(fx, fy, _)) = game.food_items.iter().find(|&&(fx, fy, _)| {
-        ((fx as i16 - cx as i16).abs() + (fy as i16 - cy as i16).abs()) == 1
-    }) {
-        for &d in &legal {
-            let (ddx, ddy) = d.as_delta();
-            let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
-            let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
-            if (nx, ny) == (fx, fy) {
-                return d;
+    // --- FOOD: grab food that's on our wall-follow path ---
+    // Only deviate for food that's already in our path — we don't abandon the
+    // perimeter. Two tiers:
+    //   1. Food directly adjacent (1 cell) in a legal direction — grab it.
+    //   2. Food up to 3 cells ahead along the wall-follow axis — keep going.
+    if !game.food_items.is_empty() {
+        // Tier 1: adjacent food in a legal direction.
+        if let Some(&(fx, fy, _)) = game.food_items.iter().find(|&&(fx, fy, _)| {
+            ((fx as i16 - cx as i16).abs() + (fy as i16 - cy as i16).abs()) == 1
+        }) {
+            for &d in &legal {
+                let (ddx, ddy) = d.as_delta();
+                let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
+                let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
+                if (nx, ny) == (fx, fy) {
+                    return d;
+                }
+            }
+        }
+
+        // Tier 2: food up to 3 cells ahead along the wall-follow axis.
+        // Safe because wall-follow already goes that direction — we're just
+        // confirming the food is on the path we're taking anyway.
+        if free_step(game, cx, cy, wall_dir) {
+            let mut nearest: Option<f32> = None;
+            for &(fx, fy, _) in &game.food_items {
+                let on_axis = match wall_dir {
+                    Direction::Up | Direction::Down => fx == cx,
+                    Direction::Left | Direction::Right => fy == cy,
+                };
+                if !on_axis { continue; }
+                let dist = ((fx as i16 - cx as i16).abs() + (fy as i16 - cy as i16).abs()) as f32;
+                if dist < 1.0 || dist > 3.0 { continue; }
+                if nearest.is_none() || dist < nearest.unwrap() {
+                    nearest = Some(dist);
+                }
+            }
+            if nearest.is_some() {
+                return wall_dir;
             }
         }
     }
