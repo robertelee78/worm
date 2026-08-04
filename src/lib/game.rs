@@ -61,7 +61,9 @@ pub enum PowerUpKind {
     WallPunch,
 }
 
-/// A live tri-shot bolt.
+/// A live tri-shot bolt. `from` is the cycle that fired it — bolts can never
+/// hit their own firer (the bolt spawns on the head and would otherwise land
+/// on the head's next cell the same frame).
 #[derive(Clone, Debug)]
 pub struct Projectile {
     pub x: u16,
@@ -69,6 +71,7 @@ pub struct Projectile {
     pub dx: i16,
     pub dy: i16,
     pub steps_left: u8,
+    pub from: u8,
 }
 
 /// A planted bomb counting down to detonation.
@@ -468,10 +471,30 @@ impl WormGame {
 
         // Player collision
         if player_crashed {
+            // True head-on: the player rams the CPU's head cell while the CPU
+            // simultaneously steps into the player's head cell. Both die -> draw
+            // (the sequential player-first check would otherwise hand the CPU
+            // the win). The CPU's intended move is taken from its current
+            // direction; cpu_decide preserves it in every non-turn frame.
+            let cpu_rams_back = self.cycles[1].alive
+                && player_new == self.cycles[1].head
+                && {
+                    let cy = &self.cycles[1];
+                    let (dx, dy) = cy.direction.as_delta();
+                    let nx = (cy.head.0 as i16 + dx).max(0).min((self.width - 1) as i16) as u16;
+                    let ny = (cy.head.1 as i16 + dy).max(0).min((self.height - 1) as i16) as u16;
+                    (nx, ny) == self.cycles[0].head
+                };
             self.add_impact_particles(player_new.0, player_new.1, self.cycles[self.player].color);
+            if cpu_rams_back {
+                self.add_impact_particles(self.cycles[1].head.0, self.cycles[1].head.1, self.cycles[1].color);
+                self.cycles[1].alive = false;
+                self.winner = None;
+            } else {
+                self.winner = Some(1);
+            }
             self.cycles[self.player].alive = false;
             self.game_over = true;
-            self.winner = Some(1);
             play_beep_sequence(&[440, 330, 220, 110], &[100, 100, 100, 200]);
             return false;
         }
@@ -558,13 +581,21 @@ impl WormGame {
 
         // CPU collision
         if cpu_crashed {
+            // Both entered the same cell this frame: the player's crash check
+            // ran first and the cell was empty then, so the player moved in,
+            // and the CPU then stepped into the same cell. Both die -> draw.
+            let same_cell = self.cycles[0].alive && cpu_new == self.cycles[0].head;
             // Learn: the chosen direction died immediately (reward 0).
             let obs = crate::cpu_ai::encode_situation(self, &self.cpu_brain);
             crate::cpu_ai::record_episode(&mut self.cpu_brain, obs, cpu_dir, 0, 0);
             self.add_impact_particles(cpu_new.0, cpu_new.1, self.cycles[1].color);
+            if same_cell {
+                self.add_impact_particles(self.cycles[0].head.0, self.cycles[0].head.1, self.cycles[0].color);
+                self.cycles[0].alive = false;
+            }
             self.cycles[1].alive = false;
             self.game_over = true;
-            self.winner = Some(0);
+            self.winner = if same_cell { None } else { Some(0) };
             play_beep_sequence(&[440, 330, 220, 110], &[100, 100, 100, 200]);
             return false;
         }
@@ -786,6 +817,7 @@ impl WormGame {
                         dx: ddx,
                         dy: ddy,
                         steps_left: TRI_SHOT_RANGE,
+                        from: who as u8,
                     });
                 }
                 play_beep(1200, 40);
@@ -845,9 +877,9 @@ impl WormGame {
     pub fn advance_projectiles(&mut self) {
         let mut i = 0;
         while i < self.projectiles.len() {
-            let (x, y) = {
+            let (x, y, from) = {
                 let p = &self.projectiles[i];
-                (p.x as i16 + p.dx, p.y as i16 + p.dy)
+                (p.x as i16 + p.dx, p.y as i16 + p.dy, p.from)
             };
             let dead_cell = x < 0
                 || y < 0
@@ -859,7 +891,10 @@ impl WormGame {
                 continue;
             }
             let (ux, uy) = (x as u16, y as u16);
-            let hit = (0..2).find(|&c| self.cycles[c].alive && self.cycles[c].head == (ux, uy));
+            let hit = (0..2).find(|&c| {
+                let c = c as u8;
+                c != from && self.cycles[c as usize].alive && self.cycles[c as usize].head == (ux, uy)
+            });
             if let Some(c) = hit {
                 self.add_impact_particles(ux, uy, self.cycles[c].color);
                 self.cycles[c].alive = false;
