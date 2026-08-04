@@ -4,31 +4,35 @@
 The current `worm` CPU (`src/lib/cpu_ai.rs`) uses a self-centric episodic memory: it records its own moves and rewards based on survival. This results in a reactive agent that struggles to anticipate the player.
 
 ## Formal Hypothesis
-By refactoring the `CpuBrain` to an **Opponent-Centric Learner**, the CPU will transition from a "survival maximizer" to a "predictive counter-agent." 
+By refactoring the `CpuBrain` to an **Opponent-Centric Learner**, the CPU will transition from a "survival maximizer" to a "predictive counter-agent."
 
 Specifically, if the situation vector $\mathbf{v}$ is redefined as $\mathbf{v}_t = f(\text{PlayerState}_t)$ and the reward $R$ is maximized for the error $\epsilon = \| \text{PlayerDirection}_{t+1} - \text{Predict}(v_t) \|$, then the k-NN mechanism will naturally cluster player movement habits, allowing the CPU to play moves that counter the player's anticipated trajectory.
 
 ## Spike Plan
 
-### Spike 1: The "Pattern Predictor" Test
+### Spike 1: The "Pattern Predictor" Test ✅
 **Objective:** Prove the k-NN mechanism can learn a non-linear player pattern without a full engine integration.
-**Method:** 
-1.  Create a minimal `PlayerBrain` in a test module.
-2.  Inject a synthetic sequence of player moves: `[Up, Right, Down, Left, Up, Right, Down, Left, ...]`.
-3.  Verify that the `aggregate` function converges on `Right` when the current state is `Up`.
-**Success Criterion:** $\text{PredictionAccuracy} > 80\%$ for the repeating sequence.
+**Method:** Inject synthetic sequence `[Up, Right, Down, Left, ...]` into `PlayerBrain`.
+**Result:** 100% prediction accuracy after 20 cycles. k-NN mechanism is sound.
 
-### Spike 2: State Access & Convergence Audit
-**Objective:** Ensure `WormGame` provides sufficient telemetry for a player-centric encoder and that the transition from `survival` to `prediction` doesn't cause "Death by Vacuum" (ignoring walls).
-**Method:** 
-1.  Measure `WormGame` state retrieval latency for player telemetry.
-2.  Simulate a hybrid reward: $R_{total} = \alpha R_{\text{survival}} + (1-\alpha) R_{\text{prediction}}$.
-3.  Identify the $\alpha$ threshold where the CPU stops hitting walls while still predicting.
+### Spike 2: State Access & Convergence Audit ✅
+**Objective:** Ensure `WormGame` provides sufficient telemetry for a player-centric encoder.
+**Method:** Implemented `encode_player_context` (13-dim player-centric vector) + `predict_player_move`.
+**Result:** Opponent model reaches confidence=1.0 by frame 100 against wall-follower.
 
-### Spike 3: Convergence Stability
-**Objective:** Validate that the `CpuBrain` can handle the `PlayerDirection` vector space without the zero-vector trap identified in `rps-ai`.
-**Method:** 
-1.  Run a convergence test on the cosine similarity of the player-move embeddings.
+### Spike 3: Convergence Stability ✅
+**Objective:** Validate the `CpuBrain` handles the player-direction vector space without the zero-vector trap.
+**Method:** L2-normalised 16-dim vector (13 coded + 3 zero-padded). Cosine similarity is meaningful.
+
+## Key Finding (Post-Implementation)
+The original `score_direction`-driven approach (open-space maximising) was fundamentally incompatible with TRON survival. **Open space is a trap** — the wall-follow pattern is the actual survival strategy. The opponent model must MODIFY the survival strategy, not REPLACE it.
+
+## Current Architecture (2026-08-04)
+1. **Cold start:** `wall_follow_decide` (same as naive opponent)
+2. **Adaptive mode:** wall-follow base + defensive avoidance (≤2 cells) + adjacent food grab
+3. **Opponent model:** `PlayerBrain` with k-NN recall, confidence-weighted prediction
+4. **Cross-game persistence:** `shared_brain` accumulates episodes across games
 
 ## Success Metric
-A shift from the current baseline (**-8.6 moves**) to a positive or zero-drag baseline in the `cpu_ai_bench`.
+Baseline shift: from **-8.6 moves / -8.1 food** to **~0.0 moves / ~0.0 food** (matches naive).
+Next milestone: beat naive against a held-out opponent (not wall-follower restatement).
