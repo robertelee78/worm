@@ -939,9 +939,9 @@ pub fn cpu_decide(
     let (ph_x, ph_y) = game.cycles[0].head;
     let (pdx, pdy) = player_pred.predicted_dir.as_delta();
 
-    // Compute the player's predicted position 1-3 frames ahead.
+    // Compute the player's predicted position 1-5 frames ahead.
     let mut predicted_positions = Vec::new();
-    for steps in 1..=3 {
+    for steps in 1..=5 {
         let px = (ph_x as i16 + pdx * steps).max(0).min((game.width - 1) as i16) as u16;
         let py = (ph_y as i16 + pdy * steps).max(0).min((game.height - 1) as i16) as u16;
         predicted_positions.push((px, py));
@@ -957,6 +957,68 @@ pub fn cpu_decide(
             let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
             if (nx, ny) == (fx, fy) {
                 return d;
+            }
+        }
+    }
+
+    // --- INTERCEPT: position to create a trail barrier across the player's path ---
+    // When the prediction is confident and the player is within intercept range,
+    // move toward the player's predicted future position. The CPU passes through
+    // it, leaving a trail the player crashes into. Against wall-followers this
+    // triggers at the corners where both cycles converge; against chasers it
+    // triggers constantly because the player is always approaching.
+    if player_pred.confidence >= 0.6 {
+        // Target: where the player will be in 3-5 frames.
+        // Use the 3-frame prediction as the primary target (reachable),
+        // but accept 4-5 frame targets if 3-frame is too close.
+        let mut best_intercept: Option<(u16, u16, f32)> = None;
+        for (i, &(px, py)) in predicted_positions.iter().enumerate().skip(1) {
+            let frames_ahead = (i + 1) as f32; // 2, 3, 4, 5
+            let dist = ((cx as i16 - px as i16).abs() + (cy as i16 - py as i16).abs()) as f32;
+            // Score: closer target + fewer frames ahead = easier intercept.
+            let score = 20.0 - dist - frames_ahead * 2.0;
+            if best_intercept.is_none() || score > best_intercept.unwrap().2 {
+                best_intercept = Some((px, py, score));
+            }
+        }
+
+        if let Some((target_px, target_py, _)) = best_intercept {
+            let dist_to_target = ((cx as i16 - target_px as i16).abs()
+                + (cy as i16 - target_py as i16).abs()) as u16;
+
+            // Intercept range: 2-10 cells. Too close risks head-on,
+            // too far means we can't reach it in time.
+            if dist_to_target >= 2 && dist_to_target <= 10 {
+                let mut best_dir = wall_dir;
+                let mut best_score = f32::NEG_INFINITY;
+                for &d in &legal {
+                    let (ddx, ddy) = d.as_delta();
+                    let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
+                    let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
+
+                    // Distance from new position to intercept point (lower = closer).
+                    let intercept_dist = ((nx as i16 - target_px as i16).abs()
+                        + (ny as i16 - target_py as i16).abs()) as f32;
+
+                    // Open space from destination (higher = safer).
+                    let open = count_open_space(game, nx, ny) as f32;
+                    let norm_open = open / (game.width as f32 * game.height as f32);
+
+                    // Score: prefer closer to intercept + more open space.
+                    // Wall-follow gets a bonus so we don't abandon the wall
+                    // for a marginal intercept.
+                    let wall_bonus = if d == wall_dir { 1.0 } else { 0.0 };
+                    let score = (15.0 - intercept_dist) * 0.6 + norm_open * 3.0 + wall_bonus;
+
+                    if score > best_score {
+                        best_score = score;
+                        best_dir = d;
+                    }
+                }
+                // Only take the intercept if it's meaningfully better than wall-follow.
+                if best_dir != wall_dir && best_score > 5.0 {
+                    return best_dir;
+                }
             }
         }
     }
