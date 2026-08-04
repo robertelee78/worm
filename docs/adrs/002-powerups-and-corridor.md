@@ -34,7 +34,7 @@ Center  — play arena         (Empty, grows/shrinks with terminal size)
 
 | Power-up | Behaviour | Range / Radius |
 |---|---|---|
-| **Laser** | Hitscan beam along the facing axis. Kills on head contact, detonates bombs in path, passes through trails/holes, **stops at the first wall**. Does not sever the shooter's own trail. | Line-of-sight |
+| **Laser** | Hitscan beam along the facing axis that **bounces off arena walls** (ring 2), reflecting the orthogonal component — so a beam fired right off the right arena wall comes back left. Can pass through Holes (punched arena walls) and trails, detonates bombs in path, and stops at the outer frame (ring 0). Max 4 bounces prevents pathological loops. | Line-of-sight + ricochet |
 | **TriShot** | Three projectiles (straight + two diagonals). Each is a `Projectile` with `owner` — they pass through their shooter's head but kill/sever any other target. Bolts die in walls at range 7 steps. | 7 cells (`TRI_SHOT_RANGE`) |
 | **Bomb** | Planted at the current cell. After a 3 s fuse, detonates with Chebyshev radius 10: kills heads inside, clears trails/food/power-ups, **severes** surviving opponents' tails (same missile sever rule), and **chains** into other armed bombs. | 10 cells (`BOMB_RADIUS_CELLS`) |
 | **WallPunch** | Fires to the first wall cell. If it is the punchable arena wall (ring 2), opens a permanent `Hole` — a corridor gateway. Never punches the outer frame (ring 0). | Until ring 2 |
@@ -72,9 +72,21 @@ episode memory (ADR-001) can learn from:
 - **WallPunch corridor usage** → route-choice prediction (flank vs. hold).
 - **Laser aim timing** → anticipation of the player's path.
 
-The corridor in particular transforms the spatial geometry: the open ring-1
-space gives both players an escape valve, making pure wall-hugging less
-dominant and rewarding predictive positioning.
+### 7. Laser wall-bounce
+
+The laser beam reflects off arena walls (ring 2) by reversing the direction
+component orthogonal to the struck wall segment:
+
+- Hitting a **left/right** arena wall (`x == 2` or `x == width - 3`) flips `dx`.
+- Hitting a **top/bottom** arena wall (`y == 2` or `y == height - 3`) flips `dy`.
+- Corner hits flip both. Max 4 bounces prevents infinite loops.
+- The **outer frame** (ring 0) is not an arena wall → beam stops there.
+- **Holes** are passable (not `CellType::Wall`) → beam continues through them.
+
+This gives the laser reach into corridor dead-ends and behind corners — a
+tactical tool for flushing opponents out of the pacman tunnel. The beam path
+is computed recursively in `beam_cells` (`src/lib/game.rs:747`).
+
 
 ## Consequences
 - **Positive:** Gameplay depth increases substantially. The CPU now has
@@ -93,12 +105,12 @@ dominant and rewarding predictive positioning.
 
 ## Bench
 ```
-Cargo bench --bench cpu_ai_bench  (100-game sample)
+Cargo bench --bench cpu_ai_bench  (100-game sample, post laser-bounce)
 
-Naive wall-follower:    survival = 55.0 moves (avg), food = 56.5 (avg), alive 93/100
-Adaptive memory CPU:    survival = 15.0 moves (avg), food = 16.5 (avg), alive 98/100
+Naive wall-follower:    survival = 72.0 moves (avg), food = 73.7 (avg), alive 93/100
+Adaptive memory CPU:    survival = 18.0 moves (avg), food = 19.3 (avg), alive 99/100
 
-Verdict: Adaptive CPU is flat/behind (-39.1 moves, -40.1 food) — needs reformulation
+Verdict: Adaptive CPU is flat/behind (-54.1 moves, -54.4 food) — needs reformulation
 ```
 
 The survival count (98 vs 93) is higher for adaptive, but average survival

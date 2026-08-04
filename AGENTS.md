@@ -50,10 +50,11 @@ The bench pits the adaptive CPU against scripted opponents and scores
    to familiar and spends it.
 4. A change ships only if the bench improves: adaptive must beat naive.
 
-Current baseline (2026-08-04): adaptive **-39.1 moves / -40.1 food** vs naive
-wall-follower (post power-ups + corridor in ADR-002). The corridor topology
-gives the naive bot escape routes the adaptive scorer doesn't value yet;
-the opponent-centric encoder (ADR-001) is the remedy, not a rollback.
+Current baseline (2026-08-04): adaptive **-54.1 moves / -54.4 food** vs naive
+wall-follower (post power-ups + corridor + laser-bounce). The corridor + bounces
+give the naive bot escape routes and accidental ricochet kills the adaptive
+scorer doesn't value yet — the opponent-centric encoder (ADR-001) is the remedy,
+not a rollback. CPU AI adaptation is a separate agent task.
 
 ## The mission: dual live memory
 

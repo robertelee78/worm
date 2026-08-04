@@ -223,6 +223,20 @@ fn test_laser_blocked_by_wall() {
 }
 
 #[test]
+fn test_laser_bounces_off_arena_wall() {
+    // Shooter near the left edge, facing right. The beam travels across the
+    // arena, bounces off the right arena wall (ring 2), and returns — hitting
+    // an opponent placed to the shooter's left (only reachable post-bounce).
+    let mut game = WormGame::new();
+    place_cycle(&mut game, 0, (4, 10), Direction::Right, &[]);
+    place_cycle(&mut game, 1, (3, 10), Direction::Right, &[]);
+    game.cycles[0].held_powerup = Some(PowerUpKind::Laser);
+    assert!(game.fire_powerup(0));
+    assert!(!game.cycles[1].alive, "opponent killed by a bounced beam");
+    assert_eq!(game.winner, Some(0));
+}
+
+#[test]
 fn test_laser_severs_trail_and_deducts_score() {
     let mut game = WormGame::new();
     place_cycle(&mut game, 0, (10, 10), Direction::Right, &[]);

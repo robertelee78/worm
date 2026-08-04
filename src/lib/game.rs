@@ -47,8 +47,9 @@ pub enum CellType {
 
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum PowerUpKind {
-    /// Hitscan beam along facing; kills the opponent on contact, detonates bombs
-    /// in its path, passes through trails and holes; stops at the first wall.
+    /// Hitscan beam along facing. Bounces off arena walls (ring 2) to reach
+    /// opponents hiding in corridors, detonates bombs in its path, passes
+    /// through trails/holes, stops at the outer frame. Consumed on use.
     Laser,
     /// Three bolts (straight + two diagonals), TRI_SHOT_RANGE cells each, die on walls.
     TriShot,
@@ -743,18 +744,35 @@ impl WormGame {
     }
 
     /// Cells a straight beam passes through, stopping before the first wall/frame.
+    /// Hitscan beam from (hx, hy) in direction (dx, dy). Bounces off arena walls
+    /// (ring 2) — reflecting the orthogonal component — but passes through
+    /// Holes (punched arena walls) and stops at the outer frame. A maximum
+    /// bounce count prevents infinite loops in pathological geometry.
     fn beam_cells(&self, hx: u16, hy: u16, dx: i16, dy: i16) -> Vec<(u16, u16)> {
         let mut out = Vec::new();
         let mut x = hx as i16;
         let mut y = hy as i16;
+        let mut rdx = dx;
+        let mut rdy = dy;
+        let mut bounces = 0;
         loop {
-            x += dx;
-            y += dy;
+            x += rdx;
+            y += rdy;
             if x < 0 || y < 0 || x >= self.width as i16 || y >= self.height as i16 {
                 break;
             }
             let (ux, uy) = (x as u16, y as u16);
-            if self.grid[uy as usize][ux as usize] == CellType::Wall {
+            let cell = self.grid[uy as usize][ux as usize];
+            if cell == CellType::Wall {
+                // Bounce only off arena walls (ring 2), not the outer frame (ring 0).
+                if bounces < 4 && self.is_arena_wall(ux, uy) {
+                    let on_left_right_wall = ux == 2 || ux == self.width - 3;
+                    let on_top_bottom_wall = uy == 2 || uy == self.height - 3;
+                    if on_left_right_wall && rdx != 0 { rdx = -rdx; }
+                    if on_top_bottom_wall && rdy != 0 { rdy = -rdy; }
+                    bounces += 1;
+                    continue;
+                }
                 break;
             }
             out.push((ux, uy));
