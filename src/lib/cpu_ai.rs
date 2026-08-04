@@ -306,6 +306,52 @@ pub fn count_open_space(game: &WormGame, start_x: u16, start_y: u16) -> f32 {
     count
 }
 
+/// BFS from (sx,sy) to find the nearest food item. Returns (direction_to_take, open_space_at_food).
+/// Only considers legal directions from the start, and checks that the food cell is reachable.
+fn bfs_nearest_food_dir(game: &WormGame, sx: u16, sy: u16, legal: &[Direction]) -> Option<(Direction, f32)> {
+    if game.food_items.is_empty() { return None; }
+
+    let mut visited = vec![vec![false; game.width as usize]; game.height as usize];
+    let mut queue: VecDeque<(u16, u16, Direction)> = VecDeque::new();
+
+    // Seed the queue with all legal first steps.
+    for &d in legal {
+        let (dx, dy) = d.as_delta();
+        let nx = (sx as i16 + dx).max(0).min((game.width - 1) as i16) as u16;
+        let ny = (sy as i16 + dy).max(0).min((game.height - 1) as i16) as u16;
+        if (nx, ny) != (sx, sy) {
+            visited[ny as usize][nx as usize] = true;
+            queue.push_back((nx, ny, d));
+        }
+    }
+
+    let dirs = [(0i16, -1i16), (0, 1), (-1, 0), (1, 0)];
+
+    while let Some((x, y, start_dir)) = queue.pop_front() {
+        // Check if this cell is food.
+        if game.grid[y as usize][x as usize] == CellType::Food {
+            let open = count_open_space(game, x, y);
+            return Some((start_dir, open));
+        }
+
+        // Expand neighbors.
+        for (dx, dy) in &dirs {
+            let nx = x as i16 + dx;
+            let ny = y as i16 + dy;
+            if nx >= 2 && nx < game.width as i16 - 2 && ny >= 2 && ny < game.height as i16 - 2 {
+                let (nx, ny) = (nx as u16, ny as u16);
+                if !visited[ny as usize][nx as usize]
+                    && game.grid[ny as usize][nx as usize] == CellType::Empty
+                {
+                    visited[ny as usize][nx as usize] = true;
+                    queue.push_back((nx, ny, start_dir));
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Per-direction Manhattan distance to the nearest food.
 fn nearest_food_distance(game: &WormGame, hx: u16, hy: u16, cap: f32) -> [f32; 4] {
     let dirs = [Direction::Up, Direction::Down, Direction::Left, Direction::Right];
@@ -1195,6 +1241,7 @@ pub fn cpu_decide(
     // perimeter. Two tiers:
     //   1. Food directly adjacent (1 cell) in a legal direction — grab it.
     //   2. Food up to 3 cells ahead along the wall-follow axis — keep going.
+    //   3. BFS pathfinding to nearest safe food (when open space is sufficient).
     if !game.food_items.is_empty() {
         // Tier 1: adjacent food in a legal direction.
         if let Some(&(fx, fy, _)) = game.food_items.iter().find(|&&(fx, fy, _)| {
@@ -1229,6 +1276,18 @@ pub fn cpu_decide(
             }
             if nearest.is_some() {
                 return wall_dir;
+            }
+        }
+
+        // Tier 3: BFS pathfinding to nearest safe food.
+        // Only used when the food isn't on the wall-follow path and the
+        // destination has enough open space to not trap us.
+        if let Some((food_dir, food_open)) = bfs_nearest_food_dir(game, cx, cy, &legal) {
+            let norm_open = food_open / (game.width as f32 * game.height as f32);
+            // Only take the BFS path if the destination is reasonably open
+            // (at least 10% of arena is reachable from there).
+            if norm_open > 0.10 && food_dir != wall_dir {
+                return food_dir;
             }
         }
     }
