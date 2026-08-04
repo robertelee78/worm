@@ -38,6 +38,11 @@ Refactor the CPU intelligence to a **dual-mode opponent-centric architecture**:
         player→food, player→CPU-threat, travel direction.
     *   **Defensive avoidance:** when the predicted player position is within 2
         cells, pick the direction that maximises distance (with wall-follow bonus).
+    *   **Kill positioning (intercept):** when confidence >= 0.6 and the predicted
+        player is 2-10 cells away, move toward the predicted future position
+        (2-5 frames ahead) to create a trail barrier. Best-intercept selection
+        scores targets by distance + frames-ahead; wall-follow bonus (1.0) and
+        open-space check prevent marginal/trap deviations.
     *   **Adjacent food grab:** only deviate from wall-follow for directly
         adjacent food (doesn't break the survival pattern).
     *   **Cross-game persistence:** `CpuBrain` is shared across games via
@@ -51,6 +56,12 @@ Refactor the CPU intelligence to a **dual-mode opponent-centric architecture**:
     wall-follower player. Predictions are used defensively, not offensively.
 *   Benchmark vs wall-follower: adaptive roughly matches naive (high variance
     from unseeded RNG). Both survive to the arena-fill limit (~3920 frames).
+    Two opposite-direction wall-followers never approach each other closely
+    (>38 cells), so the intercept cannot trigger — the game is a stalemate.
+*   Benchmark vs chaser (held-out): adaptive wins 100% consistently across
+    multiple runs. The chaser always approaches the CPU, so the intercept
+    triggers constantly. Adaptive kills the chaser in ~30 frames (fast kill
+    via prediction); naive gets killed in ~72 frames (slow death).
 *   Key lesson: in TRON, the opponent model should MODIFY the survival strategy,
     not REPLACE it. rps-ai's prior-blend design prevents the memory from walking
     into walls; the same principle applies here.

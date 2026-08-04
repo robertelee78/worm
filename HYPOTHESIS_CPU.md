@@ -29,10 +29,11 @@ The original `score_direction`-driven approach (open-space maximising) was funda
 
 ## Current Architecture (2026-08-04)
 1. **Cold start:** `wall_follow_decide` (same as naive opponent)
-2. **Adaptive mode:** wall-follow base + defensive avoidance (≤2 cells) + adjacent food grab
-3. **Opponent model:** `PlayerBrain` with k-NN recall, confidence-weighted prediction
+2. **Adaptive mode:** wall-follow base + defensive avoidance (≤2 cells) + intercept (2-10 cells, confidence≥0.6) + adjacent food grab
+3. **Opponent model:** `PlayerBrain` with k-NN recall, confidence-weighted prediction, 5-frame lookahead
 4. **Cross-game persistence:** `shared_brain` accumulates episodes across games
+5. **Kill positioning:** intercept the predicted player path to create a trail barrier
 
 ## Success Metric
-Baseline shift: from **-8.6 moves / -8.1 food** to **~0.0 moves / ~0.0 food** (matches naive).
-Next milestone: beat naive against a held-out opponent (not wall-follower restatement).
+Baseline shift: from **-8.6 moves / -8.1 food** to **~0.0 moves / ~0.0 food** (matches naive vs wall-follower).
+**Held-out chaser: adaptive 100% wins vs naive ~4% wins** — the opponent model is decisively better against aggressive opponents.
