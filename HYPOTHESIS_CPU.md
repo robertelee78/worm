@@ -50,7 +50,11 @@ The original `score_direction`-driven approach (open-space maximising) was funda
 5. **Kill positioning:** intercept the predicted player path + chokepoint corner-cutting for wall-followers
 6. **Active food seeking:** BFS pathfinding to nearest food when safe
 7. **Deterministic benchmark:** seeded RNG for reliable measurement
+8. **Self-memory vote (gated):** the CPU's own survival episodes vote via k-NN
+   (confidence ≥ 0.4 + open-space gate, deterministic favourite) — breaks the
+   wall-follower stalemate (familiar wins 1% → 100%) without costing held-out
+   (chaser 100% maintained)
 
 ## Success Metric
 Baseline shift: from **-8.6 moves / -8.1 food** to **≥0 moves / ≥0 food** (beats naive vs wall-follower).
-**Held-out chaser: adaptive 100% wins vs naive ~4% wins** — the opponent model is decisively better against aggressive opponents.
+**Held-out chaser: adaptive 100% wins vs naive 8% wins** — the opponent model is decisively better against aggressive opponents.

@@ -65,6 +65,16 @@ Refactor the CPU intelligence to a **dual-mode opponent-centric architecture**:
 *   Key lesson: in TRON, the opponent model should MODIFY the survival strategy,
     not REPLACE it. rps-ai's prior-blend design prevents the memory from walking
     into walls; the same principle applies here.
+*   Self-memory vote (rps-ai's own-episode loop, added 2026-08-04): once
+    `memory_size >= COLD_START_EPISODES`, the CPU's own survival episodes cast a
+    k-NN vote — encode situation → recall → aggregate → legal favourite (argmax,
+    deterministic, no temperature/explore noise). It fires only when aggregate
+    confidence (margin × support × maturity) >= `SELF_VOTE_MIN_CONFIDENCE` (0.4)
+    AND the vote destination is at least as open as wall-follow's — "memory
+    modifies survival, never replaces it". Bench (seeded, reproduced): held-out
+    chaser adaptive wins 100/100 (pre-vote 100/100, un-gated noisy vote 96/100);
+    familiar wall-follower adaptive wins 100/100 (pre-vote 1/100 — the vote
+    breaks the perimeter stalemate and kills in ~10 frames).
 
 ## Consequences
 *   Positive: Moves the CPU from a "self-survival" agent to a "strategic opponent"

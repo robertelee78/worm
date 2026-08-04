@@ -34,6 +34,8 @@ const MATCH_BONUS: f32 = 1.0;     // trailing-match re-rank multiplier
 const SUPPORT_TARGET: f32 = 5.0;  // effective-N full-support threshold
 const COLD_START_EPISODES: usize = 60;
 const EXPLORE_RATE: f32 = 0.05;   // outright random legal throw rate
+const MEMORY_VOTE_MIN_OPEN: f32 = 0.05; // destination must keep >=5% of the arena reachable
+const SELF_VOTE_MIN_CONFIDENCE: f32 = 0.4; // margin x support x maturity gate (rps-ai confidence)
 const RECALL_K: usize = 16;
 const CLEAR_BIAS: f32 = 0.125;    // prior saturation point (1/8 bias over 4 dirs)
 const PRIOR_DECAY: f32 = 0.99;    // EMA prior (~100-round window)
@@ -1345,6 +1347,74 @@ pub fn cpu_decide(
                 return legal[(game.rng_f32(0.0, legal.len() as f32) as usize).min(legal.len() - 1)];
             }
             return best_dir;
+        }
+    }
+
+    // --- SELF-MEMORY VOTE: ask the CPU's own survival episodes ---
+    // rps-ai's core loop: every decision → encode situation → recall similar
+    // pasts → vote → act. We kept the survival floor (wall-follow) but let the
+    // k-NN memory cast the deciding vote when it is confident enough: recall
+    // episodes whose situation is near ours, weight by proximity × recency ×
+    // trailing-match, blend with the prior, then vote with the legal favourite.
+    // The deviation gate below is the "memory modifies survival, never replaces
+    // it" rule the defensive/intercept layers above follow: the vote fires only
+    // when it is confident AND its destination is at least as open as
+    // wall-follow's, so a noisy sample can't trade a safe wall for a dead pocket.
+    if memory_size >= COLD_START_EPISODES {
+        let obs = encode_situation(game, &game.cpu_brain);
+        let recalled = recall(&game.cpu_brain, &obs, RECALL_K.min(memory_size));
+        if !recalled.is_empty() {
+            let agg = aggregate(
+                &game.cpu_brain,
+                &recalled,
+                game.cpu_brain.cpu_seq,
+                memory_size,
+                &game.cpu_brain.player_tail,
+            );
+            // The vote is over all 4 directions; restrict it to legal ones.
+            let mut legal_dist = [0.0f32; 4];
+            let mut total = 0.0f32;
+            for &d in &legal {
+                let w = agg.distribution[dir_index(d)].max(0.0);
+                legal_dist[dir_index(d)] = w;
+                total += w;
+            }
+            if total > 0.0 {
+                // Vote with the favourite (argmax over the legal-restricted
+                // distribution) — deterministic. The deterministic base policy
+                // (intercept/defensive/food/wall-follow) already earned its
+                // wins; the memory only gets to *modify* it, so no temperature
+                // or explore noise on top of an optimal base.
+                let sampled = legal
+                    .iter()
+                    .max_by(|a, b| {
+                        legal_dist[dir_index(**a)]
+                            .partial_cmp(&legal_dist[dir_index(**b)])
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .copied()
+                    .unwrap_or(wall_dir);
+                // Deviation gate — same discipline as the intercept/defensive
+                // layers above: memory only *modifies* wall-follow, never
+                // replaces it. Fire the vote only when the aggregate is
+                // confident (margin × support × maturity) AND the sampled
+                // destination is at least as open as wall-follow's.
+                let total_cells = game.width as f32 * game.height as f32;
+                let (ddx, ddy) = sampled.as_delta();
+                let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
+                let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
+                let vote_open = count_open_space(game, nx, ny) / total_cells;
+                let (wdx, wdy) = wall_dir.as_delta();
+                let wx = (cx as i16 + wdx).max(0).min((game.width - 1) as i16) as u16;
+                let wy = (cy as i16 + wdy).max(0).min((game.height - 1) as i16) as u16;
+                let wall_open = count_open_space(game, wx, wy) / total_cells;
+                if agg.confidence >= SELF_VOTE_MIN_CONFIDENCE
+                    && vote_open >= wall_open
+                    && vote_open >= MEMORY_VOTE_MIN_OPEN
+                {
+                    return sampled;
+                }
+            }
         }
     }
 
