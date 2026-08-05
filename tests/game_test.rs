@@ -1517,3 +1517,111 @@ fn test_cpu_steps_off_a_ring_that_is_about_to_seal() {
         game.ring_seal_eta(nx, ny)
     );
 }
+
+/* --------------------------- laser tail sever ---------------------------- */
+//
+// The beam cuts the opponent's trail where it crosses and everything beyond
+// the cut is lost. The cut is at the crossing NEAREST THEIR HEAD, so aiming at
+// the neck is worth more than clipping the tail tip.
+
+/// Build a game with the CPU's trail laid out horizontally and the player
+/// positioned to fire a vertical beam across it.
+fn severable_board() -> WormGame {
+    let mut game = WormGame::with_size(120, 38);
+    // CPU trail runs left-to-right along row 20, head at x=40.
+    let trail: Vec<(u16, u16)> = (0..12).map(|i| (40 - i, 20)).collect();
+    for &(x, y) in &trail {
+        game.grid[y as usize][x as usize] = worm::CellType::CPU;
+    }
+    game.cycles[1].positions = trail;
+    game.cycles[1].head = (40, 20);
+    game
+}
+
+#[test]
+fn test_laser_severs_the_trail_at_the_crossing_nearest_the_head() {
+    let mut game = severable_board();
+    let before = game.cycles[1].positions.len();
+
+    // Player sits below the trail at x=37 (index 3 from the head) and fires up.
+    game.cycles[0].head = (37, 25);
+    game.cycles[0].positions = vec![(37, 25)];
+    game.cycles[0].direction = worm::Direction::Up;
+    game.cycles[0].held_powerup = Some(worm::game::PowerUpKind::Laser);
+
+    assert!(game.fire_powerup(0));
+
+    assert_eq!(
+        game.cycles[1].positions.len(),
+        3,
+        "the cut is at index 3 — the crossing nearest their head — so only \
+         indices 0..3 survive (was {before})"
+    );
+    assert_eq!(
+        game.cycles[1].head,
+        (40, 20),
+        "severing must never remove the head; that is the kill path"
+    );
+}
+
+#[test]
+fn test_severed_cells_leave_both_the_grid_and_positions() {
+    // The lockstep invariant: a cell leaving `positions` must lose its grid
+    // marker, or a later tail-pop writes Empty over a cell someone else owns.
+    let mut game = severable_board();
+    game.cycles[0].head = (37, 25);
+    game.cycles[0].positions = vec![(37, 25)];
+    game.cycles[0].direction = worm::Direction::Up;
+    game.cycles[0].held_powerup = Some(worm::game::PowerUpKind::Laser);
+
+    game.fire_powerup(0);
+
+    for &(x, y) in &game.cycles[1].positions {
+        assert_eq!(
+            game.grid[y as usize][x as usize],
+            worm::CellType::CPU,
+            "a surviving segment at ({x},{y}) lost its grid marker"
+        );
+    }
+    // Everything past the cut is gone from the grid too.
+    for i in 0..9u16 {
+        let (x, y) = (37 - i, 20);
+        assert_ne!(
+            game.grid[y as usize][x as usize],
+            worm::CellType::CPU,
+            "severed cell ({x},{y}) still carries a grid marker"
+        );
+    }
+}
+
+#[test]
+fn test_sever_clears_owed_growth_so_the_cut_is_not_undone() {
+    let mut game = severable_board();
+    game.cycles[1].pending_growth = 7;
+    game.cycles[0].head = (37, 25);
+    game.cycles[0].positions = vec![(37, 25)];
+    game.cycles[0].direction = worm::Direction::Up;
+    game.cycles[0].held_powerup = Some(worm::game::PowerUpKind::Laser);
+
+    game.fire_powerup(0);
+
+    assert_eq!(
+        game.cycles[1].pending_growth, 0,
+        "owed growth would silently regrow what the beam just cut off"
+    );
+}
+
+#[test]
+fn test_arena_wall_tracks_sudden_death_shrink() {
+    // Pinned to ring 2, the live inner wall stopped being recognised after the
+    // first shrink: beams stopped dead instead of bouncing or breaching, and
+    // bomb blasts stopped breaking walls.
+    let mut game = WormGame::with_size(120, 38);
+    assert!(game.is_arena_wall(2, 20), "ring 2 is the wall before any shrink");
+    assert!(!game.is_arena_wall(3, 20));
+
+    game.shrink_level = 1;
+    assert!(game.is_arena_wall(3, 20), "the wall moves inward with the shrink");
+    assert!(!game.is_arena_wall(2, 20), "the old ring is no longer the wall");
+    assert_eq!(game.arena_wall_offset(), 3);
+}

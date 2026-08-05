@@ -93,6 +93,33 @@ pub const BOMB_RADIUS_CELLS: i16 = 10;
 pub const BOMB_FUSE_MS: u64 = 3000;
 /// Frames the CPU's laser charges (visibly, along the beam) before firing.
 pub const LASER_TELEGRAPH_FRAMES: u32 = 10;
+/// Ricochets a beam gets before it spends its energy punching through the wall.
+pub const LASER_MAX_BOUNCES: u32 = 4;
+
+/// Where a beam went, and the wall cell it breached.
+///
+/// The breach is data, not an effect: `beam_cells` is `&self` and runs every
+/// frame while the CPU is merely aiming, so only `fire_powerup` applies it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BeamPath {
+    pub cells: Vec<(u16, u16)>,
+    /// The arena-wall cell to convert to a `Hole`, on the fifth strike.
+    pub breach: Option<(u16, u16)>,
+}
+
+impl BeamPath {
+    pub fn contains(&self, cell: &(u16, u16)) -> bool {
+        self.cells.contains(cell)
+    }
+}
+
+impl<'a> IntoIterator for &'a BeamPath {
+    type Item = &'a (u16, u16);
+    type IntoIter = std::slice::Iter<'a, (u16, u16)>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.cells.iter()
+    }
+}
 /// Sudden death: after this many frames the arena starts shrinking inward.
 pub const SUDDEN_DEATH_START: u32 = 3000;
 /// Sudden death: one wall ring closes every this many frames.
@@ -422,9 +449,22 @@ impl WormGame {
         self.width >= 10 && self.height >= 10
     }
 
-    /// Ring 2 — the arena wall (punchable). Ring 0 is the outer frame (never punchable).
+    /// The CURRENT arena wall — punchable, and what a beam ricochets off.
+    /// Ring 0 is the outer frame and is never punchable.
+    ///
+    /// Tracks `shrink_level`. It used to be pinned to ring 2, so from the first
+    /// sudden-death shrink onward the live inner wall was not recognised as an
+    /// arena wall at all: beams stopped dead instead of bouncing or breaching,
+    /// and bomb blasts silently stopped breaking walls. The endgame quietly
+    /// played by different rules from the rest of the round.
+    pub fn arena_wall_offset(&self) -> u16 {
+        2 + self.shrink_level
+    }
+
     pub fn is_arena_wall(&self, x: u16, y: u16) -> bool {
-        self.has_corridor() && (x == 2 || y == 2 || x == self.width - 3 || y == self.height - 3)
+        let off = self.arena_wall_offset();
+        self.has_corridor()
+            && (x == off || y == off || x == self.width - 1 - off || y == self.height - 1 - off)
     }
 
     /// Can a cycle occupy this cell? Walls, trails, the frame and live bombs are fatal.
@@ -1486,6 +1526,76 @@ impl WormGame {
                         play_death_riff(80);
                     }
                 }
+                // TAIL SEVER — the beam cuts the opponent's trail where it
+                // crosses, and everything beyond the cut is lost.
+                //
+                // Cut at the crossing NEAREST THEIR HEAD (the minimum index in
+                // a head-first `positions`), so a clean shot across the neck
+                // costs them nearly the whole body and a lazy shot at the tail
+                // tip costs almost nothing. That is what makes aiming worth
+                // something.
+                //
+                // Runs AFTER the bomb loop above on purpose: a beam-triggered
+                // blast calls `detonate`, which retains `positions`, so an
+                // index computed before it would point at a cell that no longer
+                // exists. `skip(1)` keeps index 0 — the head — out of it; a
+                // beam on the head is the kill path above, never this one.
+                if self.cycles[opp].alive {
+                    let cut = self.cycles[opp]
+                        .positions
+                        .iter()
+                        .enumerate()
+                        .skip(1)
+                        .find(|(_, p)| beam.contains(p))
+                        .map(|(i, _)| i);
+                    if let Some(cut) = cut {
+                        let severed = self.cycles[opp].positions.split_off(cut.max(1));
+                        // Grid/positions lockstep, same rule as detonate and
+                        // close_ring: only clear a cell that still holds THIS
+                        // cycle's own marker, never one another cycle has since
+                        // legally occupied, and never a living head.
+                        let marker = if opp == self.player {
+                            CellType::Player
+                        } else {
+                            CellType::CPU
+                        };
+                        let heads: Vec<(u16, u16)> = self
+                            .cycles
+                            .iter()
+                            .filter(|c| c.alive)
+                            .map(|c| c.head)
+                            .collect();
+                        let color = self.cycles[opp].color;
+                        for (sx, sy) in severed {
+                            if self.grid[sy as usize][sx as usize] == marker
+                                && !heads.contains(&(sx, sy))
+                            {
+                                self.grid[sy as usize][sx as usize] = CellType::Empty;
+                                self.particles.push(Particle {
+                                    x: sx as f32,
+                                    y: sy as f32,
+                                    vx: 0.0,
+                                    vy: 0.0,
+                                    lifetime: 8,
+                                    color,
+                                });
+                            }
+                        }
+                        // Owed growth would silently regrow what was just cut.
+                        self.cycles[opp].pending_growth = 0;
+                        play_beep(SfxKind::Laser, 900, 60);
+                    }
+                }
+
+                // BREACH — the fifth arena-wall strike punches through. Applied
+                // here and nowhere else: `beam_cells` is `&self` and runs every
+                // frame while the CPU is only aiming.
+                if let Some((bx, by)) = beam.breach {
+                    self.grid[by as usize][bx as usize] = CellType::Hole;
+                    self.add_impact_particles(bx, by, (120, 255, 120));
+                    play_beep(SfxKind::WallPunch, 660, 60);
+                }
+
                 // Beam flash particles along the whole path. Lifetime in the
                 // same 15..40 range as impact particles so the alpha fade
                 // (lifetime/40) renders a visible line instead of ~15% black.
@@ -1565,19 +1675,32 @@ impl WormGame {
         true
     }
 
-    /// Beam path from (hx, hy) in direction (dx, dy). Bounces off arena walls
-    /// (ring 2) — reflecting the direction component orthogonal to the struck
-    /// wall segment — but passes through Holes (punched arena walls) and
-    /// stops at the outer frame or any non-arena wall. Max 4 bounces prevents
-    /// pathological loops. Keep in sync with cpu_ai::beam_cells (the CPU's
-    /// aim and the telegraph must trace the exact same path).
-    fn beam_cells(&self, hx: u16, hy: u16, dx: i16, dy: i16) -> Vec<(u16, u16)> {
-        let mut out = Vec::new();
+    /// The path a beam traces, and the wall cell it breaches (if any).
+    ///
+    /// Ricochets off the current arena wall, reflecting the component
+    /// orthogonal to the struck segment. On the fifth arena-wall strike the
+    /// beam has spent its ricochets and **punches through**, stopping there —
+    /// the ricochet is the charge-up and the breach is the payoff.
+    ///
+    /// It also **terminates at any Hole**, including ones punched earlier.
+    /// One rule: a beam ends where it leaves the arena. Passing through old
+    /// holes while stopping at fresh ones would be an inconsistency a player
+    /// would notice, and it would make the beam's reach depend on damage
+    /// history in a way nobody could reason about.
+    ///
+    /// `&self` deliberately: the breach is RETURNED, never applied here. This
+    /// is called every frame while the CPU merely AIMS (and for the telegraph),
+    /// so applying it in place would punch a hole per frame for a shot that may
+    /// never be fired.
+    pub(crate) fn beam_cells(&self, hx: u16, hy: u16, dx: i16, dy: i16) -> BeamPath {
+        let mut cells = Vec::new();
+        let mut breach = None;
         let mut x = hx as i16;
         let mut y = hy as i16;
         let mut rdx = dx;
         let mut rdy = dy;
         let mut bounces = 0;
+        let off = self.arena_wall_offset();
         loop {
             x += rdx;
             y += rdy;
@@ -1585,22 +1708,29 @@ impl WormGame {
                 break;
             }
             let (ux, uy) = (x as u16, y as u16);
-            if self.grid[uy as usize][ux as usize] == CellType::Wall {
-                if bounces < 4 && self.is_arena_wall(ux, uy) {
-                    if (ux == 2 || ux == self.width - 3) && rdx != 0 {
-                        rdx = -rdx;
+            match self.grid[uy as usize][ux as usize] {
+                CellType::Wall => {
+                    if self.is_arena_wall(ux, uy) {
+                        if bounces < LASER_MAX_BOUNCES {
+                            if (ux == off || ux == self.width - 1 - off) && rdx != 0 {
+                                rdx = -rdx;
+                            }
+                            if (uy == off || uy == self.height - 1 - off) && rdy != 0 {
+                                rdy = -rdy;
+                            }
+                            bounces += 1;
+                            continue;
+                        }
+                        breach = Some((ux, uy));
                     }
-                    if (uy == 2 || uy == self.height - 3) && rdy != 0 {
-                        rdy = -rdy;
-                    }
-                    bounces += 1;
-                    continue;
+                    break;
                 }
-                break;
+                // A hole is where the arena ends for a beam — see above.
+                CellType::Hole => break,
+                _ => cells.push((ux, uy)),
             }
-            out.push((ux, uy));
         }
-        out
+        BeamPath { cells, breach }
     }
 
     /// Advance live tri-shot bolts one cell; bolts die on walls or at max range,
