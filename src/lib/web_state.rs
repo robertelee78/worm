@@ -266,7 +266,15 @@ impl GameState {
                     pos: cycle.positions.iter().map(|&(x, y)| [x, y]).collect(),
                 })
                 .collect(),
-            food: game.food_items.clone(),
+            // Planted mines are emitted AS FOOD, with the value they are
+            // masquerading as. The client cannot distinguish them because
+            // there is nothing to distinguish — that is the mechanic. Tracking
+            // where the opponent planted theirs is the counter-play.
+            food: {
+                let mut f = game.food_items.clone();
+                f.extend(game.bombs.iter().map(|b| (b.x, b.y, b.disguise)));
+                f
+            },
             powerups: game
                 .powerups
                 .iter()
@@ -277,11 +285,11 @@ impl GameState {
                 .iter()
                 .map(|bolt| (bolt.x, bolt.y, bolt.dx, bolt.dy))
                 .collect(),
-            bombs: game
-                .bombs
-                .iter()
-                .map(|bomb| (bomb.x, bomb.y, bomb.fuse))
-                .collect(),
+            // Deliberately EMPTY. Mines ride in `food` above; exporting them
+            // here as well would hand the client the answer and the blast
+            // overlay would paint a target on every one of them. The field is
+            // kept rather than removed so the wire shape stays stable.
+            bombs: Vec::new(),
             particles: game
                 .particles
                 .iter()

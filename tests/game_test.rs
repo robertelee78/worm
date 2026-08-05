@@ -319,6 +319,8 @@ fn test_laser_detonating_own_bomb_does_not_self_kill() {
         x: 15,
         y: 15,
         fuse: 999,
+        disguise: 5,
+        armed_in: 0,
         owner: 0,
     });
     game.cycles[0].held_powerup = Some(worm::game::PowerUpKind::Laser);
@@ -945,6 +947,8 @@ fn test_death_cause_wall_vs_bomb() {
         x: 12,
         y: 15,
         fuse: 1,
+        disguise: 5,
+        armed_in: 0,
         owner: 1,
     });
     game.tick_bombs();
@@ -1093,6 +1097,8 @@ fn test_bomb_blast_trims_positions_with_grid() {
         x: 32,
         y: 10,
         fuse: 1,
+        disguise: 5,
+        armed_in: 0,
         owner: 1,
     });
     game.tick_bombs();
@@ -1177,6 +1183,8 @@ fn test_bomb_blast_breaks_arena_wall_not_frame() {
         x: 5,
         y: 5,
         fuse: 1,
+        disguise: 5,
+        armed_in: 0,
         owner: 0,
     });
     game.tick_bombs();
@@ -1213,6 +1221,8 @@ fn test_laser_triggered_bomb_kills_its_owner() {
         x: 35,
         y: 20,
         fuse: 60,
+        disguise: 5,
+        armed_in: 0,
         owner: 1, // the CPU planted it
     });
     assert!(game.fire_powerup(0));
@@ -1640,4 +1650,143 @@ fn test_arena_wall_tracks_sudden_death_shrink() {
     assert!(game.is_arena_wall(3, 20), "the wall moves inward with the shrink");
     assert!(!game.is_arena_wall(2, 20), "the old ring is no longer the wall");
     assert_eq!(game.arena_wall_offset(), 3);
+}
+
+/* ------------------------- bomb as a proximity mine ----------------------- */
+//
+// The old bomb was a 3s timer with a 21x21 blast: escaping took 11 moves and
+// the fuse gave 26-85, so an attentive target always walked out. It is now a
+// mine — you cannot wait it out, only route around it.
+
+fn mine_board() -> WormGame {
+    let mut game = WormGame::with_size(120, 38);
+    game.cycles[0].head = (60, 20);
+    game.cycles[0].positions = vec![(60, 20)];
+    game.cycles[1].head = (20, 10);
+    game.cycles[1].positions = vec![(20, 10)];
+    game
+}
+
+#[test]
+fn test_mine_is_inert_while_arming() {
+    let mut game = mine_board();
+    // Planted right under the enemy head — but not yet armed.
+    game.bombs.push(worm::game::Bomb {
+        x: 60,
+        y: 20,
+        fuse: worm::game::BOMB_FUSE_FRAMES,
+        disguise: 5,
+        armed_in: worm::game::MINE_ARM_FRAMES,
+        owner: 1,
+    });
+
+    game.tick_bombs();
+
+    assert_eq!(
+        game.bombs.len(),
+        1,
+        "an arming mine must not fire, or planting one at your own head is suicide"
+    );
+    assert!(game.cycles[0].alive);
+}
+
+#[test]
+fn test_armed_mine_fires_when_an_enemy_head_enters_the_ring() {
+    let mut game = mine_board();
+    game.bombs.push(worm::game::Bomb {
+        x: 60 + worm::game::MINE_TRIGGER_CELLS as u16,
+        y: 20,
+        fuse: worm::game::BOMB_FUSE_FRAMES,
+        disguise: 5,
+        armed_in: 0,
+        owner: 1,
+    });
+
+    game.tick_bombs();
+
+    assert!(game.bombs.is_empty(), "an armed mine fires on proximity");
+    assert!(!game.cycles[0].alive, "the head inside the ring dies");
+}
+
+#[test]
+fn test_walking_onto_your_own_mine_detonates_it_without_killing_you() {
+    // Remote detonation, for free: the owner is immune to the BLAST but not to
+    // the TRIGGER. Paid for in board position — you have to physically return.
+    let mut game = mine_board();
+    game.bombs.push(worm::game::Bomb {
+        x: 20,
+        y: 10,
+        fuse: worm::game::BOMB_FUSE_FRAMES,
+        disguise: 5,
+        armed_in: 0,
+        owner: 1,
+    });
+
+    game.tick_bombs();
+
+    assert_eq!(
+        game.bombs.len(),
+        1,
+        "your own mine does not trigger on you — only an enemy head trips it"
+    );
+    assert!(game.cycles[1].alive);
+}
+
+#[test]
+fn test_blast_is_a_cross_not_a_square() {
+    // The shape is the whole point: 65 cells instead of 441, and honestly
+    // drawable. On-axis at reach dies; off-axis at the same distance does not.
+    let arm = worm::game::BOMB_RADIUS_CELLS as i32;
+    let core = worm::game::BOMB_CORE_RADIUS as i32;
+
+    assert!(
+        worm::game::in_blast(50, 20, 50 + arm, 20, arm),
+        "the end of an arm is inside the blast"
+    );
+    assert!(
+        worm::game::in_blast(50, 20, 50, 20 - arm, arm),
+        "arms run on both axes"
+    );
+    assert!(
+        !worm::game::in_blast(50, 20, 50 + core + 1, 20 + core + 1, arm),
+        "a diagonal just outside the core survives — this is what makes it a cross"
+    );
+    assert!(
+        worm::game::in_blast(50, 20, 50 + core, 20 + core, arm),
+        "the core square is solid"
+    );
+    assert!(
+        !worm::game::in_blast(50, 20, 50 + arm, 20 + arm, arm),
+        "the far diagonal corner — dead in the old square — now survives"
+    );
+}
+
+#[test]
+fn test_mine_blast_still_breaches_the_arena_wall() {
+    // Breaching is now a byproduct of the laser and the bomb; deleting
+    // WallPunch must not have taken the bomb's breach with it.
+    let mut game = mine_board();
+    let off = game.arena_wall_offset();
+    // Plant so an arm reaches the left arena wall along a row.
+    game.bombs.push(worm::game::Bomb {
+        x: off + 3,
+        y: 20,
+        fuse: 1,
+        disguise: 5,
+        armed_in: 0,
+        owner: 1,
+    });
+
+    game.tick_bombs();
+
+    assert_eq!(
+        game.grid[20][off as usize],
+        worm::CellType::Hole,
+        "a blast arm reaching the arena wall opens a hole"
+    );
+    assert_eq!(
+        game.grid[20][0],
+        worm::CellType::Wall,
+        "the ring-0 frame is never breachable"
+    );
 }

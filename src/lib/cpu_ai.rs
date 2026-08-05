@@ -2258,38 +2258,54 @@ fn cell_threatened_by_projectile(game: &WormGame, x: u16, y: u16) -> bool {
     false
 }
 
-/// Whether cell (x,y) is within blast radius of a bomb that will detonate soon.
+/// Is cell (x,y) unsafe because of an enemy mine?
+///
+/// A mine has no countdown to read — it fires when you enter its trigger ring
+/// — so the question is not "is it about to go off" but "would stepping here
+/// set it off, or leave me inside the blast when something else does".
+///
+/// Two zones, and the distinction matters: the TRIGGER ring is entered at your
+/// own peril, while the arms are only lethal at the moment of detonation and
+/// are perfectly safe to cross beforehand. Treating the whole cross as
+/// untouchable would wall the CPU out of most of the board.
+///
+/// Note the trigger radius is small (2), which is what makes the CPU's cheap
+/// one-step threat check SUFFICIENT for the first time: you cannot route
+/// around a 441-cell region one step at a time, but "don't step in the ring"
+/// needs no pathfinding at all.
 fn cell_threatened_by_bomb(game: &WormGame, x: u16, y: u16, frames_ahead: u8) -> bool {
-    let r = crate::game::BOMB_RADIUS_CELLS as i32;
+    let arm = crate::game::BOMB_RADIUS_CELLS as i32;
+    let trigger = crate::game::MINE_TRIGGER_CELLS as i32;
     for b in &game.bombs {
-        // The CPU's own bombs cannot kill it (detonate() excludes the owner),
-        // so they are not threats — the old code made the AI dodge blasts
-        // that were physically harmless to it.
+        // Our own mines cannot kill us — detonate() excludes the owner — so
+        // dodging them was the AI avoiding blasts that were harmless to it.
         if b.owner == 1 {
             continue;
         }
-        let dx = (x as i32 - b.x as i32).abs();
-        let dy = (y as i32 - b.y as i32).abs();
-        let cheb = dx.max(dy);
-        if cheb > r {
-            continue; // outside the blast entirely
-        }
-        // ESCAPABILITY, not imminence.
-        //
-        // This used to ask "is it about to go off?" — `fuse <= frames_ahead+1`,
-        // with the only caller passing 3, so the CPU reacted at fuse<=4. The
-        // fuse is 26-85 frames (BOMB_FUSE_MS / frame_delay) and clearing a
-        // Chebyshev radius of 10 takes 11 moves, so by the time the old check
-        // fired, escape was already impossible. The blast zone was invisible
-        // for the entire window in which leaving it was still achievable.
-        //
-        // The answerable question is whether the cell can be vacated before
-        // detonation: leaving costs `r + 1 - cheb` moves, and there are `fuse`
-        // frames left (less the lead time we are evaluating at).
-        let moves_to_clear = (r + 1 - cheb) as u32;
-        let frames_left = b.fuse.saturating_sub(frames_ahead as u32);
-        if moves_to_clear > frames_left {
+        let cheb = (x as i32 - b.x as i32)
+            .abs()
+            .max((y as i32 - b.y as i32).abs());
+
+        // Live mine: entering the ring IS the detonation.
+        if b.armed_in == 0 && cheb <= trigger {
             return true;
+        }
+        // Still arming: the ring is genuinely safe to cross until it goes
+        // live. Only flag it if it will arm before we could be out again.
+        if b.armed_in > 0
+            && cheb <= trigger
+            && b.armed_in <= frames_ahead as u32 + (trigger + 1 - cheb) as u32
+        {
+            return true;
+        }
+        // Failsafe fuse: if it times out on its own, anything left inside the
+        // cross dies. Escapability, as before.
+        if crate::game::in_blast(b.x as i32, b.y as i32, x as i32, y as i32, arm) {
+            let moves_to_clear = (arm + 1 - cheb).max(1) as u32;
+            let frames_left = b.fuse.saturating_sub(frames_ahead as u32);
+            if moves_to_clear > frames_left {
+                return true;
+            }
         }
     }
     false
@@ -2640,7 +2656,7 @@ pub fn ensemble_rank_score(brain: &CpuBrain, model: usize) -> f32 {
 /// Fires when the player is in range for a kill:
 ///   - Laser: player is in line of fire (same row/col, no walls between)
 ///   - TriShot: player sits on one of the three bolt rays
-///   - Bomb: player is within BOMB_RADIUS_CELLS of current cell
+///   - Bomb: the player's projected path crosses the spot we would mine
 pub fn should_fire(game: &mut WormGame, who: usize) -> bool {
     let kind = match game.cycles[who].held_powerup {
         Some(k) => k,
@@ -2679,11 +2695,24 @@ pub fn should_fire(game: &mut WormGame, who: usize) -> bool {
             forward && on_ray
         }
         crate::game::PowerUpKind::Bomb => {
-            // Player within bomb blast radius.
-            let dist = ((hx as i32 - ox as i32)
-                .abs()
-                .max((hy as i32 - oy as i32).abs())) as i16;
-            dist <= crate::game::BOMB_RADIUS_CELLS
+            // A mine is PLACED, not aimed, so proximity is the wrong question.
+            // "Player within blast radius" read as "throw it at them" and was
+            // the single worst use of a power-up in the game: it planted at
+            // the radius edge, where the target simply walked out.
+            //
+            // Two gates. Don't wall ourselves in — we need room to leave our
+            // own trigger ring. And plant where they are actually going.
+            if legal_directions(game, &game.cycles[who]).len() < 2 {
+                return false;
+            }
+            let path = predict_player_positions_iterative(game, game.cycles[0].direction, 12);
+            let reach = (crate::game::MINE_TRIGGER_CELLS + 1) as i32;
+            path.iter().any(|&(px, py)| {
+                (px as i32 - hx as i32)
+                    .abs()
+                    .max((py as i32 - hy as i32).abs())
+                    <= reach
+            })
         }
     }
 }
@@ -3642,64 +3671,77 @@ mod tests {
         assert!(clean.ensemble.active < ENSEMBLE_MODELS);
     }
 
-    /// A blast is dangerous while escape is still possible, and the CPU has to
-    /// react during that window — not after it closes. The old check fired at
-    /// `fuse <= 4` against a 26-85 frame fuse and an 11-move escape, so it only
-    /// ever reported blasts that were already unsurvivable.
+    /// A mine has no countdown to read: entering its trigger ring IS the
+    /// detonation. So the threat question is not "is it about to go off" but
+    /// "would stepping here set it off".
     #[test]
-    fn bomb_threat_is_escapability_not_imminence() {
+    fn an_armed_mine_makes_its_trigger_ring_unsafe() {
         let mut game = WormGame::with_size(120, 38);
-        let r = crate::game::BOMB_RADIUS_CELLS as u16;
-
-        // Deep inside the blast with a fuse far too short to walk out of.
+        let t = crate::game::MINE_TRIGGER_CELLS as u16;
         game.bombs.push(crate::game::Bomb {
             x: 60,
             y: 20,
-            fuse: 2,
+            fuse: crate::game::BOMB_FUSE_FRAMES,
+            armed_in: 0,
+            disguise: 5,
             owner: 0,
         });
+
         assert!(
             cell_threatened_by_bomb(&game, 60, 20, 0),
-            "standing on a bomb that fires in 2 frames is not survivable"
+            "standing on an armed mine is not survivable"
         );
-
-        // Same cell, same bomb, but a long fuse: leaving is achievable, so the
-        // cell must not be treated as lethal or the CPU freezes.
-        game.bombs[0].fuse = 200;
         assert!(
-            !cell_threatened_by_bomb(&game, 60, 20, 0),
-            "a long fuse leaves time to clear the radius"
+            cell_threatened_by_bomb(&game, 60 + t, 20, 0),
+            "the edge of the trigger ring still trips it"
         );
-
-        // Just outside the radius is never threatened, whatever the fuse.
-        game.bombs[0].fuse = 1;
         assert!(
-            !cell_threatened_by_bomb(&game, 60 + r + 1, 20, 0),
-            "outside the blast is outside the blast"
+            !cell_threatened_by_bomb(&game, 60 + t + 1, 20, 0),
+            "one cell outside the ring is safe to stand — the arms are only \
+             lethal at the moment of detonation, and treating the whole cross \
+             as untouchable would wall the CPU out of the board"
         );
     }
 
-    /// The edge of the blast is escapable in one move; the centre is not.
-    /// Encodes the gradient the old imminence check could not express.
+    /// The arming window is a real dash-through, so the CPU must be able to
+    /// use it rather than treating a fresh mine as instantly lethal.
     #[test]
-    fn bomb_threat_grades_with_depth_into_the_blast() {
+    fn an_arming_mine_can_still_be_crossed() {
         let mut game = WormGame::with_size(120, 38);
-        let r = crate::game::BOMB_RADIUS_CELLS as u16;
         game.bombs.push(crate::game::Bomb {
             x: 60,
             y: 20,
-            fuse: 3,
+            fuse: crate::game::BOMB_FUSE_FRAMES,
+            armed_in: crate::game::MINE_ARM_FRAMES,
+            disguise: 5,
             owner: 0,
         });
-
         assert!(
-            !cell_threatened_by_bomb(&game, 60 + r, 20, 0),
-            "the outermost ring needs one move to clear and has three frames"
+            !cell_threatened_by_bomb(&game, 60, 20, 0),
+            "an inert mine is genuinely crossable while it arms"
         );
+
+        game.bombs[0].armed_in = 1;
         assert!(
             cell_threatened_by_bomb(&game, 60, 20, 0),
-            "the centre needs eleven moves and has three frames"
+            "about to arm with us inside the ring is a trap, not a window"
         );
+    }
+
+    /// Our own mines cannot kill us, so dodging them was the AI avoiding
+    /// blasts that were physically harmless to it.
+    #[test]
+    fn our_own_mine_is_never_a_threat() {
+        let mut game = WormGame::with_size(120, 38);
+        game.bombs.push(crate::game::Bomb {
+            x: 60,
+            y: 20,
+            fuse: 1,
+            armed_in: 0,
+            disguise: 5,
+            owner: 1,
+        });
+        assert!(!cell_threatened_by_bomb(&game, 60, 20, 0));
     }
 
     /// Dying must never make the fatal direction *more* attractive. The k-NN
@@ -4111,6 +4153,8 @@ mod tests {
             x: hx + 1,
             y: hy,
             fuse: 99,
+            disguise: 5,
+            armed_in: 0,
             owner: 0,
         });
         assert!(
@@ -4155,6 +4199,8 @@ mod tests {
             x: hx,
             y: hy,
             fuse: 1,
+            disguise: 5,
+            armed_in: 0,
             owner: 1,
         });
         assert!(
@@ -4166,6 +4212,8 @@ mod tests {
             x: hx,
             y: hy,
             fuse: 1,
+            disguise: 5,
+            armed_in: 0,
             owner: 0,
         });
         assert!(

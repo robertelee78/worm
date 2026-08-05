@@ -61,7 +61,9 @@ pub enum PowerUpKind {
     /// board size.
     TriShot,
     /// Planted at the current cell; detonates after ~3s. Chebyshev radius
-    /// BOMB_RADIUS_CELLS kills heads and clears trails; chains into other bombs.
+    /// A proximity mine: inert while arming, then detonates when an enemy head
+    /// enters its trigger ring. The blast is a cross, and chains into other
+    /// bombs.
     Bomb,
 }
 
@@ -86,12 +88,53 @@ pub struct Projectile {
 pub struct Bomb {
     pub x: u16,
     pub y: u16,
+    /// Backstop countdown, in FRAMES. The mine's job is proximity; this only
+    /// stops stale mines accumulating across a long round. It used to be the
+    /// weapon, derived from milliseconds — which meant one item behaved like
+    /// three over a round, since the same 3s is 26 moves at the opening tick
+    /// and 85 at the speed floor.
     pub fuse: u32,
+    /// The food value this mine MASQUERADES as, 1..=9.
+    ///
+    /// A planted mine is indistinguishable from food — same glyph, same
+    /// value-scaled size, same colour — so the only way to avoid one is to
+    /// remember where it was planted. That is the mechanic: bait. It also
+    /// gives the opponent model something worth learning, because "does this
+    /// human take bait?" is a habit.
+    pub disguise: u8,
+    /// Frames until the proximity trigger goes live. While non-zero the ring
+    /// is inert for EVERYONE: the planter gets clear, and the opponent gets a
+    /// real dash-through window.
+    pub armed_in: u32,
     pub owner: u8,
 }
 
+/// Reach of each blast arm. Unchanged from the old square's radius — a cross
+/// is already far less lethal (41 cells against 441), so shortening the arms
+/// as well would leave it threatening nothing.
 pub const BOMB_RADIUS_CELLS: i16 = 10;
-pub const BOMB_FUSE_MS: u64 = 3000;
+/// Guaranteed-death core, and the ring that triggers the mine. Deliberately
+/// the same number, so the rule reads as "the ring that sets it off is the
+/// ring that certainly kills you".
+pub const BOMB_CORE_RADIUS: i16 = 2;
+pub const MINE_TRIGGER_CELLS: i16 = 2;
+/// Frames a freshly planted mine stays inert. Long enough for the planter to
+/// clear the trigger ring (3 moves), short enough that the dash-through window
+/// is tight rather than free.
+pub const MINE_ARM_FRAMES: u32 = 8;
+/// Failsafe lifetime in FRAMES, so a mine cannot sit on the board forever.
+pub const BOMB_FUSE_FRAMES: u32 = 240;
+
+/// Is `(x, y)` inside a blast centred on `(cx, cy)`?
+///
+/// A CROSS, not a square: the core square plus four axis arms. One predicate,
+/// shared by the kill test and BOTH previews — three hand-written copies of a
+/// blast shape is how "I never saw that coming" gets back in.
+pub fn in_blast(cx: i32, cy: i32, x: i32, y: i32, arm: i32) -> bool {
+    let (ax, ay) = ((x - cx).abs(), (y - cy).abs());
+    let core = BOMB_CORE_RADIUS as i32;
+    (ax <= core && ay <= core) || (ay == 0 && ax <= arm) || (ax == 0 && ay <= arm)
+}
 /// Frames the CPU's laser charges (visibly, along the beam) before firing.
 pub const LASER_TELEGRAPH_FRAMES: u32 = 10;
 /// Ricochets a beam gets before it spends its energy punching through the wall.
@@ -1633,12 +1676,16 @@ impl WormGame {
                 play_beep(SfxKind::TriShot, 1200, 40);
             }
             PowerUpKind::Bomb => {
-                let fuse =
-                    (BOMB_FUSE_MS / self.frame_delay().as_millis().max(1) as u64).max(8) as u32;
+                // Rolled from the game RNG so the disguise is reproducible
+                // under a seed. NOTE: this consumes a draw at plant time, so
+                // seeded streams diverge from pre-mine builds — deliberate.
+                let disguise = self.rng_range(1..10) as u8;
                 self.bombs.push(Bomb {
                     x: hx,
                     y: hy,
-                    fuse,
+                    fuse: BOMB_FUSE_FRAMES,
+                    armed_in: MINE_ARM_FRAMES,
+                    disguise,
                     owner: who as u8,
                 });
                 self.add_impact_particles(hx, hy, (255, 120, 40));
@@ -1783,7 +1830,37 @@ impl WormGame {
     /// Tick bomb fuses and detonate any at zero (chain reactions included).
     pub fn tick_bombs(&mut self) {
         for b in &mut self.bombs {
+            b.armed_in = b.armed_in.saturating_sub(1);
             b.fuse = b.fuse.saturating_sub(1);
+        }
+        // PROXIMITY. An armed mine fires the instant a head that is not its
+        // planter's enters the trigger ring.
+        //
+        // A timer could never be a weapon here: the fuse was 26-85 frames and
+        // clearing the radius took 11 moves, so an attentive target simply
+        // walked out. A mine cannot be dodged by waiting — only by routing
+        // around it, which is the game's actual skill.
+        //
+        // Sets fuse to 0 rather than detonating inline, so the chain-reaction
+        // drain below stays the single detonation path with one set of
+        // draw/winner semantics.
+        let t = MINE_TRIGGER_CELLS as i32;
+        for i in 0..self.bombs.len() {
+            if self.bombs[i].armed_in > 0 || self.bombs[i].fuse == 0 {
+                continue;
+            }
+            let (bx, by, owner) = (self.bombs[i].x, self.bombs[i].y, self.bombs[i].owner);
+            let tripped = self.cycles.iter().enumerate().any(|(c, cy)| {
+                c as u8 != owner
+                    && cy.alive
+                    && (cy.head.0 as i32 - bx as i32)
+                        .abs()
+                        .max((cy.head.1 as i32 - by as i32).abs())
+                        <= t
+            });
+            if tripped {
+                self.bombs[i].fuse = 0;
+            }
         }
         while let Some(i) = self.bombs.iter().position(|b| b.fuse == 0) {
             let b = self.bombs.remove(i);
@@ -1791,7 +1868,7 @@ impl WormGame {
         }
     }
 
-    /// Detonate at (x,y): Chebyshev radius BOMB_RADIUS_CELLS kills heads, clears
+    /// Detonate at (x,y): a CROSS (core square + four axis arms) kills heads, clears
     /// trails/food/power-ups, and chains into other armed bombs. Walls survive.
     /// The bomb's `owner` is never killed by its own blast (mirrors the
     /// tri-shot `from` exclusion). If the game already ended earlier in this
@@ -1810,6 +1887,10 @@ impl WormGame {
         for yy in (cy - r)..=(cy + r) {
             for xx in (cx - r)..=(cx + r) {
                 if xx < 0 || yy < 0 || xx >= self.width as i32 || yy >= self.height as i32 {
+                    continue;
+                }
+                // Cross, not square: 65 cells instead of 441.
+                if !in_blast(cx, cy, xx, yy, r) {
                     continue;
                 }
                 let (ux, uy) = (xx as u16, yy as u16);
@@ -1861,8 +1942,9 @@ impl WormGame {
                 continue;
             }
             let (hx, hy) = self.cycles[c].head;
-            let d = (hx as i32 - cx).abs().max((hy as i32 - cy).abs());
-            if d <= r {
+            // Same predicate as the sweep and both previews: on-axis dies,
+            // diagonal survives.
+            if in_blast(cx, cy, hx as i32, hy as i32, r) {
                 *is_dead = true;
             }
         }
@@ -1994,10 +2076,17 @@ impl WormGame {
                         // from plant time), heating up as detonation nears.
                         let mut danger: Option<f32> = None;
                         for b in &self.bombs {
-                            let dx = (x as i32 - b.x as i32).abs();
-                            let dy = (y as i32 - b.y as i32).abs();
-                            if dx <= BOMB_RADIUS_CELLS as i32 && dy <= BOMB_RADIUS_CELLS as i32 {
-                                let urgency = 1.0 - (b.fuse as f32 / 60.0).min(1.0);
+                            if in_blast(
+                                b.x as i32,
+                                b.y as i32,
+                                x as i32,
+                                y as i32,
+                                BOMB_RADIUS_CELLS as i32,
+                            ) {
+                                // Armed reads hot and steady; still arming
+                                // reads dim — the player must be able to see
+                                // that the dash-through window is open.
+                                let urgency = if b.armed_in > 0 { 0.25 } else { 0.9 };
                                 danger = Some(danger.map_or(urgency, |d: f32| d.max(urgency)));
                             }
                         }
@@ -2077,13 +2166,7 @@ impl WormGame {
                             .unwrap_or(0);
                         // Value-sized glyph — bigger number, bigger morsel,
                         // no digit shown.
-                        let ch = match num {
-                            1..=2 => '·',
-                            3..=4 => '○',
-                            5..=6 => '◎',
-                            7..=8 => '●',
-                            _ => '◆',
-                        };
+                        let ch = food_glyph(num);
                         let hue = num as f32 * 18.0;
                         let (r, g, b) = hsv_to_rgb(hue, 1.0, 1.0);
                         let intensity = ((pulse * 255.0) as u8).max(100);
@@ -2176,19 +2259,23 @@ impl WormGame {
             .unwrap();
         }
 
-        // Draw planted bombs (separate from the grid — overlay). The grid cell
-        // under a bomb reads Empty, so without this a bomb is an invisible
-        // fatal wall: you crash into it with no visual.
+        // Draw planted mines — DISGUISED AS FOOD. Same glyph table, same
+        // value-scaled size, same hue as a real morsel of that value, so there
+        // is no tell. Tracking where the opponent planted theirs is the
+        // counter-play; there is nothing to see.
         for b in &self.bombs {
-            // Blink rate accelerates as the fuse runs down (urgency cue).
-            let urgency = 1.0 - (b.fuse as f32 / 60.0).min(1.0);
-            let hot = (self.time as f32 * (0.15 + urgency * 0.65)).sin() * 0.4 + 0.6;
-            let (r, g, bl) = (255, (120.0 * hot) as u8, 0);
+            let ch = food_glyph(b.disguise);
+            let (r, g, bl) = hsv_to_rgb(b.disguise as f32 * 18.0, 1.0, 1.0);
+            let intensity = ((pulse * 255.0) as u8).max(100);
             execute!(
                 stdout,
-                SetForegroundColor(Color::Rgb { r, g, b: bl }),
+                SetForegroundColor(Color::Rgb {
+                    r: r.max(intensity),
+                    g: g.max(intensity),
+                    b: bl.max(intensity)
+                }),
                 MoveTo(b.x * 2, b.y),
-                Print("💣")
+                Print(ch)
             )
             .unwrap();
         }
@@ -2405,6 +2492,21 @@ impl Dimensions {
                 height: 38,
             }
         }
+    }
+}
+
+/// Glyph for a morsel of this value — bigger number, bigger morsel.
+///
+/// Shared by real food and by a planted mine's disguise, deliberately: two
+/// copies of this table would eventually drift and the drift would BE the
+/// tell that gives every mine away.
+pub fn food_glyph(value: u8) -> char {
+    match value {
+        1..=2 => '·',
+        3..=4 => '○',
+        5..=6 => '◎',
+        7..=8 => '●',
+        _ => '◆',
     }
 }
 

@@ -150,6 +150,7 @@ living documents — if one disagrees with the code, the ADR is the bug.
 - [ADR-005](docs/adrs/005-durable-player-identity.md) — durable identity and brain integrity
 - [ADR-006](docs/adrs/006-honest-read-rate.md) — measuring against the player's own base rate
 - [ADR-007](docs/adrs/007-difficulty-earned-by-reading-you.md) — difficulty earned by reading you, not by the clock
+- [ADR-008](docs/adrs/008-bomb-as-a-disguised-mine.md) — the bomb becomes a mine disguised as food
 
 ### A note on the numbers in this repo
 
