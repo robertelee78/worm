@@ -1505,7 +1505,11 @@ impl WormGame {
     /// CPU's aggression by being boring.
     pub fn refresh_read_rate(&mut self) {
         let read = &self.cpu_brain.lifetime_read;
-        self.read_rate = if read.is_ready() { read.lift() } else { 0.0 };
+        let base = if read.is_ready() { read.lift() } else { 0.0 };
+        // The active playstyle scales how hard the read is SPENT, never the
+        // read itself: cautious plays under its evidence, relentless over it.
+        // Survival floors are untouched by every style.
+        self.read_rate = (base * self.cpu_brain.portfolio.drive_multiplier()).clamp(0.0, 1.0);
         // HUD tier 1..=5, so the number the player sees and the aggression the
         // CPU spends are the same axis.
         self.difficulty = 1 + (self.read_rate * 4.0).round() as u32;
@@ -1555,6 +1559,18 @@ impl WormGame {
         self.game_over = false;
         self.particles.clear();
         self.time = 0;
+        // Exp3 portfolio: credit the temperament that just played — on-policy,
+        // win/draw/loss — and pick the next. The sampling draw hashes
+        // (seal_seed, round index) so seeded runs stay bit-identical and the
+        // game RNG stream is untouched. Read BEFORE winner is cleared below.
+        let reward = match self.winner {
+            Some(1) => 1.0,
+            None => 0.5,
+            _ => 0.0,
+        };
+        let draw = self.seal_seed ^ ((self.cpu_brain.portfolio.rounds as u64 + 1) << 17);
+        self.cpu_brain.portfolio.end_round(reward, draw);
+
         self.winner = None;
         self.frame_count = 0;
         // Recompute how well the CPU reads this player, once, for the whole

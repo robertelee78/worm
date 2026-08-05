@@ -665,6 +665,89 @@ pub fn seal_commit(salt: u64, predicted: Option<Direction>, target_frame: u32) -
     )
 }
 
+/// A small PORTFOLIO of playstyles, selected per round by Exp3.
+///
+/// Implicit opponent modelling (Bard, Johanson, Burch & Bowling, AAMAS 2013):
+/// instead of estimating the opponent's policy in a huge context space, keep a
+/// handful of counter-styles and use online data only to learn WHICH STYLE
+/// BEATS THIS HUMAN — collapsing the learned dimensionality to four numbers,
+/// the right size for a per-round reward signal. Styles here are drive
+/// multipliers on how hard the CPU spends its read (hunt margin + intercept
+/// authority); survival floors are never touched by any style.
+///
+/// Credit is ROUND-LEVEL AND ON-POLICY — win/draw/loss for the style actually
+/// played — because counterfactually replaying a human's trajectory against a
+/// different style is invalid past the first divergence (the human would have
+/// reacted). Unbiased, slower, honest. Exploration is a fixed floor mixed into
+/// the pick (Exp3's gamma), so no style's probability ever reaches zero.
+///
+/// Explainable: "it keeps a small roster of temperaments, cautious to
+/// relentless, and leans toward whichever has actually been beating you —
+/// without ever fully abandoning the others."
+pub const PORTFOLIO_STYLES: [f32; 4] = [0.5, 1.0, 1.6, 2.4];
+const EXP3_ETA: f32 = 0.35;
+const EXP3_GAMMA: f32 = 0.15;
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Portfolio {
+    pub weights: [f32; 4],
+    pub active: usize,
+    pub rounds: u32,
+}
+
+impl Default for Portfolio {
+    fn default() -> Self {
+        Self { weights: [1.0; 4], active: 1, rounds: 0 }
+    }
+}
+
+impl Portfolio {
+    fn probs(&self) -> [f32; 4] {
+        let sum: f32 = self.weights.iter().sum();
+        let mut p = [0.25f32; 4];
+        if sum > 0.0 && sum.is_finite() {
+            for i in 0..4 {
+                p[i] = (1.0 - EXP3_GAMMA) * self.weights[i] / sum + EXP3_GAMMA / 4.0;
+            }
+        }
+        p
+    }
+
+    /// Reward the style just played and pick the next, deterministically under
+    /// the seed (the draw comes from a hash, never the game RNG stream).
+    pub fn end_round(&mut self, reward: f32, draw: u64) {
+        let p = self.probs();
+        // Exp3 importance-weighted update for the played arm only.
+        let est = reward / p[self.active].max(1e-3);
+        self.weights[self.active] *= (EXP3_ETA * est / 4.0).exp();
+        // Renormalise for float hygiene.
+        let sum: f32 = self.weights.iter().sum();
+        if sum > 0.0 && sum.is_finite() {
+            for w in &mut self.weights {
+                *w *= 4.0 / sum;
+            }
+        } else {
+            self.weights = [1.0; 4];
+        }
+        // Sample the next style from the floored distribution.
+        let p = self.probs();
+        let mut u = (fnv1a64(&draw.to_le_bytes()) % 10_000) as f32 / 10_000.0;
+        self.active = 3;
+        for i in 0..4 {
+            if u < p[i] {
+                self.active = i;
+                break;
+            }
+            u -= p[i];
+        }
+        self.rounds += 1;
+    }
+
+    pub fn drive_multiplier(&self) -> f32 {
+        PORTFOLIO_STYLES[self.active]
+    }
+}
+
 /// Variable-order Markov model over the player's BREAK pattern.
 ///
 /// The flat turn prior can say "they break left 85% of the time"; it cannot
@@ -1094,6 +1177,9 @@ pub struct CpuBrain {
     /// habit across sessions.
     #[serde(skip)]
     pub turn_pattern: TurnPattern,
+    /// Which temperaments beat THIS human — knowledge about them, persisted.
+    #[serde(skip)]
+    pub portfolio: Portfolio,
 }
 
 impl Default for CpuBrain {
@@ -1111,6 +1197,7 @@ impl Default for CpuBrain {
             ensemble: Ensemble::default(),
             lifetime_read: ReadRate::default(),
             turn_pattern: TurnPattern::default(),
+            portfolio: Portfolio::default(),
         }
     }
 }
@@ -1285,6 +1372,7 @@ impl CpuBrain {
         push_section(&mut sections, SEC_ENSEMBLE, &self.ensemble);
         push_section(&mut sections, SEC_READ_RATE, &self.lifetime_read);
         push_section(&mut sections, SEC_TURN_PRIOR, &self.opp_brain.turn_tally);
+        push_section(&mut sections, SEC_PORTFOLIO, &self.portfolio);
 
         let mut out = BRAIN_MAGIC_V2.to_le_bytes().to_vec();
         out.extend(BRAIN_FORMAT_V2.to_le_bytes());
@@ -1514,6 +1602,10 @@ impl CpuBrain {
                     }
                     Err(_) => report.sections_skipped += 1,
                 },
+                SEC_PORTFOLIO => match bincode::deserialize::<Portfolio>(body) {
+                    Ok(p) => brain.portfolio = p,
+                    Err(_) => report.sections_skipped += 1,
+                },
                 SEC_TURN_PRIOR => match bincode::deserialize::<[f32; TURNS]>(body) {
                     Ok(t) => brain.opp_brain.turn_tally = t,
                     Err(_) => report.sections_skipped += 1,
@@ -1594,6 +1686,8 @@ const SEC_READ_RATE: u16 = 6;
 /// learnable was forgotten between sessions. For a game whose premise is "it
 /// remembers you", that is the worst possible thing to drop.
 const SEC_TURN_PRIOR: u16 = 7;
+/// The Exp3 playstyle weights — which temperaments beat this human.
+const SEC_PORTFOLIO: u16 = 8;
 
 /// One `(vector, direction, reward, seq)` row. The vector is a length-prefixed
 /// `Vec<f32>` rather than a fixed array precisely so a dimension change is a

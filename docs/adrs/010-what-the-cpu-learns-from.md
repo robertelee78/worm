@@ -81,9 +81,20 @@ regardless of lift.
   stationary 85:15 habit. Explainer-compatible: "it looks for repeating
   patterns in your recent breaks, at several pattern lengths at once."
 
-**Deferred:** portfolio/Exp4 implicit modelling (offline playstyle
-construction — the largest remaining structural win), and the flip-mid-session
-adversarial persona for recovery-time measurement.
+- **Exp3 playstyle portfolio** (implicit modelling, Bard et al. 2013). Four
+  temperaments — drive multipliers 0.5/1.0/1.6/2.4 on how hard the read is
+  SPENT — selected per round by Exp3 with a 15% exploration floor, rewarded
+  on-policy by round outcome. Round-level credit is deliberate: replaying a
+  human's trajectory against a different style is invalid past the first
+  divergence. The weights persist (SEC_PORTFOLIO) — which temperament beats
+  you is knowledge about YOU. Survival floors untouched by every style; the
+  sampling draw hashes (seal_seed, round) so seeded runs stay bit-identical.
+  Measured: domination held at 30–0, lift 69% — the portfolio's payoff is
+  against humans who punish a fixed temperament, which a stationary scripted
+  persona cannot express.
+
+**Deferred:** the flip-mid-session adversarial persona for recovery-time
+measurement.
 
 ## Consequences
 
