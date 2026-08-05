@@ -365,16 +365,32 @@ impl PlayerBrain {
         self.turn_tally[turn_index(turn)] += 1.0;
     }
 
-    /// Laplace-smoothed prior over turns. Uniform (and therefore inert) until
-    /// the player has shown a bias.
+    /// KT-smoothed (Jeffreys, Dirichlet-1/2) prior over turns. Uniform — and
+    /// therefore inert — until the player has shown a bias.
+    ///
+    /// This was add-one Laplace, which is the estimator the sequence-
+    /// prediction literature rejects for exactly our regime: with a handful of
+    /// observations, add-one over-smooths systematically. Concretely, after
+    /// four all-left observations Laplace says 0.714 while KT says 0.818 —
+    /// against a true habit of 0.85. The Krichevsky–Trofimov estimator
+    /// ((n + 1/2)/(N + K/2)) is the asymptotically minimax choice and the one
+    /// the whole CTW family is built on. Same shape, better constants, still
+    /// trivially explainable: "it counts your turns, with the half-count
+    /// start suited to small samples".
     pub fn turn_prior(&self) -> [f32; TURNS] {
         let c = [
-            self.turn_tally[0] + 1.0,
-            self.turn_tally[1] + 1.0,
-            self.turn_tally[2] + 1.0,
+            self.turn_tally[0] + 0.5,
+            self.turn_tally[1] + 0.5,
+            self.turn_tally[2] + 0.5,
         ];
         let inv = 1.0 / (c[0] + c[1] + c[2]);
         [c[0] * inv, c[1] * inv, c[2] * inv]
+    }
+
+    /// Total observed turn mass — how many genuine left/right choices the
+    /// prior is standing on. The confidence input for exploitation gating.
+    pub fn turn_observations(&self) -> f32 {
+        self.turn_tally.iter().sum()
     }
 
     /// Update the EMA base-rate tally for the player's moves (rps-ai `moveTally`).
@@ -3011,9 +3027,24 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
     let player_pred_dir = decision_forecast
         .and_then(|forecast| forecast.predicted)
         .unwrap_or(game.cycles[0].direction);
+    // Confidence gated by OBSERVATION COUNT, per Johanson & Bowling's
+    // data-biased response result (AISTATS 2009): counter-strategies that
+    // trust a model after a single observation measured WORSE than not
+    // modelling at all, while a 0-10 linear ramp — zero trust at zero
+    // observations, full trust from ten — stayed robust regardless of data
+    // quantity. The ensemble's raw confidence is high from frame one (it is
+    // mostly scored on easy frames), so ungated it opens every hunt gate
+    // before the CPU has actually seen this player choose. n here is the
+    // count of genuine left/right choices observed — the same quantity the
+    // turn prior stands on.
+    //
+    // Explainable as: "it doesn't act on a read until it has watched you make
+    // about ten real choices."
+    let read_conf = (game.cpu_brain.opp_brain.turn_observations() / 10.0).min(1.0);
     let player_pred_conf = decision_forecast
         .map(|forecast| forecast.confidence)
-        .unwrap_or(0.0);
+        .unwrap_or(0.0)
+        * read_conf;
     let cpu = &game.cycles[1];
     let (cx, cy) = cpu.head;
 
