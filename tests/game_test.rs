@@ -1448,3 +1448,62 @@ fn rewrite_cpu_episode_dim(bytes: &[u8], new_dim: u16) -> Vec<u8> {
     }
     panic!("CPU-episode section not found");
 }
+
+/* ---------------------- sudden-death ring evacuation ---------------------- */
+//
+// close_ring kills any head standing on the ring it seals. The CPU's base
+// policy is a right-hand wall-follow that hugs the inner face of the ring-2
+// wall — which is exactly the first ring to close — and nothing in cpu_ai.rs
+// knew sudden death existed. Measured against a passive opponent, 47 of 100
+// games ended with the CPU standing on that ring at the sealing frame.
+
+#[test]
+fn test_ring_seal_eta_reports_the_scheduled_ring() {
+    let game = WormGame::with_size(120, 38);
+    // Level 1 seals the ring at offset 3, at START + 1*INTERVAL.
+    let seals_at = worm::game::SUDDEN_DEATH_START + worm::game::SUDDEN_DEATH_INTERVAL;
+
+    assert_eq!(game.ring_seal_eta(3, 20), Some(seals_at - game.time));
+    assert_eq!(game.ring_seal_eta(20, 3), Some(seals_at - game.time));
+    assert_eq!(
+        game.ring_seal_eta(116, 20),
+        Some(seals_at - game.time),
+        "the far edge of the ring is on it too"
+    );
+    assert_eq!(
+        game.ring_seal_eta(60, 20),
+        None,
+        "mid-arena is not on any scheduled ring"
+    );
+}
+
+#[test]
+fn test_cpu_steps_off_a_ring_that_is_about_to_seal() {
+    let mut game = WormGame::with_size(120, 38);
+    // Two frames before the offset-3 ring seals.
+    game.time = worm::game::SUDDEN_DEATH_START + worm::game::SUDDEN_DEATH_INTERVAL - 2;
+
+    // Stand the CPU on that ring, travelling along it — the wall-follow
+    // behaviour that used to kill it.
+    game.cycles[1].head = (3, 20);
+    game.cycles[1].positions = vec![(3, 20)];
+    game.cycles[1].direction = worm::Direction::Down;
+    game.grid[20][3] = worm::CellType::CPU;
+
+    assert!(
+        game.ring_seal_eta(3, 20).is_some_and(|e| e <= 3),
+        "precondition: the CPU is standing on a ring about to seal"
+    );
+
+    let chosen = worm::cpu_decide(&mut game);
+    let (dx, dy) = chosen.as_delta();
+    let nx = (3i16 + dx) as u16;
+    let ny = (20i16 + dy) as u16;
+
+    assert!(
+        game.ring_seal_eta(nx, ny).is_none_or(|e| e > 3),
+        "the CPU moved to ({nx},{ny}), still on a ring sealing in \
+         {:?} frames — it must evacuate, not ride the wall into the close",
+        game.ring_seal_eta(nx, ny)
+    );
+}

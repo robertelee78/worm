@@ -40,10 +40,67 @@ const SUPPORT_TARGET: f32 = 5.0; // effective-N full-support threshold
 pub const COLD_START_EPISODES: usize = 60;
 const EXPLORE_RATE: f32 = 0.05; // outright random legal throw rate
 const MEMORY_VOTE_MIN_OPEN: f32 = 0.05; // destination must keep >=5% of the arena reachable
+
+/// Reachable cells a destination must leave for the cycle to be able to keep
+/// playing from it: enough room to outrun its own body, plus a manoeuvring
+/// margin. Counts `pending_growth` because food already eaten is body the
+/// cycle does not have yet — entering a twelve-cell pocket right after
+/// swallowing a nine is the classic snake-AI death.
+///
+/// Length-relative by design. See the note at the `escape_cells` call site for
+/// why the previous arena-fraction floor failed at both ends of a round.
+fn escape_floor_cells(game: &WormGame, who: usize) -> f32 {
+    let c = &game.cycles[who];
+    let own_len = c.positions.len() as f32 + c.pending_growth as f32;
+    own_len * ESCAPE_LENGTH_MULTIPLE + ESCAPE_MARGIN_CELLS
+}
+
+/// Leave a sudden-death ring this many frames before it seals, rather than at
+/// the last instant — one frame of slack is not enough when the move that
+/// takes you off the ring may itself be blocked.
+const RING_EVACUATE_FRAMES: u32 = 3;
+
+/// Would stepping `d` from `from` land on a sudden-death ring about to seal?
+/// `close_ring` kills any head standing on the ring it closes.
+fn ring_doomed_step(game: &WormGame, from: (u16, u16), d: Direction) -> bool {
+    let (ddx, ddy) = d.as_delta();
+    let nx = (from.0 as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
+    let ny = (from.1 as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
+    matches!(game.ring_seal_eta(nx, ny), Some(eta) if eta <= RING_EVACUATE_FRAMES)
+}
+
+/// `preferred`, unless it steps onto a ring about to seal — then the first
+/// candidate that does not.
+///
+/// Sudden death outranks EVERY decision layer, including the cold-start
+/// wall-follow: a head on the sealing ring dies regardless of how thoughtfully
+/// the move was chosen. Applying this only to the lower layers was the bug —
+/// a fresh brain is always cold, so the cold-start path is exactly the one
+/// running when a first-time player is watching.
+fn evacuate_ring(
+    game: &WormGame,
+    from: (u16, u16),
+    preferred: Direction,
+    pool: &[Direction],
+) -> Direction {
+    if !ring_doomed_step(game, from, preferred) {
+        return preferred;
+    }
+    pool.iter()
+        .copied()
+        .find(|&d| !ring_doomed_step(game, from, d))
+        .unwrap_or(preferred)
+}
+
+/// How many times its own length a cycle wants reachable before committing.
+const ESCAPE_LENGTH_MULTIPLE: f32 = 3.0;
+/// Flat manoeuvring allowance on top, so a very short cycle still needs room.
+const ESCAPE_MARGIN_CELLS: f32 = 8.0;
 /// Survival floor for hunt-layer deviations: the destination must keep at
 /// least this much of the arena reachable (and at least half of wall-follow's
 /// space) — the anti-kamikaze gate.
-const SURVIVAL_MIN_OPEN: f32 = 0.12;
+// (The former `SURVIVAL_MIN_OPEN = 0.12` arena-fraction floor was replaced by
+// the length-relative `escape_floor_cells`; see its call site in `cpu_decide`.)
 const SELF_VOTE_MIN_CONFIDENCE: f32 = 0.4; // margin x support x maturity gate (rps-ai confidence)
 const RECALL_K: usize = 16;
 const CLEAR_BIAS: f32 = 0.125; // prior saturation point (1/8 bias over 4 dirs)
@@ -2053,8 +2110,11 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
     // decisions. This guarantees the adaptive CPU is at least as good as the
     // baseline during the warm-up phase.
     if memory_size < COLD_START_EPISODES {
+        // Still subject to sudden death — see `evacuate_ring`.
+        let head = game.cycles[1].head;
+        let warm = wall_follow_decide(game, &game.cycles[1]);
         choose!(
-            wall_follow_decide(game, &game.cycles[1]),
+            evacuate_ring(game, head, warm, &legal),
             CpuDecisionReason::WarmingUp
         );
     }
@@ -2128,15 +2188,28 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
     // defensive layers could then return a direction with a projectile or
     // bomb blast landing on it. Fall back to full legal when everything is
     // threatened (a dodge is impossible; let the layers pick the least-bad).
+    //
+    // A cell on a sudden-death ring that is about to seal is also excluded:
+    // `close_ring` kills any head standing on the ring it closes, and nothing
+    // in this file previously knew sudden death existed.
     let safe_legal: Vec<Direction> = legal
         .iter()
         .copied()
-        .filter(|d| !threatened_dirs.contains(d))
+        .filter(|d| !threatened_dirs.contains(d) && !ring_doomed_step(game, (cx, cy), *d))
         .collect();
-    let candidates: &[Direction] = if safe_legal.is_empty() {
-        &legal
-    } else {
+    // Never empty the candidate set — when every move is threatened or doomed
+    // the layers below still have to pick the least-bad one.
+    let ring_safe_legal: Vec<Direction> = legal
+        .iter()
+        .copied()
+        .filter(|d| !ring_doomed_step(game, (cx, cy), *d))
+        .collect();
+    let candidates: &[Direction] = if !safe_legal.is_empty() {
         &safe_legal
+    } else if !ring_safe_legal.is_empty() {
+        &ring_safe_legal
+    } else {
+        &legal
     };
 
     // Survival floor for every deviation from wall-follow: the destination
@@ -2148,7 +2221,21 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
     let wx = (cx as i16 + wdx).max(0).min((game.width - 1) as i16) as u16;
     let wy = (cy as i16 + wdy).max(0).min((game.height - 1) as i16) as u16;
     let wall_open = count_open_space(game, wx, wy) / total_cells;
-    let open_floor = SURVIVAL_MIN_OPEN.max(wall_open * 0.5);
+    // Absolute, LENGTH-RELATIVE survival floor, in cells.
+    //
+    // This replaced an arena FRACTION (0.12 of the board, or half of whatever
+    // wall-follow kept, whichever was larger), which was wrong at both ends of
+    // a round: early game `wall_open` is ~0.80
+    // so the floor became ~0.40 of the board — demanding ~1824 reachable cells
+    // of a nine-cell snake, which suppressed every safe food run — while late
+    // game, once total reachable space fell under ~547 cells, the floor could
+    // no longer be met by ANY move and all deviation layers switched off at
+    // once, blinding the CPU exactly when the arena got interesting.
+    //
+    // The quantity that actually decides survival is not "how much of the
+    // arena" but "can I still outrun my own body", so the floor scales with
+    // length. `escape_floor_cells` is the single source of truth.
+    let escape_cells = escape_floor_cells(game, 1);
 
     // --- DEFENSIVE: avoid predicted player when very close ---
     // SURVIVAL BEFORE HUNTING: this used to run AFTER the intercept layers,
@@ -2247,7 +2334,6 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
         // Only used when the food isn't on the wall-follow path and the
         // destination has enough open space to not trap us.
         if let Some((food_dir, food_open)) = bfs_nearest_food_dir(game, cx, cy, candidates) {
-            let norm_open = food_open / (game.width as f32 * game.height as f32);
             // Only take the BFS path if the destination clears the same
             // survival floor every other wall-follow deviation obeys (the
             // old hard-coded 10% undercut open_floor on both axes).
@@ -2261,7 +2347,7 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
             // layer declined and the k-NN below wandered off instead.
             // Honesty is preserved by labelling the coincidence, not by
             // forfeiting the food.
-            if norm_open >= open_floor {
+            if food_open >= escape_cells {
                 let reason = if food_dir == wall_dir {
                     CpuDecisionReason::WallFollow
                 } else {
@@ -2305,7 +2391,7 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
                     let norm_open = open / (game.width as f32 * game.height as f32);
 
                     // Survival floor: never dive into a pocket for a hunt.
-                    if norm_open < open_floor {
+                    if open < escape_cells {
                         continue;
                     }
 
@@ -2371,7 +2457,7 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
                     let norm_open = open / (game.width as f32 * game.height as f32);
 
                     // Survival floor: never dive into a pocket for a hunt.
-                    if norm_open < open_floor {
+                    if open < escape_cells {
                         continue;
                     }
 
@@ -2463,7 +2549,15 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
         }
     }
 
-    choose!(wall_dir, CpuDecisionReason::WallFollow);
+    // Wall-follow is the base policy, but it is not exempt from the ring.
+    // It hugs the inner face of the ring-2 wall, which is precisely the first
+    // ring sudden death seals — so the fallthrough that produces most of the
+    // CPU's moves is exactly the one that used to walk it into the closing
+    // wall. Prefer any candidate that is not about to be sealed.
+    choose!(
+        evacuate_ring(game, (cx, cy), wall_dir, candidates),
+        CpuDecisionReason::WallFollow
+    );
 }
 
 /// Predict which corner a cycle will reach next given their current direction.
@@ -2614,6 +2708,56 @@ pub fn record_player_episode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The survival floor must scale with the cycle's own body, because the
+    /// only thing a snake has to outrun is itself. The floor this replaced was
+    /// an arena FRACTION, which asked the same 547+ cells of a 3-cell snake as
+    /// of a 100-cell one.
+    #[test]
+    fn escape_floor_scales_with_length_not_arena() {
+        let mut game = WormGame::with_size(120, 38);
+
+        game.cycles[1].positions = vec![(10, 10); 3];
+        let short = escape_floor_cells(&game, 1);
+
+        game.cycles[1].positions = vec![(10, 10); 40];
+        let long = escape_floor_cells(&game, 1);
+
+        assert!(
+            long > short,
+            "a longer cycle must demand more room ({long} vs {short})"
+        );
+        assert_eq!(short, 3.0 * ESCAPE_LENGTH_MULTIPLE + ESCAPE_MARGIN_CELLS);
+
+        // The old arena-fraction floor demanded at least 0.12 * 120 * 38 = 547
+        // cells regardless of length, which a short cycle can never justify.
+        let old_absolute_minimum = 0.12 * 120.0 * 38.0;
+        assert!(
+            short < old_absolute_minimum,
+            "a 3-cell cycle must not be held to a whole-arena floor"
+        );
+    }
+
+    /// Food already swallowed is body the cycle does not have yet. Ignoring
+    /// `pending_growth` is the classic snake-AI death: enter a 12-cell pocket
+    /// immediately after eating a 9 and the tail stops retracting behind you.
+    #[test]
+    fn escape_floor_counts_owed_growth() {
+        let mut game = WormGame::with_size(120, 38);
+        game.cycles[1].positions = vec![(10, 10); 5];
+
+        game.cycles[1].pending_growth = 0;
+        let lean = escape_floor_cells(&game, 1);
+
+        game.cycles[1].pending_growth = 9;
+        let owed = escape_floor_cells(&game, 1);
+
+        assert_eq!(
+            owed - lean,
+            9.0 * ESCAPE_LENGTH_MULTIPLE,
+            "owed growth must count toward the body we have to outrun"
+        );
+    }
 
     /// A brain saved by a pre-WRM2 build must still load. This is the actual
     /// upgrade path for every player who already has a corpus in IndexedDB —

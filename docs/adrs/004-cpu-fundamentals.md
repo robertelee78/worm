@@ -94,6 +94,43 @@ CPU end-length rose from 2.0–3.6 to 4.3–6.4, and mean game length against th
 wall-follower fell from ~2,100 frames to ~610 — the CPU now ends games instead
 of orbiting.
 
+### 2. Length-relative survival floor — SHIPPED (measurement-neutral)
+
+`escape_floor_cells(game, who) = (positions.len() + pending_growth) * 3 + 8`,
+in absolute cells, replacing the arena fraction at all three consumers (food
+route, corner intercept, direct intercept).
+
+**Win rate did not move — the per-bucket numbers were byte-identical.** The
+hypothesis about *where* the old floor binds was wrong: on a mostly-empty board
+`count_open_space` returns nearly the whole interior (~3,600 cells), so the old
+~1,824-cell floor passed anyway. It only binds in constrained space, which
+games now averaging ~610 frames never reach.
+
+Kept anyway, as a correctness fix with unit tests rather than a win-rate claim:
+the floor is now length-relative and counts owed growth, so it cannot demand a
+whole arena of a three-cell cycle, and it cannot switch every deviation layer
+off at once late in a round. Pinned by `escape_floor_scales_with_length_not_arena`
+and `escape_floor_counts_owed_growth`.
+
+### 3. Sudden-death ring evacuation — SHIPPED (proven by test, not by benchmark)
+
+`WormGame::ring_seal_eta(x, y)` reports frames until the ring through a cell
+seals; `sudden_death_max_level()` is extracted so the schedule has one
+definition instead of being duplicated inline. The CPU excludes doomed cells
+from its candidate set and, via `evacuate_ring`, from wall-follow itself.
+
+**A first attempt failed its own test, which is how the real bug surfaced.**
+The veto was applied at the candidate-filter level — but the cold-start
+`WarmingUp` layer returns `wall_follow_decide` directly and bypasses every
+filter below it. A fresh brain is always cold, so that is precisely the path a
+first-time player sees. `evacuate_ring` is now applied at the cold-start layer
+and the wall-follow fallthrough as well, so sudden death outranks every layer.
+
+Not measurable on the current benchmark either: games end around frame 610 and
+sudden death starts at 3,000. Pinned by
+`test_ring_seal_eta_reports_the_scheduled_ring` and
+`test_cpu_steps_off_a_ring_that_is_about_to_seal`.
+
 ## Consequences
 
 Fixing fundamentals is a prerequisite for the learning work, not a parallel
