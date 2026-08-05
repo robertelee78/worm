@@ -1274,6 +1274,28 @@ fn test_sudden_death_kills_head_on_closing_ring() {
 }
 
 #[test]
+fn test_laser_bounces_off_arena_wall() {
+    // Shooter near the left edge facing right: the beam crosses the arena,
+    // bounces off the right arena wall (ring 2), and returns along the same
+    // row — hitting an opponent BEHIND the shooter, reachable only
+    // post-bounce. The outer frame still stops the beam.
+    let mut game = WormGame::with_size(120, 38);
+    game.food_items.clear();
+    game.cycles[0].head = (4, 10);
+    game.cycles[0].positions = vec![(4, 10)];
+    game.cycles[0].direction = worm::Direction::Right;
+    game.cycles[0].held_powerup = Some(worm::game::PowerUpKind::Laser);
+    game.grid[10][4] = worm::CellType::Player;
+    game.cycles[1].head = (3, 10); // behind the shooter
+    game.cycles[1].positions = vec![(3, 10)];
+    game.grid[10][3] = worm::CellType::CPU;
+    assert!(game.fire_powerup(0));
+    assert!(game.game_over, "the bounced beam reaches behind the shooter");
+    assert_eq!(game.winner, Some(0));
+    assert!(!game.cycles[1].alive);
+}
+
+#[test]
 fn test_cpu_laser_charges_before_firing() {
     // The CPU's laser telegraphs for LASER_TELEGRAPH_FRAMES before firing —
     // it must NOT kill the moment the player crosses the firing line.

@@ -1615,18 +1615,10 @@ pub fn should_fire(game: &mut WormGame, who: usize) -> bool {
 
     match kind {
         crate::game::PowerUpKind::Laser => {
-            // Player must be in line of fire (same row or col, no walls between).
+            // The beam ricochets off arena walls, so the player needn't share
+            // a row/col — fire when the (possibly bounced) beam path reaches
+            // the player's head. The telegraph draws this exact path.
             let (dx, dy) = game.cycles[who].direction.as_delta();
-            if dx != 0 && hy != oy {
-                return false;
-            }
-            if dy != 0 && hx != ox {
-                return false;
-            }
-            if dx == 0 && dy == 0 {
-                return false;
-            }
-            // Check no walls between us and the player.
             let beam = beam_cells(game, hx, hy, dx, dy);
             beam.contains(&(ox, oy))
         }
@@ -1656,19 +1648,33 @@ pub fn should_fire(game: &mut WormGame, who: usize) -> bool {
     }
 }
 
-/// Cells a straight beam passes through, stopping before the first wall/frame.
+/// Beam path with arena-wall ricochet — mirror of game.rs beam_cells (the
+/// CPU's aim, the telegraph, and the actual shot must trace the same path).
 fn beam_cells(game: &WormGame, hx: u16, hy: u16, dx: i16, dy: i16) -> Vec<(u16, u16)> {
     let mut out = Vec::new();
     let mut x = hx as i16;
     let mut y = hy as i16;
+    let mut rdx = dx;
+    let mut rdy = dy;
+    let mut bounces = 0;
     loop {
-        x += dx;
-        y += dy;
+        x += rdx;
+        y += rdy;
         if x < 0 || y < 0 || x >= game.width as i16 || y >= game.height as i16 {
             break;
         }
         let (ux, uy) = (x as u16, y as u16);
         if game.grid[uy as usize][ux as usize] == crate::game::CellType::Wall {
+            if bounces < 4 && game.is_arena_wall(ux, uy) {
+                if (ux == 2 || ux == game.width - 3) && rdx != 0 {
+                    rdx = -rdx;
+                }
+                if (uy == 2 || uy == game.height - 3) && rdy != 0 {
+                    rdy = -rdy;
+                }
+                bounces += 1;
+                continue;
+            }
             break;
         }
         out.push((ux, uy));
