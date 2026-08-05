@@ -180,6 +180,9 @@ pub struct ForecastTrace {
     pub source: usize,
     pub predicted: Option<Direction>,
     pub confidence: f32,
+    /// Hash of the prediction, published BEFORE the player's input for
+    /// `target_frame` is read, and revealed after. See [`seal_commit`].
+    pub seal: u64,
 }
 
 /// The previous forecast scored against the player's move on this frame.
@@ -584,6 +587,53 @@ pub fn mask_to_legal(
                     .unwrap_or(std::cmp::Ordering::Equal)
             }),
     }
+}
+
+/// FNV-1a 64. Deliberately hand-rolled and deliberately not cryptographic:
+/// pulling in a crypto crate would imply a guarantee this cannot make.
+pub fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for &b in bytes {
+        h ^= b as u64;
+        h = h.wrapping_mul(0x1000_0000_01b3);
+    }
+    h
+}
+
+/// Per-frame salt. A pure function of `(seal_seed, target_frame)` so it never
+/// touches the game RNG — drawing from that stream would shift food spawns and
+/// explore rolls, and silently invalidate every seeded benchmark in the repo.
+pub fn seal_salt(seal_seed: u64, target_frame: u32) -> u64 {
+    fnv1a64(
+        &[
+            seal_seed.to_le_bytes().as_slice(),
+            target_frame.to_le_bytes().as_slice(),
+        ]
+        .concat(),
+    )
+}
+
+/// The commitment published before the player's input for `target_frame`.
+///
+/// WHAT THIS PROVES, precisely: that the forecast was fixed before your input
+/// for that frame was read. It is tamper-evidence against a refactor that
+/// moves forecast generation after input, and against a hand-edited
+/// transcript.
+///
+/// WHAT IT DOES NOT PROVE: anything against a hostile host. The whole game
+/// runs on your machine and the salt derives from a seed the page knows.
+/// Claiming more would be the same dishonesty the read-rate work exists to
+/// undo, so the explainer says this out loud.
+pub fn seal_commit(salt: u64, predicted: Option<Direction>, target_frame: u32) -> u64 {
+    let code = predicted.map(|d| dir_index(d) as u8).unwrap_or(255);
+    fnv1a64(
+        &[
+            salt.to_le_bytes().as_slice(),
+            &[code],
+            target_frame.to_le_bytes().as_slice(),
+        ]
+        .concat(),
+    )
 }
 
 /// Minimum frames on which the CPU and the trivial baseline DISAGREED before

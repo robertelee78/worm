@@ -297,6 +297,14 @@ pub struct WormGame {
     /// constant for its duration: a CPU whose aggression drifts mid-round
     /// reads as erratic rather than as adaptive.
     pub read_rate: f32,
+    /// Seed for the prediction seals. Derived from the game seed, never drawn
+    /// from the RNG stream.
+    pub seal_seed: u64,
+    /// Every revealed seal folded into one number, so a whole round has a
+    /// single value a player can copy and re-verify offline.
+    pub seal_chain: u64,
+    /// Seals revealed this round.
+    pub seal_frames: u32,
     /// Frame-owned CPU evidence: scored forecast, actual decision, and the
     /// separately-labelled forecast for the next frame.
     pub cpu_telemetry: crate::cpu_ai::CpuFrameTelemetry,
@@ -460,6 +468,9 @@ impl WormGame {
             food_eaten_by: [0, 0],
             round_read: crate::cpu_ai::ReadRate::default(),
             read_rate: 0.0,
+            seal_seed: seed.unwrap_or(0x5EA1_5EED),
+            seal_chain: 0,
+            seal_frames: 0,
             round_pred_hits: 0,
             round_pred_total: 0,
             cpu_telemetry: crate::cpu_ai::CpuFrameTelemetry::default(),
@@ -689,6 +700,18 @@ impl WormGame {
                         self.round_read.record(player_options, turn, hit);
                         self.cpu_brain.lifetime_read.record(player_options, turn, hit);
                     }
+                    // Reveal: fold this seal and the move it was scored
+                    // against into a single round-long chain the player can
+                    // copy and re-verify.
+                    self.seal_chain = crate::cpu_ai::fnv1a64(
+                        &[
+                            self.seal_chain.to_le_bytes().as_slice(),
+                            forecast.seal.to_le_bytes().as_slice(),
+                            &[player_dir_this_frame as u8],
+                        ]
+                        .concat(),
+                    );
+                    self.seal_frames += 1;
                     self.cpu_telemetry.scored = Some(crate::cpu_ai::ScoredForecast {
                         forecast,
                         actual: player_dir_this_frame,
@@ -974,11 +997,20 @@ impl WormGame {
             e.predicted_dir =
                 crate::cpu_ai::mask_to_legal(e.predicted_dir, &legal_next, heading, &turn_prior);
             self.cpu_brain.last_opp_prediction = e.predicted_dir;
+            // Commit the prediction BEFORE the player's input for that frame
+            // exists. The salt is a pure function of (seal_seed, frame) — it
+            // deliberately never touches the game RNG, because drawing from
+            // that stream would shift food spawns and explore rolls and
+            // silently invalidate every seeded benchmark in the repo.
+            let target = self.frame_count + 1;
+            let salt = crate::cpu_ai::seal_salt(self.seal_seed, target);
+            let predicted = e.predicted_dir;
             self.cpu_telemetry.next_forecast = Some(crate::cpu_ai::ForecastTrace {
-                target_frame: self.frame_count + 1,
+                target_frame: target,
                 source: active,
-                predicted: e.predicted_dir,
+                predicted,
                 confidence,
+                seal: crate::cpu_ai::seal_commit(salt, predicted, target),
             });
         }
 
@@ -1468,6 +1500,8 @@ impl WormGame {
         self.food_eaten_total = 0;
         self.food_eaten_by = [0, 0];
         self.round_read = crate::cpu_ai::ReadRate::default();
+        self.seal_chain = 0;
+        self.seal_frames = 0;
         self.round_pred_hits = 0;
         self.round_pred_total = 0;
         self.cpu_laser_charge = 0;

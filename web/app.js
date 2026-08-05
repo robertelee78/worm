@@ -7,7 +7,7 @@ import { computeBoardLayout, VIEWPORT_BLOCK_GUTTER } from './layout.js';
 
 let CELL = 14; // recomputed by applyBoardLayout() to fit the measured stage
 const MATCH_TARGET = 3;
-const STATE_SCHEMA_VERSION = 1;
+const STATE_SCHEMA_VERSION = 2;
 const ROUND_SCHEMA_VERSION = 1;
 const MAX_ROUND_HISTORY = 200;
 const MODEL_NAMES = ['rep', 'pat', 'frq', 'due', 'wlR', 'wlL', 'knn'];
@@ -677,11 +677,83 @@ function hud(s) {
   const habitIdx = b.habits.indexOf(Math.max(...b.habits));
   document.getElementById('bp-habit').textContent =
     `Your strongest direction habit: ${DIR_GLYPH[habitIdx]} ${(b.habits[habitIdx] * 100).toFixed(0)}%`;
-  document.getElementById('bp-accnum').textContent =
-    `${(b.accuracy.round.rate * 100).toFixed(0)}% · n=${b.accuracy.round.samples}`;
-  document.getElementById('bp-acc').style.width = `${(b.accuracy.round.rate * 100).toFixed(0)}%`;
+  // READ RATE — measured against the player's OWN base rate, not uniform
+  // chance. Against a straight-driving player "always predict straight" scores
+  // 98%, which against a 33% baseline would read as "it found a pattern". It
+  // found nothing. Nothing renders until there are enough DISAGREEMENTS with
+  // that baseline to say anything at all.
+  const rr = b.readRate.round;
+  const life = b.readRate.lifetime;
+  const accEl = document.getElementById('bp-accnum');
+  const barEl = document.getElementById('bp-acc');
+  const chanceEl = document.getElementById('bp-chance');
+
+  if (rr.discordant === 0) {
+    accEl.textContent = 'no reads yet';
+    barEl.style.width = '0%';
+  } else if (!rr.ready) {
+    accEl.textContent = `reading you — ${rr.discordant}/${rr.minDiscordant} disagreements`;
+    barEl.style.width = `${((rr.discordant / rr.minDiscordant) * 100).toFixed(0)}%`;
+  } else {
+    accEl.textContent =
+      `${(rr.rate * 100).toFixed(0)}% vs your usual ${(rr.baseRate * 100).toFixed(0)}%` +
+      (rr.significant ? ' — beating your habits' : ' — not yet past your habits');
+    barEl.style.width = `${(rr.rate * 100).toFixed(0)}%`;
+  }
+  // The marker is MEASURED, never the hardcoded 25% that used to sit here —
+  // a reversal is never legal, so uniform chance is at most 1/3.
+  if (rr.ready) {
+    chanceEl.style.left = `${(rr.baseRate * 100).toFixed(1)}%`;
+    chanceEl.title = `${(rr.baseRate * 100).toFixed(0)}% — what always guessing your commonest move would score`;
+    chanceEl.classList.remove('hidden');
+  } else {
+    chanceEl.classList.add('hidden');
+  }
+
   document.getElementById('bp-lifetime').textContent =
-    `Lifetime ${(b.accuracy.lifetime.rate * 100).toFixed(0)}% · n=${b.accuracy.lifetime.samples} · chance 25%`;
+    !life.ready
+      ? `Lifetime — reading you, ${life.discordant}/${life.minDiscordant} disagreements`
+      : `Lifetime ${(life.rate * 100).toFixed(0)}% vs usual ${(life.baseRate * 100).toFixed(0)}%` +
+        ` · lift ${(life.lift * 100).toFixed(0)}% · tier ${b.difficulty}` +
+        (life.significant ? ` (1 in ${Math.max(1, Math.round(1 / Math.max(life.pValue, 1e-9)))} this is luck)` : '');
+
+  // PLAIN-ENGLISH EXPLAINER. Every line cites a LIVE number — an explainer
+  // full of static prose is marketing, not explanation.
+  const ex = document.getElementById('bp-explain-body');
+  if (ex) {
+    const pct = (v) => `${(v * 100).toFixed(0)}%`;
+    ex.innerHTML = [
+      `<p><b>What it remembers.</b> Every move you make, with the situation you
+        were in — ${b.memory.opponentObserved} so far, keeping the most recent
+        ${b.memory.opponentRetained}.</p>`,
+      `<p><b>How it guesses.</b> Seven simple assumptions about you all guess at
+        once; whichever has been right most lately drives. Currently
+        ${b.nextForecast?.sourceName || '—'}.</p>`,
+      `<p><b>What the read rate means.</b> It only scores itself where you had a
+        real choice — guessing right in a one-exit corridor is worth nothing.
+        And it is measured against <i>your own habits</i>, not against random:
+        always guessing your commonest move would score
+        ${rr.ready ? pct(rr.baseRate) : '—'}, so only beating that is a read.</p>`,
+      `<p><b>What the seal proves.</b> Before you press a key it publishes a
+        hash of its guess, and reveals it after — so the guess provably came
+        first. It runs on your machine, so this is tamper-evidence, not proof
+        against a hostile host.</p>`,
+      `<p><b>What it never does.</b> It never reads your keypress before
+        predicting, never sees the board's future, and never sees anyone else's
+        games. This brain only knows you, and it lives in this browser.</p>`,
+    ].join('');
+  }
+
+  // SEAL — the prediction was published before your input was read.
+  const sealEl = document.getElementById('bp-seal');
+  const nf = b.nextForecast;
+  if (b.scored) {
+    sealEl.textContent = `SEAL ✓ ${b.seal.frames} verified · chain ${b.seal.chain.slice(0, 10)}…`;
+    sealEl.className = 'bp-seal ok';
+  } else if (nf) {
+    sealEl.textContent = 'SEALED — prediction committed';
+    sealEl.className = 'bp-seal';
+  }
 
   if (roundMemoryStart === null) roundMemoryStart = b.memory.opponentObserved;
 

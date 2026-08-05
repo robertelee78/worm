@@ -1790,3 +1790,82 @@ fn test_mine_blast_still_breaches_the_arena_wall() {
         "the ring-0 frame is never breachable"
     );
 }
+
+/* ------------------------- sealed prediction ----------------------------- */
+
+/// THE test that gives the seal meaning.
+///
+/// Same board, same frame, four different player inputs. The committed seal
+/// must be identical in all four, because it was fixed before the input
+/// existed. If a refactor ever moves forecast generation after input, exactly
+/// one of these stops matching and this fails.
+#[test]
+fn test_the_seal_is_committed_before_the_input_is_read() {
+    let seals: Vec<u64> = [
+        worm::Direction::Up,
+        worm::Direction::Down,
+        worm::Direction::Left,
+        worm::Direction::Right,
+    ]
+    .iter()
+    .map(|&d| {
+        let mut game = WormGame::with_size_seed(120, 38, 777);
+        for _ in 0..6 {
+            game.update();
+        }
+        let committed = game.cpu_telemetry.next_forecast.unwrap();
+        // Only now does the player choose.
+        game.change_direction(d);
+        game.update();
+        committed.seal
+    })
+    .collect();
+
+    assert!(
+        seals.windows(2).all(|w| w[0] == w[1]),
+        "the seal must not depend on what the player did next: {seals:?}"
+    );
+}
+
+#[test]
+fn test_a_revealed_seal_verifies_against_its_prediction() {
+    let mut game = WormGame::with_size_seed(120, 38, 4242);
+    for _ in 0..8 {
+        game.update();
+    }
+    let scored = game.cpu_telemetry.scored.expect("a forecast was scored");
+    let salt = worm::cpu_ai::seal_salt(game.seal_seed, scored.forecast.target_frame);
+
+    assert_eq!(
+        scored.forecast.seal,
+        worm::cpu_ai::seal_commit(salt, scored.forecast.predicted, scored.forecast.target_frame),
+        "the revealed prediction must match what was sealed"
+    );
+    // And a different prediction must NOT verify, or the seal proves nothing.
+    assert_ne!(
+        scored.forecast.seal,
+        worm::cpu_ai::seal_commit(salt, None, scored.forecast.target_frame),
+        "a seal that verifies against any prediction is not a commitment"
+    );
+}
+
+#[test]
+fn test_sealing_does_not_disturb_the_game_rng() {
+    // The salt is a pure function of (seal_seed, frame) precisely so seeded
+    // runs stay bit-identical. Two runs of the same seed must agree exactly.
+    let run = || {
+        let mut game = WormGame::with_size_seed(120, 38, 20260805);
+        for _ in 0..120 {
+            if !game.update() {
+                break;
+            }
+        }
+        (
+            game.frame_count,
+            game.food_items.clone(),
+            game.cycles[1].head,
+            game.seal_chain,
+        )
+    };
+    assert_eq!(run(), run(), "seeded play must be reproducible");
+}

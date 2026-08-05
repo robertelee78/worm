@@ -85,10 +85,15 @@
       <div class="bp-warm" id="bp-warm"></div>
       <div class="bp-mem" id="bp-mem"></div>
       <div class="bp-habit" id="bp-habit"></div>
-      <div class="bp-acclabel">This round <span id="bp-accnum">0% · n=0</span></div>
-      <div class="bp-bar bp-accbar"><div class="bp-accfill" id="bp-acc"></div><div class="bp-chance" title="25% random-chance baseline"></div></div>
-      <div class="bp-lifetime" id="bp-lifetime">Lifetime 0% · n=0</div>
-      <div class="bp-foot">Every model forecasts your next move. The best recent predictor informs the hunt; weapon and survival layers can override it.</div>
+      <div class="bp-acclabel">Read rate <span id="bp-accnum">no reads yet</span></div>
+      <div class="bp-bar bp-accbar"><div class="bp-accfill" id="bp-acc"></div><div class="bp-chance hidden" id="bp-chance"></div></div>
+      <div class="bp-lifetime" id="bp-lifetime">Lifetime — no reads yet</div>
+      <div class="bp-seal" id="bp-seal">SEALED —</div>
+      <details class="bp-explain">
+        <summary>How it works</summary>
+        <div id="bp-explain-body"></div>
+      </details>
+      <div class="bp-foot">Only frames where you had a real choice are scored — corridors where physics chose for you are not reads.</div>
     </aside>
   </div>
 </div>

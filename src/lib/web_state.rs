@@ -11,7 +11,7 @@ use crate::cpu_ai::{
 use crate::game::PowerUpKind;
 use crate::{Direction, WormGame};
 
-pub const STATE_SCHEMA_VERSION: u8 = 1;
+pub const STATE_SCHEMA_VERSION: u8 = 2;
 
 const MODEL_DISPLAY_NAMES: [&str; ENSEMBLE_MODELS] = [
     "Streak reader",
@@ -68,9 +68,70 @@ struct BrainState {
     last_decision: Option<DecisionState>,
     next_forecast: Option<ForecastState>,
     accuracy: AccuracyScopes,
+    /// The honest metric: read rate against the player's OWN base rate.
+    read_rate: ReadRateScopes,
+    /// How well the CPU reads this player, in [0,1], and the HUD tier it buys.
+    read_lift: f32,
+    difficulty: u32,
+    seal: SealState,
     memory: MemoryState,
     habits: [f32; 4],
     models: Vec<ModelState>,
+}
+
+/// Prediction seals revealed this round, chained into one verifiable number.
+#[derive(Serialize)]
+struct SealState {
+    /// Hex — a u64 exceeds JS safe-integer range and would silently round if
+    /// emitted as a JSON number.
+    chain: String,
+    frames: u32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ReadRateState {
+    hits: u32,
+    samples: u32,
+    /// Frames where the CPU and the trivial baseline DISAGREED. This, not the
+    /// frame count, is the real sample size of "it beat your habits".
+    discordant: u32,
+    min_discordant: u32,
+    ready: bool,
+    significant: bool,
+    /// null until `ready` — a rate on five disagreements is noise, and a
+    /// front-end that forgets that would render it anyway.
+    rate: Option<f32>,
+    base_rate: Option<f32>,
+    lift: Option<f32>,
+    p_value: Option<f32>,
+    uniform_chance: Option<f32>,
+}
+
+impl From<&crate::cpu_ai::ReadRate> for ReadRateState {
+    fn from(r: &crate::cpu_ai::ReadRate) -> Self {
+        let ready = r.is_ready();
+        let g = |v: f32| if ready { Some(v) } else { None };
+        Self {
+            hits: r.hits,
+            samples: r.samples,
+            discordant: r.discordant(),
+            min_discordant: crate::cpu_ai::READ_RATE_MIN_DISCORDANT,
+            ready,
+            significant: r.is_significant(),
+            rate: g(r.rate()),
+            base_rate: g(r.base_rate()),
+            lift: g(r.lift()),
+            p_value: g(r.p_value()),
+            uniform_chance: g(r.uniform_chance()),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ReadRateScopes {
+    round: ReadRateState,
+    lifetime: ReadRateState,
 }
 
 #[derive(Serialize)]
@@ -312,6 +373,16 @@ impl GameState {
                 decision: game.cpu_telemetry.decision.clone().map(Into::into),
                 last_decision: game.round_last_cpu_decision.clone().map(Into::into),
                 next_forecast: game.cpu_telemetry.next_forecast.map(Into::into),
+                read_rate: ReadRateScopes {
+                    round: (&game.round_read).into(),
+                    lifetime: (&game.cpu_brain.lifetime_read).into(),
+                },
+                read_lift: game.read_rate,
+                difficulty: game.difficulty,
+                seal: SealState {
+                    chain: format!("0x{:016x}", game.seal_chain),
+                    frames: game.seal_frames,
+                },
                 accuracy: AccuracyScopes {
                     round: AccuracyState {
                         hits: game.round_pred_hits,
@@ -385,6 +456,7 @@ mod tests {
                     source: 1,
                     predicted: Some(Direction::Right),
                     confidence: 0.75,
+                    seal: 0,
                 }),
                 projection: None,
             }),
@@ -393,6 +465,7 @@ mod tests {
                 source: 2,
                 predicted: Some(Direction::Down),
                 confidence: 0.5,
+                seal: 0,
             }),
         };
 
