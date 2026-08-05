@@ -557,6 +557,26 @@ impl WormGame {
             let player_turn =
                 crate::cpu_ai::Turn::from_dirs(player_heading, player_dir_this_frame);
 
+            // Fold the move into the relative-turn prior — but ONLY at forced
+            // turns, where holding the line was not an option.
+            //
+            // Recording every frame destroys the statistic. PRIOR_DECAY ages
+            // all three counts on every call, while an increment lands only on
+            // the turn actually taken; with ~98% of frames Straight, Left and
+            // Right each decay ~50x between consecutive turns and the rarer of
+            // the two collapses to numerical zero. Measured against a persona
+            // breaking left 84:16, the tally read [99.14, 0.856, 1.4e-8] — it
+            // had stopped counting how OFTEN and started counting how RECENTLY.
+            //
+            // Recording only forced turns makes the decay rate match the event
+            // rate, and it is also the honest definition of the habit: "which
+            // way do you break when you cannot go straight".
+            if !crate::cpu_ai::legal_options(self, self.player).contains(&player_heading) {
+                if let Some(turn) = player_turn {
+                    self.cpu_brain.opp_brain.observe_turn(turn);
+                }
+            }
+
             if let Some(forecast) = incoming_forecast {
                 if let Some(predicted) = forecast.predicted {
                     let hit = predicted == player_dir_this_frame;
@@ -1041,10 +1061,16 @@ impl WormGame {
             // A prediction into a wall is an abstention dressed as an answer,
             // and it abstains precisely on the forced-turn frames where a
             // habit is the only thing left to read.
-            let legal_next = crate::cpu_ai::legal_options(self, self.player);
-            let prior = self.cpu_brain.opp_brain.prior_distribution();
+            // The heading the player will be travelling when they choose next.
+            // `snapshot_direction` has not run yet, so this frame's move lives
+            // in `direction` — and the next frame's reversal ban is relative to
+            // it, not to `prev_direction`.
+            let heading = self.cycles[self.player].direction;
+            let legal_next = crate::cpu_ai::legal_options_from(self, self.player, heading);
+            let turn_prior = self.cpu_brain.opp_brain.turn_prior();
             let e = &mut self.cpu_brain.ensemble;
-            e.predicted_dir = crate::cpu_ai::mask_to_legal(e.predicted_dir, &legal_next, &prior);
+            e.predicted_dir =
+                crate::cpu_ai::mask_to_legal(e.predicted_dir, &legal_next, heading, &turn_prior);
             self.cpu_brain.last_opp_prediction = e.predicted_dir;
             self.cpu_telemetry.next_forecast = Some(crate::cpu_ai::ForecastTrace {
                 target_frame: self.frame_count + 1,

@@ -240,6 +240,18 @@ pub struct PlayerBrain {
     pub seq: u32,
     /// EMA base-rate on the player's observed moves, a fallback prior.
     pub tally: [f32; 4],
+    /// EMA base-rate over the player's TURNS relative to their own heading.
+    ///
+    /// The absolute `tally` above cannot hold a habit like "breaks left when
+    /// cornered": measured, a persona turning left 88% of the time produced an
+    /// absolute distribution of Up .11 Down .11 Left .38 Right .39 — the habit
+    /// smears across all four compass directions and the model confidently
+    /// learns the wrong thing. Relative to the heading it is one number.
+    ///
+    /// `#[serde(skip)]` + its own WRM2 section: bincode is not field-tolerant,
+    /// and a serialized field here would break the legacy WRM1 path.
+    #[serde(skip)]
+    pub turn_tally: [f32; TURNS],
 }
 
 impl Default for PlayerBrain {
@@ -248,6 +260,7 @@ impl Default for PlayerBrain {
             episodes: VecDeque::new(),
             seq: 0,
             tally: [0.0; 4],
+            turn_tally: [0.0; TURNS],
         }
     }
 }
@@ -295,6 +308,26 @@ impl PlayerBrain {
         let prior = self.prior_distribution();
         let tvd: f32 = prior.iter().map(|p| (p - 0.25).abs()).sum::<f32>() / 2.0;
         (tvd / CLEAR_BIAS).min(1.0)
+    }
+
+    /// Fold one observed turn into the relative-turn prior.
+    pub fn observe_turn(&mut self, turn: Turn) {
+        for i in 0..TURNS {
+            self.turn_tally[i] *= PRIOR_DECAY;
+        }
+        self.turn_tally[turn_index(turn)] += 1.0;
+    }
+
+    /// Laplace-smoothed prior over turns. Uniform (and therefore inert) until
+    /// the player has shown a bias.
+    pub fn turn_prior(&self) -> [f32; TURNS] {
+        let c = [
+            self.turn_tally[0] + 1.0,
+            self.turn_tally[1] + 1.0,
+            self.turn_tally[2] + 1.0,
+        ];
+        let inv = 1.0 / (c[0] + c[1] + c[2]);
+        [c[0] * inv, c[1] * inv, c[2] * inv]
     }
 
     /// Update the EMA base-rate tally for the player's moves (rps-ai `moveTally`).
@@ -411,8 +444,20 @@ pub fn option_count(game: &WormGame, who: usize) -> u8 {
 
 /// The directions cycle `who` could legally commit to next, in a fixed order.
 pub fn legal_options(game: &WormGame, who: usize) -> Vec<Direction> {
+    legal_options_from(game, who, game.cycles[who].prev_direction)
+}
+
+/// As `legal_options`, but with the heading stated explicitly.
+///
+/// The reversal ban is relative to the direction actually MOVED, and which
+/// field holds that depends on where in the frame you are: before
+/// `snapshot_direction` runs, `prev_direction` is last frame's move and
+/// `direction` is this frame's. Forecasting the NEXT frame from the end of
+/// this one therefore has to pass `direction` — using the default here would
+/// ban the wrong move and admit an illegal one.
+pub fn legal_options_from(game: &WormGame, who: usize, heading: Direction) -> Vec<Direction> {
     let c = &game.cycles[who];
-    let banned = match c.prev_direction {
+    let banned = match heading {
         Direction::Up => Direction::Down,
         Direction::Down => Direction::Up,
         Direction::Left => Direction::Right,
@@ -466,21 +511,54 @@ pub fn legal_options(game: &WormGame, who: usize) -> Vec<Direction> {
 pub fn mask_to_legal(
     predicted: Option<Direction>,
     legal: &[Direction],
-    prior: &[f32; 4],
+    heading: Direction,
+    turn_prior: &[f32; TURNS],
 ) -> Option<Direction> {
     if legal.is_empty() {
         return predicted;
     }
+    // A FORCED TURN: the player cannot continue straight, so they must break
+    // one way or the other. This is the only moment a turning habit is
+    // expressed, and it is precisely where the absolute models have NEGATIVE
+    // skill — measured, they read a left-breaking persona at 38% against a
+    // 50% baseline, because their answer defaults to the current heading and
+    // a forced turn guarantees that is wrong. So do not consult them here;
+    // the relative prior is the only estimator with any claim to the frame.
+    let forced_turn = !legal.contains(&heading);
+    if forced_turn {
+        return legal
+            .iter()
+            .copied()
+            .max_by(|a, b| {
+                let score = |d: Direction| {
+                    Turn::from_dirs(heading, d).map_or(0.0, |t| turn_prior[turn_index(t)])
+                };
+                score(*a)
+                    .partial_cmp(&score(*b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+    }
+
     match predicted {
         // The model named something they can do — take it.
         Some(d) if legal.contains(&d) => Some(d),
-        // Impossible (or absent): fall back to their favourite legal move.
+        // Impossible (or absent) while straight was still available.
+        //
+        // The fallback must be relative, not absolute. Asking "which compass
+        // direction does this player like?" cannot answer it: a player who
+        // breaks left 88% of the time has a near-uniform absolute
+        // distribution, because left-of-Up and left-of-Right are different
+        // compass directions. Asking "which way do they turn?" answers it in
+        // one number.
         _ => legal
             .iter()
             .copied()
             .max_by(|a, b| {
-                prior[dir_index(*a)]
-                    .partial_cmp(&prior[dir_index(*b)])
+                let score = |d: Direction| {
+                    Turn::from_dirs(heading, d).map_or(0.0, |t| turn_prior[turn_index(t)])
+                };
+                score(*a)
+                    .partial_cmp(&score(*b))
                     .unwrap_or(std::cmp::Ordering::Equal)
             }),
     }
@@ -3265,20 +3343,45 @@ mod tests {
     /// real guess drawn from their habit — measured, this alone took lift from
     /// 0% to 69% against an opponent with a left-turn signature.
     #[test]
-    fn an_impossible_forecast_falls_back_to_the_habit() {
-        // They favour Left heavily; Up is not available.
-        let prior = [0.05, 0.05, 0.80, 0.10]; // Up, Down, Left, Right
+    fn an_impossible_forecast_falls_back_to_the_turn_habit() {
+        // Travelling Up, and they habitually break LEFT when forced.
+        // Left-of-Up is Left; right-of-Up is Right.
+        let turn_prior = [0.10, 0.80, 0.10]; // Straight, Left, Right
         let legal = [Direction::Left, Direction::Right];
 
         assert_eq!(
-            mask_to_legal(Some(Direction::Up), &legal, &prior),
+            mask_to_legal(Some(Direction::Up), &legal, Direction::Up, &turn_prior),
             Some(Direction::Left),
-            "an unreachable prediction must become their favourite legal move"
+            "an unreachable prediction must become their habitual TURN"
         );
         assert_eq!(
-            mask_to_legal(None, &legal, &prior),
+            mask_to_legal(None, &legal, Direction::Up, &turn_prior),
             Some(Direction::Left),
             "so must no prediction at all"
+        );
+    }
+
+    /// The point of relative turns: the SAME habit must produce a different
+    /// compass direction under a different heading. An absolute prior cannot
+    /// do this, which is why a left-breaking player was unlearnable.
+    #[test]
+    fn the_turn_habit_rotates_with_the_heading() {
+        let turn_prior = [0.10, 0.80, 0.10]; // habitually breaks Left
+
+        // Heading Up: left is Left.
+        assert_eq!(
+            mask_to_legal(None, &[Direction::Left, Direction::Right], Direction::Up, &turn_prior),
+            Some(Direction::Left)
+        );
+        // Heading Right: left is Up. Same habit, different compass answer.
+        assert_eq!(
+            mask_to_legal(None, &[Direction::Up, Direction::Down], Direction::Right, &turn_prior),
+            Some(Direction::Up)
+        );
+        // Heading Down: left is Right.
+        assert_eq!(
+            mask_to_legal(None, &[Direction::Left, Direction::Right], Direction::Down, &turn_prior),
+            Some(Direction::Right)
         );
     }
 
@@ -3286,12 +3389,30 @@ mod tests {
     /// would replace the model's read with a base-rate guess.
     #[test]
     fn a_possible_forecast_is_left_alone() {
-        let prior = [0.05, 0.05, 0.80, 0.10];
-        let legal = [Direction::Left, Direction::Right];
+        let turn_prior = [0.10, 0.80, 0.10];
+        // Straight is available, so this is a free choice, not a forced turn —
+        // the model's read is the best information available and stands.
+        let legal = [Direction::Up, Direction::Left, Direction::Right];
         assert_eq!(
-            mask_to_legal(Some(Direction::Right), &legal, &prior),
+            mask_to_legal(Some(Direction::Right), &legal, Direction::Up, &turn_prior),
             Some(Direction::Right),
             "a legal prediction stands even when the habit disagrees"
+        );
+    }
+
+    /// At a FORCED turn the absolute models have measured NEGATIVE skill —
+    /// they read a left-breaking persona at 38% against a 50% baseline — so
+    /// their opinion is discarded in favour of the relative prior, even when
+    /// what they named is technically legal.
+    #[test]
+    fn a_forced_turn_overrides_the_model_with_the_habit() {
+        let turn_prior = [0.10, 0.80, 0.10]; // habitually breaks Left
+        let legal = [Direction::Left, Direction::Right]; // Up (straight) blocked
+
+        assert_eq!(
+            mask_to_legal(Some(Direction::Right), &legal, Direction::Up, &turn_prior),
+            Some(Direction::Left),
+            "a forced turn must be answered by the habit, not by the model"
         );
     }
 
@@ -3299,9 +3420,9 @@ mod tests {
     /// inventing a move, so the caller sees the model's actual opinion.
     #[test]
     fn masking_with_no_legal_moves_is_a_passthrough() {
-        let prior = [0.25; 4];
+        let turn_prior = [1.0 / 3.0; TURNS];
         assert_eq!(
-            mask_to_legal(Some(Direction::Up), &[], &prior),
+            mask_to_legal(Some(Direction::Up), &[], Direction::Up, &turn_prior),
             Some(Direction::Up)
         );
     }
