@@ -307,6 +307,234 @@ impl PlayerBrain {
     }
 }
 
+/// A move expressed RELATIVE to the heading it was made from.
+///
+/// The opponent model's habits live in this space, not in absolute
+/// directions. "Breaks left when cornered" is one pattern here and four
+/// unrelated patterns in absolute space, so relative labelling is what lets a
+/// single observation generalise across all four headings.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash, serde::Serialize, serde::Deserialize)]
+pub enum Turn {
+    Straight,
+    Left,
+    Right,
+}
+
+pub const TURNS: usize = 3;
+
+#[inline]
+pub fn turn_index(t: Turn) -> usize {
+    match t {
+        Turn::Straight => 0,
+        Turn::Left => 1,
+        Turn::Right => 2,
+    }
+}
+
+impl Turn {
+    /// The absolute direction this turn produces from `heading`.
+    #[inline]
+    pub fn apply(self, heading: Direction) -> Direction {
+        match self {
+            Turn::Straight => heading,
+            Turn::Left => left_turn(heading),
+            Turn::Right => right_turn(heading),
+        }
+    }
+
+    /// The turn taking `heading` to `next`, or `None` for a reversal.
+    ///
+    /// `None` is reachable: the 180 latch lives in `change_direction`, and
+    /// tests assign `cycles[n].direction` directly, bypassing it. Callers
+    /// must skip the frame, never unwrap.
+    #[inline]
+    pub fn from_dirs(heading: Direction, next: Direction) -> Option<Turn> {
+        if next == heading {
+            Some(Turn::Straight)
+        } else if next == left_turn(heading) {
+            Some(Turn::Left)
+        } else if next == right_turn(heading) {
+            Some(Turn::Right)
+        } else {
+            None
+        }
+    }
+}
+
+/// How many distinct moves cycle `who` could legally commit to right now.
+///
+/// Counted at frame start, so the board is what the player actually saw. The
+/// reversal is excluded against `prev_direction` — the direction actually
+/// MOVED last tick — because that is the same latch `change_direction`
+/// enforces. Range is 0..=3, never 4, which is why uniform chance at a
+/// decision is ~1/3 and never the 1/4 the UI used to claim.
+pub fn option_count(game: &WormGame, who: usize) -> u8 {
+    let c = &game.cycles[who];
+    let banned = match c.prev_direction {
+        Direction::Up => Direction::Down,
+        Direction::Down => Direction::Up,
+        Direction::Left => Direction::Right,
+        Direction::Right => Direction::Left,
+    };
+    let vacating = |cy: &LightCycle, cell: (u16, u16)| {
+        cy.positions.len() > 1 && cy.pending_growth == 0 && cy.positions.last() == Some(&cell)
+    };
+    [
+        Direction::Up,
+        Direction::Down,
+        Direction::Left,
+        Direction::Right,
+    ]
+    .into_iter()
+    .filter(|&d| d != banned)
+    .filter(|&d| {
+        let (dx, dy) = d.as_delta();
+        let nx = c.head.0 as i16 + dx;
+        let ny = c.head.1 as i16 + dy;
+        if nx < 0 || ny < 0 || nx >= game.width as i16 || ny >= game.height as i16 {
+            return false;
+        }
+        let cell = (nx as u16, ny as u16);
+        if game.passable(cell.0, cell.1) {
+            return true;
+        }
+        // A tail tip about to retract is a legal target, and ignoring that
+        // would under-count a coiled player's real options.
+        if game.bombs.iter().any(|b| (b.x, b.y) == cell) {
+            return false;
+        }
+        let other = 1 - who;
+        vacating(c, cell) || (game.cycles[other].alive && vacating(&game.cycles[other], cell))
+    })
+    .count() as u8
+}
+
+/// Minimum scored decisions before a read rate is reported at all.
+pub const READ_RATE_MIN_SAMPLES: u32 = 30;
+
+/// How well the CPU actually reads this player.
+///
+/// The metric this replaces counted every frame and sat at 84-99% forever,
+/// because ~95% of frames the player is continuing straight and predicting
+/// that is free. This one is scored the same way but reported against the
+/// right null, which is the part that matters.
+///
+/// THE BASELINE IS THE PLAYER'S OWN BASE RATE, not uniform chance. Measured
+/// on this game: against a straight-driving opponent the player goes straight
+/// 98.4% of the time, so "always predict Straight" scores 98%. Against a
+/// uniform 33% baseline that reads as a triumph for a model that has learned
+/// nothing — the vanity metric smuggled back in. rps-ai can use 33% because a
+/// human playing rock-paper-scissors really is near-uniform; a human driving a
+/// worm is not, and pretending otherwise flatters the CPU by construction.
+///
+/// So the headline number is LIFT over always-predicting-the-commonest-turn.
+/// It cannot be gamed by predicting straight, which is exactly the property
+/// the number needs to survive contact with someone who reads the source.
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ReadRate {
+    /// Correctly predicted decisions.
+    pub hits: u32,
+    /// Decisions scored.
+    pub samples: u32,
+    /// Turns actually taken, indexed by `turn_index` — the base rate.
+    pub taken: [u32; TURNS],
+    /// Scored decisions bucketed by how many legal options the player had.
+    /// Only [2] and [3] can be non-zero (a reversal is never legal), which is
+    /// why uniform chance here is ~1/3 and never 1/4.
+    pub opts: [u32; 4],
+}
+
+impl ReadRate {
+    pub fn record(&mut self, options: u8, actual: Turn, hit: bool) {
+        self.samples += 1;
+        self.taken[turn_index(actual)] += 1;
+        self.opts[(options as usize).min(3)] += 1;
+        if hit {
+            self.hits += 1;
+        }
+    }
+
+    /// Raw hit rate. On its own this number is not evidence of anything.
+    pub fn rate(&self) -> f32 {
+        if self.samples == 0 {
+            0.0
+        } else {
+            self.hits as f32 / self.samples as f32
+        }
+    }
+
+    /// What "always predict the commonest turn" would have scored — the
+    /// trivial predictor the model has to beat to have earned anything.
+    pub fn base_rate(&self) -> f32 {
+        if self.samples == 0 {
+            0.0
+        } else {
+            *self.taken.iter().max().unwrap_or(&0) as f32 / self.samples as f32
+        }
+    }
+
+    /// Uniform-choice chance, exact rather than assumed: the mean of 1/k over
+    /// the decisions actually faced. Reported alongside the base rate because
+    /// it is the number rps-ai shows, but it is NOT what significance is
+    /// judged against here.
+    pub fn uniform_chance(&self) -> f32 {
+        if self.samples == 0 {
+            return 0.0;
+        }
+        let expected: f32 = (2..=3).map(|k| self.opts[k] as f32 / k as f32).sum();
+        expected / self.samples as f32
+    }
+
+    /// THE headline. Fraction of the improvement available over the trivial
+    /// predictor that the model actually captured, in [0, 1].
+    ///
+    /// 0.0 means "no better than assuming you do the usual thing". 1.0 means
+    /// every decision called. Self-normalising: a player who genuinely never
+    /// turns produces a base rate near 1.0 and cannot inflate the score by
+    /// being predictable.
+    pub fn lift(&self) -> f32 {
+        let base = self.base_rate().min(0.999);
+        if self.samples == 0 {
+            return 0.0;
+        }
+        ((self.rate() - base) / (1.0 - base)).clamp(0.0, 1.0)
+    }
+
+    pub fn is_ready(&self) -> bool {
+        self.samples >= READ_RATE_MIN_SAMPLES
+    }
+
+    /// Beating the trivial predictor by a margin unlikely to be luck.
+    /// Normal approximation to a binomial around the base rate.
+    pub fn is_significant(&self) -> bool {
+        if !self.is_ready() {
+            return false;
+        }
+        let n = self.samples as f32;
+        let base = self.base_rate().min(0.999);
+        let sd = (base * (1.0 - base) / n).sqrt();
+        sd > 0.0 && (self.rate() - base) / sd >= 2.0
+    }
+
+    /// One phrase, worded identically in the browser panel and the terminal
+    /// HUD so the two builds can never tell the player different stories.
+    pub fn hud_phrase(&self) -> String {
+        if self.samples == 0 {
+            "read —/no decisions".to_string()
+        } else if !self.is_ready() {
+            format!("read —/{} of {}", self.samples, READ_RATE_MIN_SAMPLES)
+        } else {
+            format!(
+                "read {:.0}% vs usual {:.0}% · lift {:.0}%{}",
+                self.rate() * 100.0,
+                self.base_rate() * 100.0,
+                self.lift() * 100.0,
+                if self.is_significant() { " *" } else { "" },
+            )
+        }
+    }
+}
+
 /// k-NN reasoning result.
 #[derive(Debug)]
 pub struct CpuAggregate {
@@ -342,6 +570,16 @@ pub struct CpuBrain {
     pub opp_pred_total: u32,
     /// The rps-ai ensemble: per-model quadratic scores + the active driver.
     pub ensemble: Ensemble,
+    /// Lifetime read record — how well the CPU reads THIS human, measured
+    /// against their own base rate.
+    ///
+    /// `#[serde(skip)]` is load-bearing, not stylistic. `bincode` is not
+    /// field-tolerant: a serialized field added here would make the legacy
+    /// WRM1 path (`bincode::deserialize::<Self>`) fail on every old blob, so
+    /// a returning player would lose their entire corpus in the release that
+    /// added a metric. It rides in its own WRM2 section instead.
+    #[serde(skip)]
+    pub lifetime_read: ReadRate,
 }
 
 impl Default for CpuBrain {
@@ -357,6 +595,7 @@ impl Default for CpuBrain {
             opp_pred_hits: 0,
             opp_pred_total: 0,
             ensemble: Ensemble::default(),
+            lifetime_read: ReadRate::default(),
         }
     }
 }
@@ -529,6 +768,7 @@ impl CpuBrain {
             },
         );
         push_section(&mut sections, SEC_ENSEMBLE, &self.ensemble);
+        push_section(&mut sections, SEC_READ_RATE, &self.lifetime_read);
 
         let mut out = BRAIN_MAGIC_V2.to_le_bytes().to_vec();
         out.extend(BRAIN_FORMAT_V2.to_le_bytes());
@@ -758,6 +998,10 @@ impl CpuBrain {
                     }
                     Err(_) => report.sections_skipped += 1,
                 },
+                SEC_READ_RATE => match bincode::deserialize::<ReadRate>(body) {
+                    Ok(r) => brain.lifetime_read = r,
+                    Err(_) => report.sections_skipped += 1,
+                },
                 // Forward compatibility: a section this build has never heard
                 // of is skipped by its length, not treated as corruption.
                 _ => report.sections_skipped += 1,
@@ -816,6 +1060,13 @@ const SEC_OPP_CORE: u16 = 3;
 const SEC_OPP_EPISODES: u16 = 4;
 /// The rps-ai ensemble scores.
 const SEC_ENSEMBLE: u16 = 5;
+/// Lifetime read record. Its own section rather than a new field on an
+/// existing wire struct: `bincode` is not field-tolerant, so widening
+/// `OppCoreWire` would make every saved blob fail to decode and cost the
+/// player exactly the habit priors that section exists to protect.
+/// Encoding-independent — this is knowledge about the human and must survive
+/// every future feature-space change.
+const SEC_READ_RATE: u16 = 6;
 
 /// One `(vector, direction, reward, seq)` row. The vector is a length-prefixed
 /// `Vec<f32>` rather than a fixed array precisely so a dimension change is a
@@ -2803,6 +3054,97 @@ pub fn record_player_episode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The whole point of the metric: a model that only ever predicts the
+    /// commonest turn must score ZERO lift, however high its raw hit rate.
+    /// Measured against a real opponent this is not hypothetical — the CPU
+    /// scores 98.3% and so does "always straight", so its true lift is 0.
+    #[test]
+    fn predicting_the_usual_thing_earns_no_lift() {
+        let mut r = ReadRate::default();
+        // 98 straights, all called; 2 turns, both missed — the trivial model.
+        for _ in 0..98 {
+            r.record(3, Turn::Straight, true);
+        }
+        for _ in 0..2 {
+            r.record(3, Turn::Left, false);
+        }
+
+        assert!((r.rate() - 0.98).abs() < 1e-6, "raw rate looks excellent");
+        assert!((r.base_rate() - 0.98).abs() < 1e-6, "so does the trivial predictor");
+        assert_eq!(r.lift(), 0.0, "and the lift correctly reports nothing learned");
+        assert!(!r.is_significant());
+    }
+
+    /// The complement: catching the turns is what earns lift.
+    #[test]
+    fn calling_the_turns_earns_lift() {
+        let mut trivial = ReadRate::default();
+        let mut reader = ReadRate::default();
+        for _ in 0..80 {
+            trivial.record(3, Turn::Straight, true);
+            reader.record(3, Turn::Straight, true);
+        }
+        for _ in 0..20 {
+            trivial.record(3, Turn::Left, false); // always guesses straight
+            reader.record(3, Turn::Left, true); // actually read the turn
+        }
+
+        assert_eq!(trivial.lift(), 0.0);
+        assert!(reader.lift() > 0.9, "calling every turn is near-total lift");
+        assert!(reader.is_significant());
+        assert!(!trivial.is_significant());
+    }
+
+    /// Uniform chance is reported honestly per decision — never the 1/4 the
+    /// UI used to claim, because a reversal is never a legal option.
+    #[test]
+    fn uniform_chance_never_assumes_four_options() {
+        let mut r = ReadRate::default();
+        for _ in 0..10 {
+            r.record(2, Turn::Straight, true); // two ways out -> 1/2
+        }
+        for _ in 0..10 {
+            r.record(3, Turn::Straight, true); // three ways out -> 1/3
+        }
+        let expected = (10.0 * 0.5 + 10.0 / 3.0) / 20.0;
+        assert!((r.uniform_chance() - expected).abs() < 1e-5);
+        assert!(r.uniform_chance() > 0.25, "never the old 25% claim");
+    }
+
+    /// A read rate must survive a save/load cycle, or the cross-session curve
+    /// the product is built around resets every launch.
+    #[test]
+    fn read_rate_survives_persistence() {
+        let mut brain = CpuBrain::new();
+        for _ in 0..40 {
+            brain.lifetime_read.record(3, Turn::Left, true);
+        }
+        let (restored, report) = CpuBrain::from_bytes_report(&brain.to_bytes()).unwrap();
+        assert_eq!(restored.lifetime_read.samples, 40);
+        assert_eq!(restored.lifetime_read.hits, 40);
+        assert!(!report.is_partial());
+    }
+
+    /// A blob written before the read-rate section existed must still restore
+    /// cleanly — no scary partial-restore banner for a player who lost nothing.
+    #[test]
+    fn a_brain_without_a_read_rate_section_restores_clean() {
+        let mut brain = CpuBrain::new();
+        brain.opp_pred_hits = 5;
+        brain.opp_pred_total = 9;
+        let bytes = brain.to_bytes();
+        // Drop the trailing section by rewriting the section count.
+        let mut older = bytes.clone();
+        let count = u16::from_le_bytes(older[4..6].try_into().unwrap());
+        older[4..6].copy_from_slice(&(count - 1).to_le_bytes());
+
+        let (restored, report) = CpuBrain::from_bytes_report(&older).unwrap();
+        assert!(report.ensemble_kept);
+        assert_eq!(report.sections_skipped, 0, "a missing section is not a skip");
+        assert_eq!(restored.lifetime_read.samples, 0);
+        assert_eq!((restored.opp_pred_hits, restored.opp_pred_total), (5, 9));
+    }
 
     /// A poisoned brain must degrade to a usable one, not to a silently
     /// useless one. NaN is the dangerous case precisely because it does NOT

@@ -6,7 +6,8 @@ pub mod web_state;
 pub use cpu_ai::{
     count_open_space, cpu_decide, encode_player_context, encode_situation, legal_directions,
     predict_player_move, record_episode, record_player_episode, should_fire, wall_follow_decide,
-    BrainRestore, CpuAggregate, CpuBrain, CpuDecisionReason, CpuDecisionTrace, CpuEpisode,
+    option_count, BrainRestore, CpuAggregate, CpuBrain, CpuDecisionReason, CpuDecisionTrace,
+    CpuEpisode, ReadRate, Turn, READ_RATE_MIN_SAMPLES,
     CpuFrameTelemetry,
     ForecastTrace, PlayerAggregate, PlayerBrain, PlayerEpisode, PlayerProjection, Recalled,
     ScoredForecast,

@@ -214,6 +214,10 @@ pub struct WormGame {
     /// CpuBrain counters below it provide the lifetime/session scope.
     pub round_pred_hits: u32,
     pub round_pred_total: u32,
+    /// This round's read record, measured against the player's own base rate.
+    /// The every-frame `round_pred_*` counters above are kept untouched so
+    /// existing telemetry does not silently change meaning.
+    pub round_read: crate::cpu_ai::ReadRate,
     /// Frame-owned CPU evidence: scored forecast, actual decision, and the
     /// separately-labelled forecast for the next frame.
     pub cpu_telemetry: crate::cpu_ai::CpuFrameTelemetry,
@@ -375,6 +379,7 @@ impl WormGame {
             fixed_dims,
             food_eaten_total: 0,
             food_eaten_by: [0, 0],
+            round_read: crate::cpu_ai::ReadRate::default(),
             round_pred_hits: 0,
             round_pred_total: 0,
             cpu_telemetry: crate::cpu_ai::CpuFrameTelemetry::default(),
@@ -543,6 +548,15 @@ impl WormGame {
         // Last frame's forecasts targeted this input, even when this move is
         // lethal. Score them before collision early-returns can end the game.
         if self.cpu_autopilot {
+            // The choice the player actually faced this frame, read before
+            // anything moves. `prev_direction` is the heading they were
+            // travelling, so the turn is relative to that — the same anchor
+            // the 180 latch uses.
+            let player_options = crate::cpu_ai::option_count(self, self.player);
+            let player_heading = self.cycles[self.player].prev_direction;
+            let player_turn =
+                crate::cpu_ai::Turn::from_dirs(player_heading, player_dir_this_frame);
+
             if let Some(forecast) = incoming_forecast {
                 if let Some(predicted) = forecast.predicted {
                     let hit = predicted == player_dir_this_frame;
@@ -551,6 +565,14 @@ impl WormGame {
                     if hit {
                         self.cpu_brain.opp_pred_hits += 1;
                         self.round_pred_hits += 1;
+                    }
+                    // The honest record, alongside — never instead of — the
+                    // every-frame counters above. A reversal yields no turn
+                    // (tests write `direction` directly, bypassing the latch),
+                    // so that frame is skipped rather than unwrapped.
+                    if let Some(turn) = player_turn {
+                        self.round_read.record(player_options, turn, hit);
+                        self.cpu_brain.lifetime_read.record(player_options, turn, hit);
                     }
                     self.cpu_telemetry.scored = Some(crate::cpu_ai::ScoredForecast {
                         forecast,
@@ -1275,6 +1297,7 @@ impl WormGame {
         self.powerup_timer = 60;
         self.food_eaten_total = 0;
         self.food_eaten_by = [0, 0];
+        self.round_read = crate::cpu_ai::ReadRate::default();
         self.round_pred_hits = 0;
         self.round_pred_total = 0;
         self.cpu_laser_charge = 0;
