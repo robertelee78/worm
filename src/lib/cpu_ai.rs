@@ -907,9 +907,12 @@ fn cell_threatened_by_projectile(game: &WormGame, x: u16, y: u16) -> bool {
 fn cell_threatened_by_bomb(game: &WormGame, x: u16, y: u16, frames_ahead: u8) -> bool {
     let r = crate::game::BOMB_RADIUS_CELLS as i32;
     for b in &game.bombs {
-        // Bomb detonates when fuse reaches 0. Each frame fuse decreases by 1.
+        // Bomb detonates when fuse reaches 0. Each frame fuse decreases by 1,
+        // so a bomb at fuse=1 goes off during THIS frame's tick — a cell the
+        // CPU steps onto now is threatened at frames_ahead=0. Count the
+        // current frame's tick by comparing against frames_ahead + 1.
         let frames_to_detonate = b.fuse;
-        if frames_to_detonate <= frames_ahead as u32 {
+        if frames_to_detonate <= frames_ahead as u32 + 1 {
             let dx = (x as i32 - b.x as i32).abs();
             let dy = (y as i32 - b.y as i32).abs();
             if dx <= r && dy <= r { return true; }

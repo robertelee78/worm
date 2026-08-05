@@ -226,3 +226,134 @@ fn test_head_on_collision_is_draw() {
     assert_eq!(game.winner, None, "head-on must be a draw, not a CPU win");
     assert!(!game.cycles[0].alive && !game.cycles[1].alive);
 }
+
+/// Regression: a planted bomb must never kill its own planter (mirrors the
+/// tri-shot `from` exclusion). Previously the player died to their own bomb —
+/// and, worse, instantly when a laser detonated it, voiding the 3s fuse.
+#[test]
+fn test_bomb_never_kills_its_planter() {
+    let mut game = WormGame::new();
+    for row in &mut game.grid {
+        for cell in row.iter_mut() {
+            if *cell != worm::CellType::Wall {
+                *cell = worm::CellType::Empty;
+            }
+        }
+    }
+    game.cycles[0].head = (10, 15);
+    game.cycles[0].positions = vec![(10, 15)];
+    game.cycles[0].direction = worm::Direction::Right;
+    game.grid[15][10] = worm::CellType::Player;
+    game.cycles[1].head = (70, 5);
+    game.cycles[1].positions = vec![(70, 5)];
+    game.cycles[1].direction = worm::Direction::Right;
+    game.grid[5][70] = worm::CellType::CPU;
+    game.food_items.clear();
+    game.food_items.push((20, 10, 1));
+    game.grid[10][20] = worm::CellType::Food;
+
+    // Player plants a bomb on their own head cell.
+    game.cycles[0].held_powerup = Some(worm::game::PowerUpKind::Bomb);
+    assert!(game.fire_powerup(0));
+    assert_eq!(game.bombs.len(), 1);
+    assert_eq!(game.bombs[0].owner, 0, "bomb must carry the planter's id");
+
+    // Force the fuse to detonate next tick while the player is still inside
+    // the Chebyshev blast radius (distance 0 — right on top of it).
+    game.bombs[0].fuse = 1;
+    game.tick_bombs();
+    assert!(game.cycles[0].alive, "planter must survive its own bomb");
+    assert!(!game.game_over, "own-bomb blast must not end the game");
+    assert!(game.bombs.is_empty(), "bomb detonated");
+}
+
+/// Regression: firing a laser through your OWN planted bomb must not self-kill.
+/// The beam detonates the bomb (voiding its fuse), and the blast radius covers
+/// the firer — the owner exclusion must keep the planter alive.
+#[test]
+fn test_laser_detonating_own_bomb_does_not_self_kill() {
+    let mut game = WormGame::new();
+    for row in &mut game.grid {
+        for cell in row.iter_mut() {
+            if *cell != worm::CellType::Wall {
+                *cell = worm::CellType::Empty;
+            }
+        }
+    }
+    game.cycles[0].head = (10, 15);
+    game.cycles[0].positions = vec![(10, 15)];
+    game.cycles[0].direction = worm::Direction::Right;
+    game.grid[15][10] = worm::CellType::Player;
+    // CPU far away (out of beam row and out of the 10-cell blast radius).
+    game.cycles[1].head = (70, 5);
+    game.cycles[1].positions = vec![(70, 5)];
+    game.cycles[1].direction = worm::Direction::Right;
+    game.grid[5][70] = worm::CellType::CPU;
+    game.food_items.clear();
+    game.food_items.push((20, 10, 1));
+    game.grid[10][20] = worm::CellType::Food;
+
+    // Player's own bomb sits 5 cells ahead in the beam path.
+    game.bombs.push(worm::game::Bomb { x: 15, y: 15, fuse: 999, owner: 0 });
+    game.cycles[0].held_powerup = Some(worm::game::PowerUpKind::Laser);
+
+    assert!(game.fire_powerup(0));
+    assert!(
+        game.bombs.is_empty(),
+        "laser detonates the bomb in its path"
+    );
+    assert!(game.cycles[0].alive, "planter must survive the beam-triggered blast");
+    assert!(!game.game_over, "own-bomb laser chain must not end the game");
+}
+
+/// Regression: when a bolt kills the CPU and a bomb kills the player in the
+/// SAME frame, the game is a DRAW — the later event must not overwrite the
+/// earlier kill's winner (previously the bomb credited the CPU with a win it
+/// never earned).
+#[test]
+fn test_same_frame_kills_are_a_draw() {
+    let mut game = WormGame::new();
+    for row in &mut game.grid {
+        for cell in row.iter_mut() {
+            if *cell != worm::CellType::Wall {
+                *cell = worm::CellType::Empty;
+            }
+        }
+    }
+    game.cycles[0].head = (10, 15);
+    game.cycles[0].positions = vec![(10, 15)];
+    game.cycles[0].direction = worm::Direction::Right;
+    game.grid[15][10] = worm::CellType::Player;
+    game.cycles[1].head = (12, 15);
+    game.cycles[1].positions = vec![(12, 15)];
+    game.cycles[1].direction = worm::Direction::Right;
+    game.grid[15][12] = worm::CellType::CPU;
+    game.food_items.clear();
+    game.food_items.push((20, 10, 1));
+    game.grid[10][20] = worm::CellType::Food;
+
+    // Deterministic: no update()/AI — just advance both bolts in one frame.
+    // Player bolt (from 0): one cell left of the CPU head, will hit (12,15).
+    game.projectiles.push(worm::game::Projectile {
+        x: 11,
+        y: 15,
+        dx: 1,
+        dy: 0,
+        steps_left: 5,
+        from: 0,
+    });
+    // CPU bolt (from 1): one cell left of the PLAYER head, will hit (10,15).
+    game.projectiles.push(worm::game::Projectile {
+        x: 9,
+        y: 15,
+        dx: 1,
+        dy: 0,
+        steps_left: 5,
+        from: 1,
+    });
+
+    game.advance_projectiles();
+    assert!(game.game_over);
+    assert_eq!(game.winner, None, "both heads died this frame -> draw");
+    assert!(!game.cycles[0].alive && !game.cycles[1].alive);
+}

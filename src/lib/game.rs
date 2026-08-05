@@ -74,12 +74,16 @@ pub struct Projectile {
     pub from: u8,
 }
 
-/// A planted bomb counting down to detonation.
+/// A planted bomb counting down to detonation. `owner` is the cycle that
+/// planted it — a bomb never kills its own planter (mirrors `Projectile::from`;
+/// laser-detonating your own bomb must not self-kill, the 3s fuse would
+/// otherwise be voided).
 #[derive(Clone, Debug)]
 pub struct Bomb {
     pub x: u16,
     pub y: u16,
     pub fuse: u32,
+    pub owner: u8,
 }
 
 pub const BOMB_RADIUS_CELLS: i16 = 10;
@@ -485,8 +489,19 @@ impl WormGame {
                     let ny = (cy.head.1 as i16 + dy).max(0).min((self.height - 1) as i16) as u16;
                     (nx, ny) == self.cycles[0].head
                 };
+            // Same-frame sibling: the CPU would also crash this frame (boxed in,
+            // or about to run into a wall/trail/bomb). The player-crash early
+            // return used to skip evaluating the CPU's fate entirely and credit
+            // it the win even though both died.
+            let cpu_would_crash = self.cycles[1].alive && {
+                let cy = &self.cycles[1];
+                let (dx, dy) = cy.direction.as_delta();
+                let nx = (cy.head.0 as i16 + dx).max(0).min((self.width - 1) as i16) as u16;
+                let ny = (cy.head.1 as i16 + dy).max(0).min((self.height - 1) as i16) as u16;
+                !self.passable(nx, ny)
+            };
             self.add_impact_particles(player_new.0, player_new.1, self.cycles[self.player].color);
-            if cpu_rams_back {
+            if cpu_rams_back || cpu_would_crash {
                 self.add_impact_particles(self.cycles[1].head.0, self.cycles[1].head.1, self.cycles[1].color);
                 self.cycles[1].alive = false;
                 self.winner = None;
@@ -496,6 +511,9 @@ impl WormGame {
             self.cycles[self.player].alive = false;
             self.game_over = true;
             play_beep_sequence(&[440, 330, 220, 110], &[100, 100, 100, 200]);
+            // A bomb at fuse 0 still detonates this frame (frame-end order);
+            // it may kill the surviving CPU and turn the loss into a draw.
+            self.tick_bombs();
             return false;
         }
 
@@ -549,6 +567,9 @@ impl WormGame {
         if crate::cpu_ai::should_fire(self, 1) {
             self.fire_powerup(1);
             if self.game_over {
+                // A beam-triggered kill mid-frame must not freeze an armed
+                // bomb at fuse 0 that would have detonated at frame-end.
+                self.tick_bombs();
                 return false;
             }
         }
@@ -597,6 +618,9 @@ impl WormGame {
             self.game_over = true;
             self.winner = if same_cell { None } else { Some(0) };
             play_beep_sequence(&[440, 330, 220, 110], &[100, 100, 100, 200]);
+            // A bomb at fuse 0 still detonates this frame; it may kill the
+            // surviving player and turn the CPU win into a draw.
+            self.tick_bombs();
             return false;
         }
 
@@ -781,7 +805,7 @@ impl WormGame {
                 for &(bx, by) in &beam {
                     if let Some(i) = self.bombs.iter().position(|b| b.x == bx && b.y == by) {
                         let b = self.bombs.remove(i);
-                        self.detonate(b.x, b.y);
+                        self.detonate(b.x, b.y, b.owner);
                     }
                 }
                 // Kill on contact with the opponent head.
@@ -790,18 +814,27 @@ impl WormGame {
                     let (ox, oy) = self.cycles[opp].head;
                     self.add_impact_particles(ox, oy, self.cycles[opp].color);
                     self.cycles[opp].alive = false;
-                    self.game_over = true;
-                    self.winner = Some(who);
-                    play_beep_sequence(&[440, 330, 220, 110], &[80, 80, 80, 160]);
+                    if self.game_over {
+                        // A beam-triggered bomb blast already killed someone
+                        // this frame; the beam then reaching the other head
+                        // means both died -> draw, not an overwrite.
+                        self.winner = None;
+                    } else {
+                        self.game_over = true;
+                        self.winner = Some(who);
+                        play_beep_sequence(&[440, 330, 220, 110], &[80, 80, 80, 160]);
+                    }
                 }
-                // Beam flash particles along the whole path.
+                // Beam flash particles along the whole path. Lifetime in the
+                // same 15..40 range as impact particles so the alpha fade
+                // (lifetime/40) renders a visible line instead of ~15% black.
                 for &(bx, by) in &beam {
                     self.particles.push(Particle {
                         x: bx as f32,
                         y: by as f32,
                         vx: 0.0,
                         vy: 0.0,
-                        lifetime: 6,
+                        lifetime: 20,
                         color: (255, 255, 120),
                     });
                 }
@@ -820,11 +853,14 @@ impl WormGame {
                         from: who as u8,
                     });
                 }
+                // Muzzle flash so the fire is visible at the head.
+                self.add_impact_particles(hx, hy, self.cycles[who].color);
                 play_beep(1200, 40);
             }
             PowerUpKind::Bomb => {
                 let fuse = (BOMB_FUSE_MS / self.frame_delay().as_millis().max(1) as u64).max(8) as u32;
-                self.bombs.push(Bomb { x: hx, y: hy, fuse });
+                self.bombs.push(Bomb { x: hx, y: hy, fuse, owner: who as u8 });
+                self.add_impact_particles(hx, hy, (255, 120, 40));
                 play_beep(220, 60);
             }
             PowerUpKind::WallPunch => {
@@ -898,9 +934,16 @@ impl WormGame {
             if let Some(c) = hit {
                 self.add_impact_particles(ux, uy, self.cycles[c].color);
                 self.cycles[c].alive = false;
-                self.game_over = true;
-                self.winner = Some(1 - c);
-                play_beep_sequence(&[440, 330, 220, 110], &[80, 80, 80, 160]);
+                if self.game_over {
+                    // A bolt (or bomb) already killed the other head earlier
+                    // this frame — both died, so it is a draw, never a
+                    // first-come-first-served winner overwrite.
+                    self.winner = None;
+                } else {
+                    self.game_over = true;
+                    self.winner = Some(1 - c);
+                    play_beep_sequence(&[440, 330, 220, 110], &[80, 80, 80, 160]);
+                }
                 self.projectiles.remove(i);
                 continue;
             }
@@ -923,13 +966,17 @@ impl WormGame {
         }
         while let Some(i) = self.bombs.iter().position(|b| b.fuse == 0) {
             let b = self.bombs.remove(i);
-            self.detonate(b.x, b.y);
+            self.detonate(b.x, b.y, b.owner);
         }
     }
 
     /// Detonate at (x,y): Chebyshev radius BOMB_RADIUS_CELLS kills heads, clears
     /// trails/food/power-ups, and chains into other armed bombs. Walls survive.
-    fn detonate(&mut self, x: u16, y: u16) {
+    /// The bomb's `owner` is never killed by its own blast (mirrors the
+    /// tri-shot `from` exclusion). If the game already ended earlier in this
+    /// frame (e.g. a bolt kill), a head killed here makes it a draw rather
+    /// than overwriting the first kill's winner.
+    fn detonate(&mut self, x: u16, y: u16, owner: u8) {
         self.add_impact_particles(x, y, (255, 120, 40));
         play_beep(110, 120);
         let r = BOMB_RADIUS_CELLS as i32;
@@ -959,9 +1006,12 @@ impl WormGame {
                 }
             }
         }
-        // Kill heads in the radius (both can die -> draw).
+        // Kill heads in the radius (owner excluded; both can die -> draw).
         let mut dead = [false; 2];
         for c in 0..2 {
+            if c as u8 == owner {
+                continue;
+            }
             let (hx, hy) = self.cycles[c].head;
             let d = (hx as i32 - cx).abs().max((hy as i32 - cy).abs());
             if d <= r {
@@ -976,13 +1026,22 @@ impl WormGame {
                     self.add_impact_particles(hx, hy, self.cycles[c].color);
                 }
             }
-            self.game_over = true;
-            self.winner = match (dead[0], dead[1]) {
-                (true, false) => Some(1),
-                (false, true) => Some(0),
-                _ => None,
-            };
-            play_beep_sequence(&[440, 330, 220, 110], &[100, 100, 100, 200]);
+            if self.game_over {
+                // A kill earlier this frame already decided the game. If the
+                // blast now leaves both cycles dead, it is a draw — never let
+                // the later event overwrite the first kill's winner.
+                if !self.cycles[0].alive && !self.cycles[1].alive {
+                    self.winner = None;
+                }
+            } else {
+                self.game_over = true;
+                self.winner = match (dead[0], dead[1]) {
+                    (true, false) => Some(1),
+                    (false, true) => Some(0),
+                    _ => None,
+                };
+                play_beep_sequence(&[440, 330, 220, 110], &[100, 100, 100, 200]);
+            }
         }
     }
 
@@ -1086,7 +1145,7 @@ impl WormGame {
                              .unwrap_or(PowerUpKind::Laser);
                         let ch = match pu {
                             PowerUpKind::Laser => '⚡',
-                            PowerUpKind::TriShot => '⚡',
+                            PowerUpKind::TriShot => '✦',
                             PowerUpKind::Bomb => '💣',
                             PowerUpKind::WallPunch => '🔨',
                         };
@@ -1127,7 +1186,32 @@ impl WormGame {
             execute!(stdout, MoveTo(self.width - 1, y), Print("║")).unwrap();
         }
 
-        // Draw particles
+        // Draw live tri-shot bolts (separate from the grid — overlay).
+        for p in &self.projectiles {
+            execute!(
+                stdout,
+                SetForegroundColor(Color::Rgb { r: 255, g: 255, b: 60 }),
+                MoveTo(p.x, p.y),
+                Print("✹")
+            ).unwrap();
+        }
+
+        // Draw planted bombs (separate from the grid — overlay). The grid cell
+        // under a bomb reads Empty, so without this a bomb is an invisible
+        // fatal wall: you crash into it with no visual.
+        for b in &self.bombs {
+            let hot = ((self.time as f32 * 0.15).sin() * 0.4 + 0.6) as f32;
+            let (r, g, bl) = (255, (120.0 * hot) as u8, 0);
+            execute!(
+                stdout,
+                SetForegroundColor(Color::Rgb { r, g, b: bl }),
+                MoveTo(b.x, b.y),
+                Print("💣")
+            ).unwrap();
+        }
+
+        // Draw particles (over trails, walls and holes too — the beam flash
+        // travels through trails and the WallPunch flash lands on a Hole cell).
         for p in &self.particles {
             let x = p.x as u16;
             let y = p.y as u16;
@@ -1137,9 +1221,7 @@ impl WormGame {
                 let fade_r = (r as f32 * alpha) as u8;
                 let fade_g = (g as f32 * alpha) as u8;
                 let fade_b = (b as f32 * alpha) as u8;
-                if self.grid[y as usize][x as usize] == CellType::Empty {
-                    execute!(stdout, MoveTo(x, y), SetForegroundColor(Color::Rgb { r: fade_r, g: fade_g, b: fade_b }), Print("·")).unwrap();
-                }
+                execute!(stdout, MoveTo(x, y), SetForegroundColor(Color::Rgb { r: fade_r, g: fade_g, b: fade_b }), Print("·")).unwrap();
             }
         }
 
@@ -1155,10 +1237,12 @@ impl WormGame {
             SetForegroundColor(bar_color),
             MoveTo(0, self.height),
             Print(format!(
-                "╔{}╗ P1 (CYAN): {:4} │ P2 (MAGENTA): {:4} │ SCORE: {:5} │ SPEED: {:3}% │ FOOD: {:2} │ TIME: {}",
+                "╔{}╗ P1 (CYAN): {:4} PWR: {:<9} │ P2 (MAGENTA): {:4} PWR: {:<9} │ SCORE: {:5} │ SPEED: {:3}% │ FOOD: {:2} │ TIME: {}",
                 "═".repeat((self.width.saturating_sub(1)) as usize),
                 self.cycles[0].score,
+                Self::powerup_name(self.cycles[0].held_powerup),
                 self.cycles[1].score,
+                Self::powerup_name(self.cycles[1].held_powerup),
                 self.score,
                 100 - (self.frame_count / 60).min(50) as u32,
                 self.food_items.len(),
@@ -1171,7 +1255,7 @@ impl WormGame {
             stdout,
             SetForegroundColor(Color::Rgb { r: 255, g: 85, b: 128 }),
             MoveTo(0, self.height + 1),
-            Print("←→ ARROW KEYS or WASD: Move │ R: Restart │ Q: Quit │ EAT NUMBERS TO GROW • COLLIDE TO DIE"),
+            Print("←→ ARROW KEYS or WASD: Move │ SPACE: Fire Power-up │ R: Restart │ Q: Quit │ EAT NUMBERS TO GROW • COLLIDE TO DIE"),
             ResetColor,
         ).unwrap();
 
