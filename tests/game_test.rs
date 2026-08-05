@@ -1290,7 +1290,10 @@ fn test_laser_bounces_off_arena_wall() {
     game.cycles[1].positions = vec![(3, 10)];
     game.grid[10][3] = worm::CellType::CPU;
     assert!(game.fire_powerup(0));
-    assert!(game.game_over, "the bounced beam reaches behind the shooter");
+    assert!(
+        game.game_over,
+        "the bounced beam reaches behind the shooter"
+    );
     assert_eq!(game.winner, Some(0));
     assert!(!game.cycles[1].alive);
 }
