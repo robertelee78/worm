@@ -714,6 +714,16 @@ impl WormGame {
             if !legal_now.contains(&player_heading) {
                 if let Some(turn) = player_turn {
                     self.cpu_brain.opp_brain.observe_turn(turn);
+                    // The pattern model sees the same break stream.
+                    match turn {
+                        crate::cpu_ai::Turn::Left => {
+                            self.cpu_brain.turn_pattern.observe(true)
+                        }
+                        crate::cpu_ai::Turn::Right => {
+                            self.cpu_brain.turn_pattern.observe(false)
+                        }
+                        crate::cpu_ai::Turn::Straight => {}
+                    }
                 }
             }
 
@@ -1032,6 +1042,15 @@ impl WormGame {
             let heading = self.cycles[self.player].direction;
             let legal_next = crate::cpu_ai::legal_options_from(self, self.player, heading);
             let turn_prior = self.cpu_brain.opp_brain.turn_prior();
+            // The break-pattern read outranks the flat prior once it has
+            // enough events to have earned an opinion.
+            let pattern_left = if self.cpu_brain.turn_pattern.events
+                >= crate::cpu_ai::VOMM_MIN_EVENTS
+            {
+                Some(self.cpu_brain.turn_pattern.p_left())
+            } else {
+                None
+            };
 
             // Mask EVERY model's prediction, not just the winner's.
             //
@@ -1044,7 +1063,9 @@ impl WormGame {
             // is published is the point of scoring at all.
             let masked: Vec<Option<Direction>> = pending
                 .iter()
-                .map(|&p| crate::cpu_ai::mask_to_legal(p, &legal_next, heading, &turn_prior))
+                .map(|&p| {
+                    crate::cpu_ai::mask_to_legal(p, &legal_next, heading, &turn_prior, pattern_left)
+                })
                 .collect();
 
             let e = &mut self.cpu_brain.ensemble;

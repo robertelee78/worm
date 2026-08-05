@@ -64,9 +64,25 @@ retention (both variants), genuine-choice-only prior recording. Rejected on
 constraint: anything the explainer cannot honestly describe (opaque nets),
 regardless of lift.
 
-**Deferred, from the research ranking:** log-loss fixed-share ensemble
-mixing, multi-horizon scoring, decomposed context-tree switching as an
-ensemble member, portfolio/Exp4 implicit modelling, and a flip-mid-session
+**Also implemented from the research ranking, each measured alone:**
+
+- **Two-horizon fixed-share model selection** (Herbster–Warmuth). A full
+  mixed vote was measured and REJECTED (lift 80% but wins 100%→93%);
+  fixed-share weights as the *selector* with single-driver forecasts kept
+  30–0 and took lift 66%→69%. The share step bounds every model's weight away
+  from zero — the recovery property hard argmax structurally lacks — and the
+  fast/slow rates hold "what they always do" and "what they just started
+  doing" simultaneously.
+- **A variable-order Markov pattern model over breaks** (flattened
+  context-tree switching: KT estimators at depths 0–5, fixed-share weighted
+  across depths). It outranks the flat prior at forced turns once it has six
+  break events. Unit-proven to call a strict alternator perfectly — a player
+  the three-number tally reads as an unreadable 50/50 — while still reading a
+  stationary 85:15 habit. Explainer-compatible: "it looks for repeating
+  patterns in your recent breaks, at several pattern lengths at once."
+
+**Deferred:** portfolio/Exp4 implicit modelling (offline playstyle
+construction — the largest remaining structural win), and the flip-mid-session
 adversarial persona for recovery-time measurement.
 
 ## Consequences

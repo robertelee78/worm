@@ -555,6 +555,7 @@ pub fn mask_to_legal(
     legal: &[Direction],
     heading: Direction,
     turn_prior: &[f32; TURNS],
+    pattern_left: Option<f32>,
 ) -> Option<Direction> {
     if legal.is_empty() {
         return predicted;
@@ -568,6 +569,17 @@ pub fn mask_to_legal(
     // the relative prior is the only estimator with any claim to the frame.
     let forced_turn = !legal.contains(&heading);
     if forced_turn {
+        // When the pattern model has enough break history, it outranks the
+        // flat prior: it can express "they alternate" or "after two lefts
+        // they go right", which a three-number tally structurally cannot.
+        // Below the evidence floor, the prior decides as before.
+        if let Some(p_left) = pattern_left {
+            let want = if p_left >= 0.5 { Turn::Left } else { Turn::Right };
+            let dir = want.apply(heading);
+            if legal.contains(&dir) {
+                return Some(dir);
+            }
+        }
         return legal
             .iter()
             .copied()
@@ -651,6 +663,131 @@ pub fn seal_commit(salt: u64, predicted: Option<Direction>, target_frame: u32) -
         ]
         .concat(),
     )
+}
+
+/// Variable-order Markov model over the player's BREAK pattern.
+///
+/// The flat turn prior can say "they break left 85% of the time"; it cannot
+/// say "they alternate", or "after two lefts they go right". This holds a KT
+/// (Krichevsky–Trofimov) estimator for every recent break-context up to depth
+/// `VOMM_DEPTH`, and mixes the per-depth predictions with fixed-share
+/// exponential weights — a flattened context-tree-switching scheme: each
+/// depth is a hypothesis about how much history matters, and the weights
+/// float toward whichever depth has been predicting THIS player best, while
+/// the share step keeps every depth recoverable after a style change.
+///
+/// The alphabet is binary (Left/Right at forced breaks) because that is where
+/// a turning habit is expressed; the KT estimator ((n+1/2)/(N+1)) is the
+/// asymptotically minimax choice at these tiny counts. Everything here is
+/// counts and multiplications — O(depth) per event, free in the frame budget,
+/// and explainable: "it looks for repeating patterns in your recent breaks,
+/// at several pattern lengths at once, trusting whichever length has been
+/// calling you right."
+pub const VOMM_DEPTH: usize = 5;
+const VOMM_ETA: f32 = 1.0;
+const VOMM_SHARE: f32 = 0.05;
+/// Break events needed before the pattern model outranks the flat prior.
+pub const VOMM_MIN_EVENTS: u32 = 6;
+
+#[derive(Clone, Debug)]
+pub struct TurnPattern {
+    /// Recent break outcomes, most recent last. true = Left.
+    history: Vec<bool>,
+    /// KT counts per (depth, context-bits): (lefts, total).
+    counts: std::collections::HashMap<(u8, u16), (f32, f32)>,
+    /// Fixed-share weight per depth 0..=VOMM_DEPTH.
+    weights: [f32; VOMM_DEPTH + 1],
+    pub events: u32,
+}
+
+impl Default for TurnPattern {
+    fn default() -> Self {
+        Self {
+            history: Vec::new(),
+            counts: std::collections::HashMap::new(),
+            weights: [1.0; VOMM_DEPTH + 1],
+            events: 0,
+        }
+    }
+}
+
+impl TurnPattern {
+    fn context_bits(&self, depth: usize) -> Option<u16> {
+        if self.history.len() < depth {
+            return None;
+        }
+        let mut bits = 0u16;
+        for &b in &self.history[self.history.len() - depth..] {
+            bits = (bits << 1) | b as u16;
+        }
+        Some(bits)
+    }
+
+    /// P(next break is Left) at one depth — KT smoothed.
+    fn p_left_at(&self, depth: usize) -> Option<f32> {
+        let bits = self.context_bits(depth)?;
+        let (l, n) = self
+            .counts
+            .get(&(depth as u8, bits))
+            .copied()
+            .unwrap_or((0.0, 0.0));
+        Some((l + 0.5) / (n + 1.0))
+    }
+
+    /// Weighted mixture over depths — the published pattern read.
+    pub fn p_left(&self) -> f32 {
+        let mut num = 0.0;
+        let mut den = 0.0;
+        for d in 0..=VOMM_DEPTH {
+            if let Some(p) = self.p_left_at(d) {
+                let w = self.weights.get(d).copied().unwrap_or(1.0).max(1e-6);
+                num += w * p;
+                den += w;
+            }
+        }
+        if den > 0.0 { num / den } else { 0.5 }
+    }
+
+    /// Fold in an observed break. Weight update BEFORE counting, so each
+    /// depth is judged on a genuine prediction of this event.
+    pub fn observe(&mut self, left: bool) {
+        for d in 0..=VOMM_DEPTH {
+            if let Some(p) = self.p_left_at(d) {
+                let p_event = if left { p } else { 1.0 - p };
+                self.weights[d] *= (VOMM_ETA * (p_event - 0.5)).exp();
+            }
+        }
+        // Fixed share + renormalise.
+        let sum: f32 = self.weights.iter().sum();
+        if sum > 0.0 && sum.is_finite() {
+            let n = self.weights.len() as f32;
+            let pool = VOMM_SHARE * sum / n;
+            for w in &mut self.weights {
+                *w = (1.0 - VOMM_SHARE) * *w + pool;
+            }
+            let sum: f32 = self.weights.iter().sum();
+            let inv = n / sum;
+            for w in &mut self.weights {
+                *w *= inv;
+            }
+        } else {
+            self.weights = [1.0; VOMM_DEPTH + 1];
+        }
+        for d in 0..=VOMM_DEPTH {
+            if let Some(bits) = self.context_bits(d) {
+                let e = self.counts.entry((d as u8, bits)).or_insert((0.0, 0.0));
+                if left {
+                    e.0 += 1.0;
+                }
+                e.1 += 1.0;
+            }
+        }
+        self.history.push(left);
+        if self.history.len() > 64 {
+            self.history.remove(0);
+        }
+        self.events += 1;
+    }
 }
 
 /// Minimum frames on which the CPU and the trivial baseline DISAGREED before
@@ -952,6 +1089,11 @@ pub struct CpuBrain {
     /// added a metric. It rides in its own WRM2 section instead.
     #[serde(skip)]
     pub lifetime_read: ReadRate,
+    /// Break-pattern model. Transient: patterns re-learn within a round or
+    /// two, and the flat prior (which IS persisted) carries the long-run
+    /// habit across sessions.
+    #[serde(skip)]
+    pub turn_pattern: TurnPattern,
 }
 
 impl Default for CpuBrain {
@@ -968,6 +1110,7 @@ impl Default for CpuBrain {
             opp_pred_total: 0,
             ensemble: Ensemble::default(),
             lifetime_read: ReadRate::default(),
+            turn_pattern: TurnPattern::default(),
         }
     }
 }
@@ -2637,6 +2780,24 @@ pub struct Ensemble {
     pub confidence: f32,
     /// The active model's prediction for the player's next direction.
     pub predicted_dir: Option<Direction>,
+    /// Fixed-share exponential weights, two horizons (fast / slow).
+    ///
+    /// The old selector was hard argmax over a recency-weighted hit rate.
+    /// Two structural defects, straight from the online-learning literature:
+    /// hard argmax has no regret guarantee and thrashes between near-tied
+    /// models, and a single decay constant cannot represent both "what this
+    /// human always does" and "what they started doing five decisions ago".
+    /// Fixed share (Herbster–Warmuth) fixes both: the share step keeps every
+    /// weight bounded away from zero, which is precisely what allows recovery
+    /// after the human changes style, and the two learning rates give a fast
+    /// horizon that adapts within a burst plus a slow one that holds the
+    /// long-run habit. Explainable as: "seven guessers vote, weighted by how
+    /// well each has been doing lately — over both the last few choices and
+    /// the long run — and no voice ever drops to zero."
+    #[serde(skip)]
+    pub w_fast: [f32; ENSEMBLE_MODELS],
+    #[serde(skip)]
+    pub w_slow: [f32; ENSEMBLE_MODELS],
 }
 
 impl Default for Ensemble {
@@ -2644,6 +2805,8 @@ impl Default for Ensemble {
         Self {
             num: [0.0; ENSEMBLE_MODELS],
             den: [0.0; ENSEMBLE_MODELS],
+            w_fast: [1.0; ENSEMBLE_MODELS],
+            w_slow: [1.0; ENSEMBLE_MODELS],
             hits: [0; ENSEMBLE_MODELS],
             total: [0; ENSEMBLE_MODELS],
             pending: [None; ENSEMBLE_MODELS],
@@ -2676,6 +2839,14 @@ impl Ensemble {
     pub fn score_frame(&mut self, actual: Direction, frame_idx: u32) {
         let w = (frame_idx as f32).max(1.0);
         let w2 = w * w;
+        // Fast horizon: strong updates, heavy share — tracks the last handful
+        // of decisions. Slow horizon: gentle updates, light share — holds the
+        // session-long picture. Multiplicative-weights with a fixed-share
+        // mixing step after each loss.
+        const ETA_FAST: f32 = 1.2;
+        const ETA_SLOW: f32 = 0.3;
+        const SHARE_FAST: f32 = 0.08;
+        const SHARE_SLOW: f32 = 0.01;
         for i in 0..ENSEMBLE_MODELS {
             if let Some(pred) = self.pending[i].take() {
                 let hit = pred == actual;
@@ -2685,6 +2856,30 @@ impl Ensemble {
                 if hit {
                     self.hits[i] += 1;
                 }
+                let loss = if hit { 0.0 } else { 1.0 };
+                self.w_fast[i] *= (-ETA_FAST * loss).exp();
+                self.w_slow[i] *= (-ETA_SLOW * loss).exp();
+            }
+        }
+        for (weights, share) in [
+            (&mut self.w_fast, SHARE_FAST),
+            (&mut self.w_slow, SHARE_SLOW),
+        ] {
+            let sum: f32 = weights.iter().sum();
+            if sum > 0.0 && sum.is_finite() {
+                let pool = share * sum / ENSEMBLE_MODELS as f32;
+                for v in weights.iter_mut() {
+                    *v = (1.0 - share) * *v + pool;
+                }
+                // Renormalise so the weights never under/overflow over a
+                // long session.
+                let sum: f32 = weights.iter().sum();
+                let inv = ENSEMBLE_MODELS as f32 / sum;
+                for v in weights.iter_mut() {
+                    *v *= inv;
+                }
+            } else {
+                *weights = [1.0; ENSEMBLE_MODELS];
             }
         }
     }
@@ -2831,15 +3026,29 @@ pub fn compute_ensemble(
     ];
 
     let e = &brain.ensemble;
+
+    // Model selection by TWO-HORIZON FIXED-SHARE WEIGHTS, hard argmax kept.
+    //
+    // A full mixed vote (weight-summed across models per direction) was
+    // measured and REJECTED: it read better (lift 80%) but won less (100% ->
+    // 93%). Selection by the fixed-share weights keeps what the vote was
+    // after — the share step bounds every model's weight away from zero, so
+    // the ensemble can recover when the human changes style, and the two
+    // learning rates hold both the long-run habit and the last few decisions
+    // — while preserving single-driver forecasts, which is both what the
+    // telemetry panel names and, measured, what wins.
     let mut best = usize::MAX;
     let mut best_score = f32::NEG_INFINITY;
     for i in 0..ENSEMBLE_MODELS {
         if e.den[i] <= 0.0 {
             continue; // never scored — not eligible yet
         }
-        let s = ensemble_rank_score(brain, i);
-        if s > best_score {
-            best_score = s;
+        let mut w = e.w_fast[i] + e.w_slow[i];
+        if i == ENSEMBLE_MODELS - 1 && brain.opp_brain.episodes.len() >= COLD_START_EPISODES {
+            w *= 1.0 + KNN_SCORE_BONUS;
+        }
+        if w > best_score {
+            best_score = w;
             best = i;
         }
     }
@@ -3669,6 +3878,42 @@ pub fn record_player_episode(
 mod tests {
     use super::*;
 
+    /// The pattern model must learn what the flat prior structurally cannot:
+    /// a strict alternator has a 50/50 tally (unreadable to the prior), but a
+    /// perfectly predictable SEQUENCE.
+    #[test]
+    fn the_pattern_model_reads_an_alternator() {
+        let mut tp = TurnPattern::default();
+        for i in 0..40 {
+            // Score before observing, like the real update path does.
+            if i > 8 {
+                let predict_left = tp.p_left() >= 0.5;
+                assert_eq!(
+                    predict_left,
+                    i % 2 == 0,
+                    "after warm-up the alternation must be called (event {i})"
+                );
+            }
+            tp.observe(i % 2 == 0);
+        }
+    }
+
+    /// And a stationary habit must still be read at least as well as the
+    /// prior reads it — the pattern model must never cost the easy case.
+    #[test]
+    fn the_pattern_model_reads_a_stationary_habit() {
+        let mut tp = TurnPattern::default();
+        // 85:15 left, deterministic interleaving.
+        for i in 0..60 {
+            tp.observe(i % 7 != 0);
+        }
+        assert!(
+            tp.p_left() > 0.6,
+            "a left-heavy habit must read left (p = {})",
+            tp.p_left()
+        );
+    }
+
     /// A forecast the player cannot execute is an abstention, and it abstains
     /// on exactly the frames that decide anything. Masking converts it into a
     /// real guess drawn from their habit — measured, this alone took lift from
@@ -3681,12 +3926,12 @@ mod tests {
         let legal = [Direction::Left, Direction::Right];
 
         assert_eq!(
-            mask_to_legal(Some(Direction::Up), &legal, Direction::Up, &turn_prior),
+            mask_to_legal(Some(Direction::Up), &legal, Direction::Up, &turn_prior, None),
             Some(Direction::Left),
             "an unreachable prediction must become their habitual TURN"
         );
         assert_eq!(
-            mask_to_legal(None, &legal, Direction::Up, &turn_prior),
+            mask_to_legal(None, &legal, Direction::Up, &turn_prior, None),
             Some(Direction::Left),
             "so must no prediction at all"
         );
@@ -3701,17 +3946,17 @@ mod tests {
 
         // Heading Up: left is Left.
         assert_eq!(
-            mask_to_legal(None, &[Direction::Left, Direction::Right], Direction::Up, &turn_prior),
+            mask_to_legal(None, &[Direction::Left, Direction::Right], Direction::Up, &turn_prior, None),
             Some(Direction::Left)
         );
         // Heading Right: left is Up. Same habit, different compass answer.
         assert_eq!(
-            mask_to_legal(None, &[Direction::Up, Direction::Down], Direction::Right, &turn_prior),
+            mask_to_legal(None, &[Direction::Up, Direction::Down], Direction::Right, &turn_prior, None),
             Some(Direction::Up)
         );
         // Heading Down: left is Right.
         assert_eq!(
-            mask_to_legal(None, &[Direction::Left, Direction::Right], Direction::Down, &turn_prior),
+            mask_to_legal(None, &[Direction::Left, Direction::Right], Direction::Down, &turn_prior, None),
             Some(Direction::Right)
         );
     }
@@ -3725,7 +3970,7 @@ mod tests {
         // the model's read is the best information available and stands.
         let legal = [Direction::Up, Direction::Left, Direction::Right];
         assert_eq!(
-            mask_to_legal(Some(Direction::Right), &legal, Direction::Up, &turn_prior),
+            mask_to_legal(Some(Direction::Right), &legal, Direction::Up, &turn_prior, None),
             Some(Direction::Right),
             "a legal prediction stands even when the habit disagrees"
         );
@@ -3741,7 +3986,7 @@ mod tests {
         let legal = [Direction::Left, Direction::Right]; // Up (straight) blocked
 
         assert_eq!(
-            mask_to_legal(Some(Direction::Right), &legal, Direction::Up, &turn_prior),
+            mask_to_legal(Some(Direction::Right), &legal, Direction::Up, &turn_prior, None),
             Some(Direction::Left),
             "a forced turn must be answered by the habit, not by the model"
         );
@@ -3753,7 +3998,7 @@ mod tests {
     fn masking_with_no_legal_moves_is_a_passthrough() {
         let turn_prior = [1.0 / 3.0; TURNS];
         assert_eq!(
-            mask_to_legal(Some(Direction::Up), &[], Direction::Up, &turn_prior),
+            mask_to_legal(Some(Direction::Up), &[], Direction::Up, &turn_prior, None),
             Some(Direction::Up)
         );
     }
