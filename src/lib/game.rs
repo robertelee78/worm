@@ -2102,6 +2102,20 @@ impl WormGame {
         }
     }
 
+    /// Which kind of power-up is sitting on this cell, if any.
+    ///
+    /// The grid only carries `CellType::PowerUp`; the kind lives here. Without
+    /// this the CPU could not tell a Laser from a Bomb while the human could
+    /// see the icons — an information asymmetry in the human's favour, and the
+    /// reason the CPU would happily destroy a held Laser by driving over a
+    /// Bomb. O(3): MAX_POWERUPS_ON_BOARD.
+    pub fn powerup_at(&self, x: u16, y: u16) -> Option<PowerUpKind> {
+        self.powerups
+            .iter()
+            .find(|&&(px, py, _)| (px, py) == (x, y))
+            .map(|&(_, _, k)| k)
+    }
+
     /// Display name for a held power-up slot (HUD).
     pub fn powerup_name(kind: Option<PowerUpKind>) -> &'static str {
         match kind {

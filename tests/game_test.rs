@@ -505,10 +505,18 @@ fn test_player_context_has_no_label_leakage() {
         "the opening frame is always recorded"
     );
     for (i, e) in game.cpu_brain.opp_brain.episodes.iter().enumerate() {
-        let transition_mass: f32 = e.vector[13..29].iter().sum();
+        // The turn-history block (25..31 in the current layout: recent turn
+        // mix + last turn) is built from the tail, which must not yet contain
+        // this frame's own move. On the opening frames of a straight run there
+        // are no turn PAIRS at all, so the whole block must be empty — if the
+        // label ever leaked into its own context, it would show up here first.
+        // (Slots 13..25 now carry always-on situational features — proximity,
+        // speed, arena state — which are legitimately non-zero from frame 1;
+        // the old assertion over 13..29 was pinned to the retired layout.)
+        let turn_history_mass: f32 = e.vector[25..31].iter().sum();
         assert_eq!(
-            transition_mass, 0.0,
-            "episode {i} must not encode a transition pair ending in its own label"
+            turn_history_mass, 0.0,
+            "episode {i} must not encode a turn pair ending in its own label"
         );
         assert_eq!(e.next_dir, worm::Direction::Right);
     }

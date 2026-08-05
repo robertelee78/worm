@@ -41,6 +41,28 @@ pub const COLD_START_EPISODES: usize = 60;
 const EXPLORE_RATE: f32 = 0.05; // outright random legal throw rate
 const MEMORY_VOTE_MIN_OPEN: f32 = 0.05; // destination must keep >=5% of the arena reachable
 
+/// How much the CPU wants a power-up of this kind, given what it already holds.
+///
+/// It could not previously tell them apart — every site matched on the bare
+/// `CellType::PowerUp` — so it would detour for anything and destroy a held
+/// Laser by driving over a Bomb. The human has always been able to see the
+/// icons and choose; this closes that gap.
+pub fn powerup_worth_taking(game: &WormGame, who: usize, _kind: crate::game::PowerUpKind) -> bool {
+    // Refuse only one thing: trading away a laser that is MID-CHARGE. The shot
+    // is nearly paid for and a pickup silently overwrites the slot.
+    //
+    // A ranked version of this — refuse anything that does not outrank what we
+    // hold — was implemented and MEASURED, and it made the CPU markedly worse:
+    // win rate 97% -> 83%, player wins 1 -> 5. Laser outranks everything, so
+    // once holding one the CPU refused every other power-up; and because its
+    // laser needs ten consecutively-aligned frames to fire, it frequently held
+    // that laser forever and stopped collecting at all, leaving the board to
+    // the human. Preference is not worth a famine. The KIND information stays
+    // available (powerup_at, and the opponent's held kind in the feature
+    // vector) — it was the policy that was wrong, not the knowledge.
+    !(who == 1 && game.cpu_laser_charge > 0)
+}
+
 /// Reachable cells a destination must leave for the cycle to be able to keep
 /// playing from it: enough room to outrun its own body, plus a manoeuvring
 /// margin. Counts `pending_growth` because food already eaten is body the
@@ -1844,52 +1866,130 @@ pub fn encode_player_context(
     let mut vector = [0.0f32; PLAYER_FEATURE_DIM];
     let player = &game.cycles[0];
     let (hx, hy) = player.head;
-    let dirs = [
-        Direction::Up,
-        Direction::Down,
-        Direction::Left,
-        Direction::Right,
+    let heading = player.prev_direction;
+
+    // Everything below is expressed RELATIVE to the player's heading wherever
+    // it describes a choice, because a habit is heading-relative: "breaks left
+    // when cornered" is one pattern here and four unrelated ones in compass
+    // space. The absolute blocks that remain are the ones where absoluteness is
+    // the point (which way they like to travel, where the walls are).
+    let turn_dirs = [
+        Turn::Straight.apply(heading),
+        Turn::Left.apply(heading),
+        Turn::Right.apply(heading),
     ];
 
-    // 0..4 player open-neighbour one-hot
-    for (i, &d) in dirs.iter().enumerate() {
+    // 0..3 CAN I GO THIS WAY — separates a forced break from a chosen one.
+    for (i, &d) in turn_dirs.iter().enumerate() {
         vector[i] = if free_step(game, hx, hy, d) { 1.0 } else { 0.0 };
     }
 
-    // 4..8 player-trail distance per direction
+    // 3..6 RUNWAY per option: how far before something stops me.
+    // Lets the model express "turns when the wall is three cells away", which
+    // a single global turn prior can never represent.
     let trail = nearest_trail_distance(game, hx, hy, 6.0);
-    for i in 0..4 {
-        vector[4 + i] = trail[i] / 6.0;
+    for (i, &d) in turn_dirs.iter().enumerate() {
+        vector[3 + i] = trail[dir_index(d)] / 6.0;
     }
 
-    // 8..12 player→food distance per direction
+    // 6..9 FOOD bearing per option — "breaks toward food unless threatened".
     let food = nearest_food_distance(game, hx, hy, 6.0);
-    for i in 0..4 {
-        vector[8 + i] = food[i] / 6.0;
+    for (i, &d) in turn_dirs.iter().enumerate() {
+        vector[6 + i] = food[dir_index(d)] / 6.0;
     }
 
-    // 12 player→CPU proximity (higher = CPU is closer/more threatening)
-    let ph = game.cycles[1].head;
-    let manhattan = ((ph.0 as i16 - hx as i16).abs() + (ph.1 as i16 - hy as i16).abs()) as f32;
-    vector[12] = ((12.0 - manhattan).max(0.0)) / 12.0;
+    // 9..13 WHERE IS THE CPU, in the player's own frame: ahead, behind, to
+    // their left, to their right. "Turns away when the CPU is behind them" is
+    // a real habit and was previously inexpressible — the old vector had a
+    // single undirected proximity scalar.
+    let (cx, cy) = game.cycles[1].head;
+    let ox = cx as f32 - hx as f32;
+    let oy = cy as f32 - hy as f32;
+    let (fx, fy) = heading.as_delta();
+    let (rx, ry) = right_turn(heading).as_delta();
+    let ahead = ox * fx as f32 + oy * fy as f32;
+    let rightward = ox * rx as f32 + oy * ry as f32;
+    let bearing = if ahead.abs() >= rightward.abs() {
+        if ahead >= 0.0 { 0 } else { 1 }
+    } else if rightward >= 0.0 { 2 } else { 3 };
+    vector[9 + bearing] = 1.0;
 
-    // 13..29 4×4 direction-transition matrix (prev_dir → curr_dir).
-    // rps-ai: "Transitions, e.g. 'RP,PP' — this is the block that carries order,
-    // which the frequency histogram below throws away."
-    // We use the player_tail (recent directions) to build observed transitions:
-    // for each adjacent pair (tail[i-1], tail[i]), increment the corresponding
-    // cell. This captures corner patterns like "Right→Up" (bottom-right corner).
-    let dirs_arr = [
-        Direction::Up,
-        Direction::Down,
-        Direction::Left,
-        Direction::Right,
-    ];
+    // 13 CPU PROXIMITY — how much pressure they are under.
+    let manhattan = ox.abs() + oy.abs();
+    vector[13] = ((12.0 - manhattan).max(0.0)) / 12.0;
+
+    // 14 IS THE CPU CLOSING? Trajectory, not just position: a CPU driving at
+    // them reads differently from one drifting away at the same distance.
+    let (cfx, cfy) = game.cycles[1].direction.as_delta();
+    let closing = -(ox * cfx as f32 + oy * cfy as f32);
+    vector[14] = (closing / 12.0).clamp(-1.0, 1.0) * 0.5 + 0.5;
+
+    // 15..19 PLAYER HEADING one-hot. Keeps absolute compass habits learnable
+    // ("this player likes going Up") now that everything else went relative —
+    // dropping it would trade one blindness for another.
+    vector[15 + dir_index(heading)] = 1.0;
+
+    // 19 HOW BOXED IN ARE THEY — arena configuration as they experience it.
+    let total = (game.width as f32) * (game.height as f32);
+    vector[19] = (count_open_space(game, hx, hy) / total).min(1.0);
+
+    // 20 OWN LENGTH — a long player plays differently from a short one, and
+    // it is the quantity that decides whether they can afford a tight turn.
+    vector[20] = ((player.positions.len() as f32) / 60.0).min(1.0);
+
+    // 21 SPEED. The game accelerates as food is eaten, and a human at 35ms
+    // per cell is a different opponent from the same human at 115ms — they
+    // stop reacting and start running pre-planned routes.
+    vector[21] = ((115.0 - game.frame_delay().as_millis() as f32) / 80.0).clamp(0.0, 1.0);
+
+    // 22 SUDDEN-DEATH PRESSURE — the arena is closing in.
+    let max_level = game.sudden_death_max_level().max(1) as f32;
+    vector[22] = (game.shrink_level as f32 / max_level).min(1.0);
+
+    // 23 WHAT ARE THEY HOLDING — not merely whether.
+    //
+    // The human's HUD shows what the CPU is carrying, so a CPU blind to what
+    // the HUMAN carries is starved of information its opponent has, and will
+    // be outsmarted for it. People also play measurably differently armed:
+    // bolder with a laser, more evasive with nothing.
+    vector[23] = match player.held_powerup {
+        None => 0.0,
+        Some(crate::game::PowerUpKind::Laser) => 1.0 / 3.0,
+        Some(crate::game::PowerUpKind::TriShot) => 2.0 / 3.0,
+        Some(crate::game::PowerUpKind::Bomb) => 1.0,
+    };
+
+    // 24 IS THERE A MINE NEAR THEM — disguised as food, so their reaction to
+    // one is exactly the "do they take bait" habit worth learning.
+    let mine_near = game
+        .bombs
+        .iter()
+        .map(|b| (b.x as f32 - hx as f32).abs().max((b.y as f32 - hy as f32).abs()))
+        .fold(f32::INFINITY, f32::min);
+    vector[24] = if mine_near.is_finite() {
+        ((12.0 - mine_near).max(0.0)) / 12.0
+    } else {
+        0.0
+    };
+
+    // 25..28 RECENT TURN MIX, and 28..31 the LAST turn.
+    //
+    // Replaces a 4x4 matrix over absolute directions, which smeared one
+    // relative habit across sixteen cells and — despite its comment — never
+    // actually carried order, since it was a bag of pair counts. Turn space
+    // needs a ninth of the room to say more, and the explicit last-turn
+    // one-hot is what lets an alternator ("left, right, left") be recognised
+    // at all.
     let tail_vec: Vec<Direction> = tail.iter().copied().collect();
+    let mut last_turn = None;
     for w in tail_vec.windows(2) {
-        let from_idx = dirs_arr.iter().position(|&d| d == w[0]).unwrap_or(3);
-        let to_idx = dirs_arr.iter().position(|&d| d == w[1]).unwrap_or(3);
-        vector[13 + from_idx * 4 + to_idx] += 1.0;
+        if let Some(t) = Turn::from_dirs(w[0], w[1]) {
+            vector[25 + turn_index(t)] += 1.0;
+            last_turn = Some(t);
+        }
+    }
+    if let Some(t) = last_turn {
+        vector[28 + turn_index(t)] = 1.0;
     }
 
     // L2-normalise
@@ -4163,49 +4263,54 @@ mod tests {
 
     #[test]
     fn spike_2_transition_features_encode_corner_patterns() {
-        // With a populated player_tail, the 4x4 transition matrix in slots
-        // 13..29 should capture direction changes (e.g. Right -> Up).
+        // Corner patterns must still be encoded — but in TURN space now.
+        //
+        // This used to assert a 4x4 matrix over ABSOLUTE directions at slots
+        // 13..29. That representation smeared one relative habit across
+        // sixteen cells (a left-break reads as Right->Up, Up->Left, Left->Down
+        // or Down->Right depending purely on which way the player happened to
+        // be facing) and, despite its name, carried no order at all — it was a
+        // bag of pair counts. The vector now records the turn mix and the most
+        // recent turn directly.
         let game = WormGame::with_size(120, 38);
         let mut tail: VecDeque<Direction> = VecDeque::new();
 
-        // Simulate the corner pattern: Right -> Up -> Left -> Down (clockwise)
-        tail.push_back(Direction::Right);
-        tail.push_back(Direction::Up);
-        tail.push_back(Direction::Left);
-        tail.push_back(Direction::Down);
-        tail.push_back(Direction::Right);
-
-        // Cap tail length like the brain does.
-        while tail.len() > 5 {
-            tail.pop_front();
+        // Right -> Up -> Left -> Down -> Right. Every step is the SAME turn,
+        // which is exactly the point: one habit, one feature.
+        for d in [
+            Direction::Right,
+            Direction::Up,
+            Direction::Left,
+            Direction::Down,
+            Direction::Right,
+        ] {
+            tail.push_back(d);
         }
 
         let ctx = encode_player_context(&game, &tail);
+        let turn = Turn::from_dirs(Direction::Right, Direction::Up)
+            .expect("Right -> Up is a legal quarter turn");
 
-        // Transition matrix: slot 13 + from*4 + to
-        // Right(3) -> Up(0): should have weight
-        let right_to_up = ctx[13 + 3 * 4];
-        let up_to_left = ctx[13 + 2];
-        let left_to_down = ctx[13 + 2 * 4 + 1];
-        let down_to_right = ctx[13 + 4 + 3];
-
-        assert!(right_to_up > 0.0, "Right->Up transition should be encoded");
-        assert!(up_to_left > 0.0, "Up->Left transition should be encoded");
         assert!(
-            left_to_down > 0.0,
-            "Left->Down transition should be encoded"
+            ctx[25 + turn_index(turn)] > 0.0,
+            "the repeated turn must register in the recent-turn mix"
         );
         assert!(
-            down_to_right > 0.0,
-            "Down->Right transition should be encoded"
+            ctx[28 + turn_index(turn)] > 0.0,
+            "the most recent turn must be marked, so an alternating player is \
+             distinguishable from a consistent one"
         );
-
-        // Diagonal transitions shouldn't appear in a wall-follower.
-        let right_to_down = ctx[13 + 3 * 4 + 1];
-        assert!(
-            right_to_down == 0.0,
-            "Right->Down should be zero (not a wall-follow turn)"
-        );
+        // And the other two turn classes must stay empty — a consistent
+        // turner must not look like a mixed one.
+        for other in [Turn::Straight, Turn::Left, Turn::Right] {
+            if other != turn {
+                assert_eq!(
+                    ctx[28 + turn_index(other)],
+                    0.0,
+                    "only the last turn is marked"
+                );
+            }
+        }
     }
 
     /* ---------------------- regression: encoder fixes ---------------------- */
