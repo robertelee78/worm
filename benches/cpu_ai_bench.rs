@@ -36,15 +36,30 @@ mod ai {
             (Direction::Right, Direction::Left),
         ];
 
-        let right_dir = right_map.iter().find(|(d, _)| *d == current_dir).map(|(_, r)| *r).unwrap_or(current_dir);
-        let left_dir = left_map.iter().find(|(d, _)| *d == current_dir).map(|(_, l)| *l).unwrap_or(current_dir);
-        let back_dir = back_map.iter().find(|(d, _)| *d == current_dir).map(|(_, b)| *b).unwrap_or(current_dir);
+        let right_dir = right_map
+            .iter()
+            .find(|(d, _)| *d == current_dir)
+            .map(|(_, r)| *r)
+            .unwrap_or(current_dir);
+        let left_dir = left_map
+            .iter()
+            .find(|(d, _)| *d == current_dir)
+            .map(|(_, l)| *l)
+            .unwrap_or(current_dir);
+        let back_dir = back_map
+            .iter()
+            .find(|(d, _)| *d == current_dir)
+            .map(|(_, b)| *b)
+            .unwrap_or(current_dir);
 
         for dir in [right_dir, current_dir, left_dir, back_dir] {
             let (dx, dy) = dir.as_delta();
             let new_x = (head.0 as i16 + dx).max(1).min((game.width - 2) as i16) as u16;
             let new_y = (head.1 as i16 + dy).max(1).min((game.height - 2) as i16) as u16;
-            if new_x >= 1 && new_x < game.width - 1 && new_y >= 1 && new_y < game.height - 1
+            if new_x >= 1
+                && new_x < game.width - 1
+                && new_y >= 1
+                && new_y < game.height - 1
                 && game.grid[new_y as usize][new_x as usize] == CellType::Empty
             {
                 return dir;
@@ -67,10 +82,18 @@ mod ai {
         let dy = target_head.1 as i16 - head.1 as i16;
 
         let mut candidates = Vec::new();
-        if dx > 0 { candidates.push(Direction::Right); }
-        if dx < 0 { candidates.push(Direction::Left); }
-        if dy > 0 { candidates.push(Direction::Down); }
-        if dy < 0 { candidates.push(Direction::Up); }
+        if dx > 0 {
+            candidates.push(Direction::Right);
+        }
+        if dx < 0 {
+            candidates.push(Direction::Left);
+        }
+        if dy > 0 {
+            candidates.push(Direction::Down);
+        }
+        if dy < 0 {
+            candidates.push(Direction::Up);
+        }
         // Fallback: keep going straight, then any legal move.
         candidates.push(current_dir);
 
@@ -80,14 +103,23 @@ mod ai {
             (Direction::Left, Direction::Right),
             (Direction::Right, Direction::Left),
         ];
-        let back_dir = back_map.iter().find(|(d, _)| *d == current_dir).map(|(_, b)| *b).unwrap_or(current_dir);
+        let back_dir = back_map
+            .iter()
+            .find(|(d, _)| *d == current_dir)
+            .map(|(_, b)| *b)
+            .unwrap_or(current_dir);
 
         for dir in candidates {
-            if dir == back_dir { continue; } // no 180s
+            if dir == back_dir {
+                continue;
+            } // no 180s
             let (ddx, ddy) = dir.as_delta();
             let new_x = (head.0 as i16 + ddx).max(1).min((game.width - 2) as i16) as u16;
             let new_y = (head.1 as i16 + ddy).max(1).min((game.height - 2) as i16) as u16;
-            if new_x >= 1 && new_x < game.width - 1 && new_y >= 1 && new_y < game.height - 1
+            if new_x >= 1
+                && new_x < game.width - 1
+                && new_y >= 1
+                && new_y < game.height - 1
                 && game.grid[new_y as usize][new_x as usize] == CellType::Empty
             {
                 return dir;
@@ -124,9 +156,11 @@ enum Opponent {
 
 /// Run one game to completion.
 ///
-/// `cpu_adaptive`: if true, the CPU uses its k-NN memory brain (herding on,
-/// matching the game's difficulty>=3 behavior); if false, the naive wall
-/// follower drives cycle 1.
+/// `cpu_adaptive`: if true, the CPU uses its k-NN memory brain (autopilot on,
+/// learning recorded); if false, autopilot is disabled and the naive wall
+/// follower drives cycle 1 through the external steer below — update() will
+/// not override it with cpu_decide. The "naive" row is therefore genuinely
+/// naive (previously it was a fresh-brain adaptive CPU in disguise).
 ///
 /// The player (cycle 0) uses the specified opponent algorithm.
 ///
@@ -137,15 +171,22 @@ enum Opponent {
 /// into the next game.
 ///
 /// `seed`: Optional RNG seed for deterministic benchmarks.
-fn run_single_game(cpu_adaptive: bool, opponent: Opponent, shared_brain: Option<worm::CpuBrain>, seed: Option<u64>) -> GameResult {
+fn run_single_game(
+    cpu_adaptive: bool,
+    opponent: Opponent,
+    shared_brain: Option<worm::CpuBrain>,
+    seed: Option<u64>,
+) -> GameResult {
     let mut game = match seed {
-        Some(s) => WormGame::with_seed(s),
+        Some(s) => WormGame::with_size_seed(120, 38, s),
         None => WormGame::new(),
     };
     // Inject the shared brain for adaptive runs to enable cross-game learning.
     if let Some(brain) = shared_brain {
         game.cpu_brain = brain;
     }
+    // Naive rows: scripted steer only — update() must not run the AI.
+    game.cpu_autopilot = cpu_adaptive;
     let max_moves = 4000;
     for _ in 0..max_moves {
         if game.game_over {
@@ -200,16 +241,26 @@ fn main() {
 
     for i in 0..GAMES {
         let n_result = run_single_game(false, Opponent::WallFollow, None, Some(SEED + i as u64));
-        let a_result = run_single_game(true, Opponent::WallFollow, Some(shared_brain), Some(SEED + 1000 + i as u64));
-        shared_brain = a_result.brain.expect("adaptive game should return its brain");
+        let a_result = run_single_game(
+            true,
+            Opponent::WallFollow,
+            Some(shared_brain),
+            Some(SEED + 1000 + i as u64),
+        );
+        shared_brain = a_result
+            .brain
+            .expect("adaptive game should return its brain");
 
         naive.push(n_result.stats);
         adaptive.push(a_result.stats);
         if i < 4 || i % 25 == 0 {
             println!(
                 "  Game {:2}: naive moves={:4} food={:2} | adaptive moves={:4} food={:2}",
-                i + 1, n_result.stats.moves, n_result.stats.cpu_food,
-                a_result.stats.moves, a_result.stats.cpu_food
+                i + 1,
+                n_result.stats.moves,
+                n_result.stats.cpu_food,
+                a_result.stats.moves,
+                a_result.stats.cpu_food
             );
         }
     }
@@ -223,17 +274,29 @@ fn main() {
 
     println!(
         "  Naive:    survival={:>4} food={:5.1} alive={}/{}",
-        mean(&naive_moves) as u32, mean(&naive_food), naive_survived, GAMES
+        mean(&naive_moves) as u32,
+        mean(&naive_food),
+        naive_survived,
+        GAMES
     );
     println!(
         "  Adaptive: survival={:>4} food={:5.1} alive={}/{}",
-        mean(&adaptive_moves) as u32, mean(&adaptive_food), adaptive_survived, GAMES
+        mean(&adaptive_moves) as u32,
+        mean(&adaptive_food),
+        adaptive_survived,
+        GAMES
     );
     let dm = mean(&adaptive_moves) - mean(&naive_moves);
     let df = mean(&adaptive_food) - mean(&naive_food);
     // Win rate: alive at end AND game ended before max_moves (opponent crashed).
-    let naive_wins = naive.iter().filter(|s| s.cpu_survived && s.moves < 4000).count();
-    let adaptive_wins = adaptive.iter().filter(|s| s.cpu_survived && s.moves < 4000).count();
+    let naive_wins = naive
+        .iter()
+        .filter(|s| s.cpu_survived && s.moves < 4000)
+        .count();
+    let adaptive_wins = adaptive
+        .iter()
+        .filter(|s| s.cpu_survived && s.moves < 4000)
+        .count();
     println!(
         "  Wins:     naive={}/{} adaptive={}/{}",
         naive_wins, GAMES, adaptive_wins, GAMES
@@ -248,16 +311,26 @@ fn main() {
 
     for i in 0..GAMES {
         let n_result = run_single_game(false, Opponent::Chaser, None, Some(SEED + i as u64));
-        let a_result = run_single_game(true, Opponent::Chaser, Some(shared_brain2), Some(SEED + 1000 + i as u64));
-        shared_brain2 = a_result.brain.expect("adaptive game should return its brain");
+        let a_result = run_single_game(
+            true,
+            Opponent::Chaser,
+            Some(shared_brain2),
+            Some(SEED + 1000 + i as u64),
+        );
+        shared_brain2 = a_result
+            .brain
+            .expect("adaptive game should return its brain");
 
         naive2.push(n_result.stats);
         adaptive2.push(a_result.stats);
         if i < 4 || i % 25 == 0 {
             println!(
                 "  Game {:2}: naive moves={:4} food={:2} | adaptive moves={:4} food={:2}",
-                i + 1, n_result.stats.moves, n_result.stats.cpu_food,
-                a_result.stats.moves, a_result.stats.cpu_food
+                i + 1,
+                n_result.stats.moves,
+                n_result.stats.cpu_food,
+                a_result.stats.moves,
+                a_result.stats.cpu_food
             );
         }
     }
@@ -271,17 +344,29 @@ fn main() {
 
     println!(
         "  Naive:    survival={:>4} food={:5.1} alive={}/{}",
-        mean(&naive2_moves) as u32, mean(&naive2_food), naive2_survived, GAMES
+        mean(&naive2_moves) as u32,
+        mean(&naive2_food),
+        naive2_survived,
+        GAMES
     );
     println!(
         "  Adaptive: survival={:>4} food={:5.1} alive={}/{}",
-        mean(&adaptive2_moves) as u32, mean(&adaptive2_food), adaptive2_survived, GAMES
+        mean(&adaptive2_moves) as u32,
+        mean(&adaptive2_food),
+        adaptive2_survived,
+        GAMES
     );
     let dm2 = mean(&adaptive2_moves) - mean(&naive2_moves);
     let df2 = mean(&adaptive2_food) - mean(&naive2_food);
     // Win rate: alive at end AND game ended before max_moves (opponent crashed).
-    let naive2_wins = naive2.iter().filter(|s| s.cpu_survived && s.moves < 4000).count();
-    let adaptive2_wins = adaptive2.iter().filter(|s| s.cpu_survived && s.moves < 4000).count();
+    let naive2_wins = naive2
+        .iter()
+        .filter(|s| s.cpu_survived && s.moves < 4000)
+        .count();
+    let adaptive2_wins = adaptive2
+        .iter()
+        .filter(|s| s.cpu_survived && s.moves < 4000)
+        .count();
     println!(
         "  Wins:     naive={}/{} adaptive={}/{}",
         naive2_wins, GAMES, adaptive2_wins, GAMES

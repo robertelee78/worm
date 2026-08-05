@@ -1,32 +1,60 @@
+#[cfg(not(target_arch = "wasm32"))]
 use crossterm::{
-    cursor::{Hide, Show, MoveTo},
+    cursor::{Hide, MoveTo, Show},
     execute,
     style::{Color, Print, ResetColor, SetForegroundColor},
     terminal::{EnterAlternateScreen, LeaveAlternateScreen},
 };
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::{self, Read, Write};
+#[cfg(not(target_arch = "wasm32"))]
 use std::os::unix::io::AsRawFd;
-use std::time::{Duration, Instant};
+#[cfg(not(target_arch = "wasm32"))]
 use std::thread;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::{Duration, Instant};
 
-use worm::{WormGame, Direction};
+#[cfg(not(target_arch = "wasm32"))]
+use worm::{Direction, WormGame};
 
+/// Per-player brain file (the terminal player's cross-session corpus).
+/// Override with WORM_BRAIN=/path/to/file.
+#[cfg(not(target_arch = "wasm32"))]
+fn brain_path() -> std::path::PathBuf {
+    std::env::var("WORM_BRAIN")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("worm_brain.bin"))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn save_brain(game: &WormGame) {
+    let _ = game.cpu_brain.save_file(&brain_path());
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn main() -> std::io::Result<()> {
     let fd = io::stdin().as_raw_fd();
-    
+
     let mut old_termios: libc::termios = unsafe { std::mem::zeroed() };
-    unsafe { libc::tcgetattr(fd, &mut old_termios); }
+    unsafe {
+        libc::tcgetattr(fd, &mut old_termios);
+    }
     let mut raw_termios = old_termios;
     unsafe {
         libc::cfmakeraw(&mut raw_termios);
         libc::tcsetattr(fd, libc::TCSAFLUSH, &raw_termios);
     }
-    
+
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, Hide)?;
     stdout.flush()?;
 
     let mut game = WormGame::new();
+    // Per-player memory: the brain from previous sessions rides again
+    // (rps-ai: "what someone opens with is a habit, it is stored").
+    if let Some(brain) = worm::CpuBrain::load_file(&brain_path()) {
+        game.cpu_brain = brain;
+    }
     let mut last_update = Instant::now();
     let mut input_buf: Vec<u8> = Vec::new();
     let mut quit = false;
@@ -38,11 +66,20 @@ fn main() -> std::io::Result<()> {
             libc::FD_ZERO(&mut fd_set);
             libc::FD_SET(fd, &mut fd_set);
         }
-        let mut timeout = libc::timeval { tv_sec: 0, tv_usec: 1000 }; // 1ms
+        let mut timeout = libc::timeval {
+            tv_sec: 0,
+            tv_usec: 1000,
+        }; // 1ms
         let ret = unsafe {
-            libc::select(fd + 1, &mut fd_set, std::ptr::null_mut(), std::ptr::null_mut(), &mut timeout)
+            libc::select(
+                fd + 1,
+                &mut fd_set,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                &mut timeout,
+            )
         };
-        
+
         if ret > 0 {
             let mut buf = [0u8; 256];
             match io::stdin().read(&mut buf) {
@@ -55,11 +92,22 @@ fn main() -> std::io::Result<()> {
                             libc::FD_ZERO(&mut fd_set2);
                             libc::FD_SET(fd, &mut fd_set2);
                         }
-                        let mut timeout2 = libc::timeval { tv_sec: 0, tv_usec: 0 };
-                        let ret2 = unsafe {
-                            libc::select(fd + 1, &mut fd_set2, std::ptr::null_mut(), std::ptr::null_mut(), &mut timeout2)
+                        let mut timeout2 = libc::timeval {
+                            tv_sec: 0,
+                            tv_usec: 0,
                         };
-                        if ret2 <= 0 { break; }
+                        let ret2 = unsafe {
+                            libc::select(
+                                fd + 1,
+                                &mut fd_set2,
+                                std::ptr::null_mut(),
+                                std::ptr::null_mut(),
+                                &mut timeout2,
+                            )
+                        };
+                        if ret2 <= 0 {
+                            break;
+                        }
                         match io::stdin().read(&mut buf) {
                             Ok(n) if n > 0 => input_buf.extend_from_slice(&buf[..n]),
                             _ => break,
@@ -103,20 +151,25 @@ fn main() -> std::io::Result<()> {
                     'a' => game.change_direction(Direction::Left),
                     's' => game.change_direction(Direction::Down),
                     'd' => game.change_direction(Direction::Right),
-                    ' ' => { let _ = game.fire_powerup(0); }
+                    ' ' => {
+                        let _ = game.fire_powerup(0);
+                    }
                     _ => {}
                 }
                 processed += 1;
             }
         }
-        
+
         // Remove processed bytes from buffer
         if processed > 0 && processed <= input_buf.len() {
             input_buf.drain(0..processed);
         }
 
         if quit {
-            unsafe { libc::tcsetattr(fd, libc::TCSAFLUSH, &old_termios); }
+            save_brain(&game);
+            unsafe {
+                libc::tcsetattr(fd, libc::TCSAFLUSH, &old_termios);
+            }
             execute!(stdout, LeaveAlternateScreen, Show)?;
             return Ok(());
         }
@@ -130,14 +183,25 @@ fn main() -> std::io::Result<()> {
                 libc::FD_ZERO(&mut fd_set);
                 libc::FD_SET(fd, &mut fd_set);
             }
-            let mut t = libc::timeval { tv_sec: 0, tv_usec: 20000 };
+            let mut t = libc::timeval {
+                tv_sec: 0,
+                tv_usec: 20000,
+            };
             let r = unsafe {
-                libc::select(fd + 1, &mut fd_set, std::ptr::null_mut(), std::ptr::null_mut(), &mut t)
+                libc::select(
+                    fd + 1,
+                    &mut fd_set,
+                    std::ptr::null_mut(),
+                    std::ptr::null_mut(),
+                    &mut t,
+                )
             };
             if r > 0 {
                 let mut b = [0u8; 16];
                 if let Ok(n) = io::stdin().read(&mut b) {
-                    if n > 0 { input_buf.extend_from_slice(&b[..n]); }
+                    if n > 0 {
+                        input_buf.extend_from_slice(&b[..n]);
+                    }
                 }
             } else {
                 // Timeout - standalone ESC means quit
@@ -154,11 +218,18 @@ fn main() -> std::io::Result<()> {
         }
 
         if game.game_over {
+            // Persist the per-player brain after every game — crash-safe
+            // cross-session learning (also saved on quit). The inner loop
+            // below blocks until restart/quit, so this runs once per game.
+            save_brain(&game);
             execute!(
                 stdout,
                 SetForegroundColor(Color::Red),
                 MoveTo(0, game.height),
-                Print(format!("GAME OVER! Score: {}  Press R to restart, Q to quit", game.score)),
+                Print(format!(
+                    "GAME OVER! Score: {}  Press R to restart, Q to quit",
+                    game.score
+                )),
                 ResetColor,
             )?;
             stdout.flush()?;
@@ -169,9 +240,18 @@ fn main() -> std::io::Result<()> {
                     libc::FD_ZERO(&mut fd_set);
                     libc::FD_SET(fd, &mut fd_set);
                 }
-                let mut timeout = libc::timeval { tv_sec: 1, tv_usec: 0 };
+                let mut timeout = libc::timeval {
+                    tv_sec: 1,
+                    tv_usec: 0,
+                };
                 let ret = unsafe {
-                    libc::select(fd + 1, &mut fd_set, std::ptr::null_mut(), std::ptr::null_mut(), &mut timeout)
+                    libc::select(
+                        fd + 1,
+                        &mut fd_set,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        &mut timeout,
+                    )
                 };
                 if ret > 0 {
                     let mut buf = [0u8; 16];
@@ -179,7 +259,10 @@ fn main() -> std::io::Result<()> {
                         if n > 0 {
                             match buf[0] as char {
                                 'q' | 'Q' | '\x1b' => {
-                                    unsafe { libc::tcsetattr(fd, libc::TCSAFLUSH, &old_termios); }
+                                    save_brain(&game);
+                                    unsafe {
+                                        libc::tcsetattr(fd, libc::TCSAFLUSH, &old_termios);
+                                    }
                                     execute!(stdout, LeaveAlternateScreen, Show)?;
                                     return Ok(());
                                 }
@@ -196,7 +279,10 @@ fn main() -> std::io::Result<()> {
                 }
             }
         }
-        
+
         thread::sleep(Duration::from_millis(1));
     }
 }
+
+#[cfg(target_arch = "wasm32")]
+fn main() {}

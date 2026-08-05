@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, shrink-to-fit=no">
+<title>TRON Light Cycles — the CPU learns you</title>
+<link rel="icon" type="image/png" href="favicon.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<!-- rps-ai shell: title nav -->
+<nav class="titlebar">
+  <h1 class="game-title glow-green">TRON LIGHT CYCLES</h1>
+  <h2 class="game-sub">First to <span id="match-target">3</span> is the champion — the CPU learns you between rounds</h2>
+</nav>
+
+<!-- codex-generated hero art -->
+<div class="hero-wrap">
+  <img class="hero" src="assets/hero.png" alt="Cyan and magenta light cycles dueling on a black grid">
+</div>
+
+<!-- rps-ai shell: scoreboard strip -->
+<div class="scoreboard">
+  <div class="score-side">
+    <div class="score-box" id="you-wins">0</div>
+    <div class="score-label">You</div>
+  </div>
+  <div class="score-mid" id="mid-status">WASD / ARROWS — SPACE fires — R next round</div>
+  <div class="score-side">
+    <div class="score-label right">Computer</div>
+    <div class="score-box" id="cpu-wins">0</div>
+  </div>
+</div>
+
+<!-- arcade cabinet + the brain panel (rps-ai shows the scoreboard + full
+     history; we show the learning itself, in plain language) -->
+<div class="cabinet">
+  <div class="game-row">
+    <div class="bezel">
+      <div class="screen" id="screen">
+        <canvas id="game-canvas"></canvas>
+        <div class="crt-scanlines"></div>
+        <div class="crt-vignette"></div>
+        <div class="crt-flicker"></div>
+        <div class="game-over-overlay hidden" id="over-overlay">
+          <div class="over-text glow-red" id="over-text">CPU WINS</div>
+          <div class="over-sub" id="over-sub">SCORE P1=0 P2=0</div>
+          <div class="over-brain" id="over-brain"></div>
+          <div class="blink insert-coin">PRESS R FOR NEXT ROUND</div>
+        </div>
+        <div class="champion-overlay hidden" id="champion-overlay">
+          <div class="champ-text glow-green" id="champ-text">YOU are the champion!</div>
+          <div class="blink insert-coin">INSERT COIN</div>
+          <button class="btn-green" id="new-match-btn">Start a New Match</button>
+        </div>
+      </div>
+    </div>
+    <aside class="brain-panel" id="brain-panel">
+      <div class="bp-title glow-green">CPU BRAIN</div>
+      <div class="bp-sub">it learns you between rounds — this is what it sees</div>
+      <div class="bp-predrow">It thinks you'll go <span class="bp-pred" id="bp-pred">·</span> next</div>
+      <div class="bp-last" id="bp-last">No prediction scored yet</div>
+      <div class="bp-conflabel">Source confidence <span id="bp-confnum">0% · n=0</span></div>
+      <div class="bp-bar"><div class="bp-confill" id="bp-conf"></div></div>
+      <div class="bp-driver" id="bp-driver-wrap">Prediction source: <span id="bp-driver">—</span></div>
+      <div class="bp-action">CPU action: <span id="bp-action">opening scan</span></div>
+      <div class="bp-models" id="bp-models"></div>
+      <div class="bp-warm" id="bp-warm"></div>
+      <div class="bp-mem" id="bp-mem"></div>
+      <div class="bp-habit" id="bp-habit"></div>
+      <div class="bp-acclabel">This round <span id="bp-accnum">0% · n=0</span></div>
+      <div class="bp-bar bp-accbar"><div class="bp-accfill" id="bp-acc"></div><div class="bp-chance" title="25% random-chance baseline"></div></div>
+      <div class="bp-lifetime" id="bp-lifetime">Lifetime 0% · n=0</div>
+      <div class="bp-foot">Every model forecasts your next move. The best recent predictor informs the hunt; weapon and survival layers can override it.</div>
+    </aside>
+  </div>
+</div>
+
+<!-- touch controls (mobile, rps-ai's big-green-button pattern) -->
+<div class="touch-controls">
+  <button class="btn-green tbtn" data-dir="0">▲</button>
+  <div class="trow">
+    <button class="btn-green tbtn" data-dir="2">◀</button>
+    <button class="btn-green tbtn" data-dir="1">▼</button>
+    <button class="btn-green tbtn" data-dir="3">▶</button>
+  </div>
+  <button class="btn-green tbtn fire" id="fire-btn">FIRE</button>
+</div>
+
+<!-- rps-ai shell: history table (per round) -->
+<div class="history-wrap">
+  <table class="history">
+    <thead>
+      <tr><th>Round</th><th>Result</th><th>Cause</th><th>Frames</th><th>Your food</th><th>CPU food</th><th>Round prediction</th><th>Prediction source</th><th>CPU action</th><th>Memory</th></tr>
+    </thead>
+    <tbody id="history-body"></tbody>
+  </table>
+</div>
+
+<footer class="footer">
+  <span id="brain-status">brain: …</span>
+  <span class="dim">device <span id="device-id">…</span> — your CPU brain lives in this browser (IndexedDB), it only learns <em>you</em></span>
+</footer>
+
+<script type="module" src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,261 @@
+/* TRON Light Cycles — rps-ai shell + CRT arcade treatment
+   (scanlines/flicker recipe via /opt/unicornscan.org/web) */
+
+:root {
+  --green: rgb(48, 184, 15);
+  --green-dark: rgb(0, 105, 29);
+  --cyan: rgb(0, 255, 255);
+  --magenta: rgb(255, 0, 255);
+  --amber: rgb(255, 190, 60);
+  --red: rgb(255, 85, 128);
+  --steel: #3d3d3d;
+  --felt: #111;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: #0a0a0a;
+  color: #eee;
+  font-family: 'VT323', 'Courier New', monospace;
+  letter-spacing: 0.04em;
+}
+
+/* ---------- rps-ai title nav (green gradient) ---------- */
+.titlebar {
+  background: linear-gradient(151deg, var(--green-dark) 0%, var(--green));
+  text-align: center;
+  padding: 10px 8px 12px;
+  box-shadow: 0 2px 12px rgba(0,0,0,0.8);
+}
+.game-title { margin: 0; font-size: clamp(28px, 5vw, 44px); letter-spacing: 0.12em; }
+.game-sub { margin: 0; font-size: clamp(14px, 2vw, 20px); font-weight: normal; opacity: 0.92; }
+
+.glow-green { text-shadow: 0 0 5px var(--green), 0 0 10px var(--green), 0 0 22px var(--green); }
+.glow-red { text-shadow: 0 0 5px var(--red), 0 0 10px var(--red), 0 0 22px var(--red); }
+.glow-cyan { text-shadow: 0 0 5px var(--cyan), 0 0 10px var(--cyan), 0 0 22px var(--cyan); }
+
+/* codex-generated hero banner between nav and scoreboard */
+.hero-wrap { display: flex; justify-content: center; background: #000; }
+.hero {
+  width: min(1200px, 96vw);
+  height: auto;
+  display: block;
+  border-bottom: 2px solid #111;
+  box-shadow: 0 4px 30px rgba(0, 255, 255, 0.12), 0 4px 30px rgba(255, 0, 255, 0.12);
+}
+
+/* ---------- rps-ai scoreboard strip (gray gradient + dark boxes) ---------- */
+.scoreboard {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: linear-gradient(162deg, rgb(129,129,129), rgb(180,180,180));
+  color: #fff;
+  padding: 0 10px;
+  box-shadow: 0 -2px 20px rgba(0,0,0,0.9);
+}
+.score-side { display: flex; align-items: center; gap: 10px; }
+.score-box {
+  width: 72px; height: 72px;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--steel);
+  border: 3px solid #222;
+  font-size: 46px;
+  margin: 6px 0;
+}
+#you-wins { color: var(--cyan); text-shadow: 0 0 8px var(--cyan); }
+#cpu-wins { color: var(--magenta); text-shadow: 0 0 8px var(--magenta); }
+.score-label { font-size: 22px; }
+.score-label.right { text-align: right; }
+.score-mid { font-size: 16px; opacity: 0.85; }
+
+/* ---------- arcade cabinet ---------- */
+.cabinet { padding: 14px 10px 6px; }
+.bezel {
+  margin: 0;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  padding: 18px;
+  border-radius: 22px;
+  background: linear-gradient(160deg, #2a2a2a, #151515 60%, #050505);
+  box-shadow:
+    inset 0 2px 2px rgba(255,255,255,0.12),
+    inset 0 -3px 8px rgba(0,0,0,0.9),
+    0 14px 40px rgba(0,0,0,0.85);
+}
+.screen {
+  position: relative;
+  width: 100%;
+  border-radius: 14px;
+  overflow: hidden;
+  background: #000;
+  box-shadow:
+    inset 0 0 4px rgba(255,255,255,0.08),
+    inset 0 0 40px rgba(0,0,0,0.9);
+}
+#game-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+}
+
+/* CRT overlays (screen-scoped) — visible, not just theoretical */
+.crt-scanlines, .crt-vignette, .crt-flicker {
+  position: absolute; inset: 0; pointer-events: none; z-index: 3;
+}
+.crt-scanlines {
+  background: repeating-linear-gradient(
+    0deg,
+    rgba(0, 0, 0, 0.28) 0px,
+    rgba(0, 0, 0, 0.28) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+}
+.crt-vignette {
+  background: radial-gradient(ellipse at center,
+    transparent 50%, rgba(0,0,0,0.42) 82%, rgba(0,0,0,0.78) 100%);
+}
+.crt-flicker {
+  animation: flicker 4s infinite;
+  background: linear-gradient(180deg, rgba(160,255,220,0.03), rgba(160,255,220,0.008));
+}
+@keyframes flicker { 0%, 100% { opacity: 1; } 50% { opacity: 0.78; } }
+
+/* screen curvature: slight barrel bend on the whole tube */
+.screen::after {
+  content: '';
+  position: absolute; inset: 0; pointer-events: none; z-index: 4;
+  border-radius: 14px;
+  box-shadow:
+    inset 0 0 60px rgba(0,0,0,0.55),
+    inset 0 2px 6px rgba(255,255,255,0.06);
+}
+
+/* Game + brain panel row. The arena owns all remaining width; at the compact
+   breakpoint the panel stacks below it and the same arena scales to one column. */
+.game-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 310px;
+  align-items: start;
+  gap: 18px;
+  width: 100%;
+  max-width: 1900px;
+  margin: 0 auto;
+}
+
+/* the CPU BRAIN panel — the learning display, in plain language */
+.brain-panel {
+  width: 310px; max-width: 100%;
+  background: #050505;
+  border: 1px solid #1c2a1c;
+  border-radius: 12px;
+  padding: 14px 16px;
+  box-shadow: 0 0 30px rgba(0,0,0,0.85), inset 0 0 30px rgba(0,0,0,0.8);
+  font-size: 17px;
+}
+.bp-title { font-size: 25px; letter-spacing: 0.14em; }
+.bp-sub { color: #7a7; font-size: 14px; margin-bottom: 12px; }
+.bp-predrow { font-size: 20px; }
+.bp-pred { color: var(--cyan); font-size: 27px; text-shadow: 0 0 9px var(--cyan); padding: 0 4px; }
+.bp-last { color: #777; font-size: 14px; min-height: 18px; }
+.bp-last.hit { color: var(--green); }
+.bp-last.miss { color: var(--red); }
+.bp-conflabel { color: #999; font-size: 14px; margin-top: 5px; }
+.bp-bar { height: 8px; background: #141414; border-radius: 4px; overflow: hidden; margin: 6px 0 12px; }
+.bp-confill { height: 100%; width: 0%; background: var(--cyan); box-shadow: 0 0 8px var(--cyan); transition: width 0.2s; }
+.bp-accfill { height: 100%; width: 0%; background: var(--green); box-shadow: 0 0 8px var(--green); transition: width 0.2s; }
+.bp-driver { margin-bottom: 10px; font-size: 18px; }
+.bp-action { margin: -6px 0 10px; color: var(--amber); font-size: 16px; }
+.bp-driver-wrap.flash { animation: drvflash 0.7s; }
+@keyframes drvflash {
+  0% { color: var(--amber); text-shadow: 0 0 14px var(--amber); }
+  100% { color: inherit; }
+}
+.bp-model { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 6px; }
+.bp-model.active { background: rgba(48,184,15,0.12); box-shadow: inset 0 0 14px rgba(48,184,15,0.18); }
+.bp-mname { flex: 1; line-height: 1.05; }
+.bp-mname .blurb { display: block; color: #666; font-size: 13px; }
+.bp-mpred { width: 18px; color: var(--cyan); text-align: center; font-size: 18px; }
+.bp-mbar { width: 72px; height: 7px; background: #181818; border-radius: 4px; position: relative; flex: none; }
+.bp-mmark { position: absolute; top: 0; bottom: 0; width: 4px; border-radius: 2px; background: #666; }
+.bp-mmark.pos { background: var(--green); box-shadow: 0 0 6px var(--green); }
+.bp-mmark.neg { background: var(--red); }
+.bp-mscore { width: 44px; text-align: right; color: #aaa; font-size: 13px; flex: none; }
+.bp-mhit { width: 58px; text-align: right; color: #888; font-size: 13px; flex: none; }
+.bp-warm { margin-top: 10px; color: var(--amber); font-size: 15px; }
+.bp-mem { margin-top: 12px; color: #8f8; font-size: 16px; }
+.bp-habit, .bp-lifetime { color: #888; font-size: 14px; margin-top: 4px; }
+.bp-acclabel { margin-top: 8px; }
+.bp-accbar { position: relative; }
+.bp-chance { position: absolute; left: 25%; top: 0; bottom: 0; width: 2px; background: var(--amber); box-shadow: 0 0 4px var(--amber); }
+.bp-foot { margin-top: 12px; color: #777; font-size: 13px; line-height: 1.3; }
+
+@media (max-width: 979px) {
+  .game-row { grid-template-columns: minmax(0, 1fr); }
+  .brain-panel { width: 100%; }
+  .bezel { padding: clamp(8px, 2.5vw, 18px); }
+}
+
+/* overlays on the screen */
+.game-over-overlay, .champion-overlay {
+  position: absolute; inset: 0;
+  display: flex; flex-direction: column;
+  align-items: center; justify-content: center;
+  gap: 12px;
+  background: rgba(0,0,0,0.55);
+  z-index: 5;
+  text-align: center;
+}
+.hidden { display: none !important; }
+.over-text { font-size: clamp(34px, 7vw, 64px); }
+.over-sub { font-size: 22px; opacity: 0.9; }
+.over-brain { font-size: 18px; color: var(--green); }
+.champ-text { font-size: clamp(30px, 6vw, 56px); }
+.insert-coin { color: var(--amber); font-size: 22px; text-shadow: 0 0 8px var(--amber); }
+.blink { animation: blink 1.1s steps(2, start) infinite; }
+@keyframes blink { to { visibility: hidden; } }
+
+/* rps-ai big green buttons */
+.btn-green {
+  font-family: inherit;
+  font-size: 20px;
+  letter-spacing: 0.08em;
+  color: #fff;
+  background: linear-gradient(180deg, rgb(48,184,15), rgb(0,105,29));
+  border: 0;
+  border-radius: 6px;
+  padding: 10px 26px;
+  cursor: pointer;
+  box-shadow: 0 0 15px rgba(0,0,0,0.8), inset 0 1px 0 rgba(255,255,255,0.25);
+}
+.btn-green:active { transform: translateY(1px); }
+
+/* touch controls */
+.touch-controls { display: none; text-align: center; padding: 8px; }
+.tbtn { min-width: 64px; min-height: 52px; margin: 3px; font-size: 24px; }
+.trow { display: flex; justify-content: center; }
+.fire { min-width: 110px; }
+@media (pointer: coarse) { .touch-controls { display: block; } .score-mid { display: none; } }
+
+/* history table (rps-ai's round table) */
+.history-wrap { max-width: 1400px; margin: 12px auto; padding: 0 10px; overflow-x: auto; }
+table.history { width: 100%; border-collapse: collapse; font-size: 17px; }
+table.history th {
+  color: #888; font-weight: normal; border-bottom: 1px solid #333;
+  padding: 4px 6px; text-align: center;
+}
+table.history td { padding: 3px 6px; text-align: center; border-bottom: 1px solid #1c1c1c; }
+table.history td.you { color: var(--cyan); }
+table.history td.cpu { color: var(--magenta); }
+
+.footer {
+  display: flex; justify-content: space-between; flex-wrap: wrap; gap: 6px;
+  padding: 10px 14px 18px;
+  font-size: 16px;
+}
+.footer .dim { color: #777; }

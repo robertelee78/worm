@@ -1,11 +1,12 @@
-use std::time::Duration;
+#[cfg(not(target_arch = "wasm32"))]
 use crossterm::terminal::size;
 use rand::rngs::StdRng;
 use rand::SeedableRng;
+use std::time::Duration;
 
 pub const FRAME_DELAY_MS: u64 = 150;
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Direction {
     Up,
     Down,
@@ -35,16 +36,17 @@ impl Direction {
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
+#[repr(u8)]
 pub enum CellType {
-    Empty,
-    Wall,
-    Player,
-    CPU,
-    Food,
+    Empty = 0,
+    Wall = 1,
+    Player = 2,
+    CPU = 3,
+    Food = 4,
     /// A hole punched through the arena wall — passable, leads to the outer corridor.
-    Hole,
+    Hole = 5,
     /// A collectible power-up; the kind is looked up in WormGame::powerups (mirrors food).
-    PowerUp,
+    PowerUp = 6,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -182,6 +184,65 @@ pub struct WormGame {
     pub powerup_timer: u32,
     /// Seeded RNG for deterministic benchmarks. None = thread RNG.
     pub rng: Option<StdRng>,
+    /// When false, the CPU is driven externally (benchmark scripted opponents)
+    /// and update() neither calls cpu_decide/should_fire nor records CPU
+    /// episodes — the "naive" bench row is then a genuinely naive wall
+    /// follower instead of a fresh-brain adaptive CPU in disguise.
+    pub cpu_autopilot: bool,
+    /// Session scoreboard (rps-ai's You-vs-Computer bar): games won by
+    /// [player, cpu] since process start. Banked in restart(), never reset
+    /// in-session.
+    pub session_wins: [u32; 2],
+    /// Fixed board dimensions (browser/explicit-size games). None = derive
+    /// from the terminal on every restart (native resize support).
+    pub fixed_dims: Option<(u16, u16)>,
+    /// Total food value eaten by both cycles this game — drives the speed
+    /// ramp (frame_delay shrinks as this grows). Reset per game.
+    pub food_eaten_total: u32,
+    /// Symmetric per-cycle food value for HUD/history. `LightCycle::score` is
+    /// intentionally benchmark-compatible and P2 includes survival frames, so
+    /// it must never be presented as a fair P1-vs-P2 comparison.
+    pub food_eaten_by: [u32; 2],
+    /// Active-ensemble prediction evidence for this game only. The persisted
+    /// CpuBrain counters below it provide the lifetime/session scope.
+    pub round_pred_hits: u32,
+    pub round_pred_total: u32,
+    pub last_scored_prediction: Option<Direction>,
+    pub last_player_actual: Option<Direction>,
+    pub last_prediction_hit: Option<bool>,
+    /// Final movement reason, distinct from the ensemble prediction source.
+    pub cpu_decision_reason: crate::cpu_ai::CpuDecisionReason,
+    /// Five-frame player path projected by the active ensemble prediction.
+    pub cpu_predicted_path: Vec<(u16, u16)>,
+    /// What killed the losing cycle (first lethal event wins). Shown on the
+    /// game-over screen so "how did I die?" is never a mystery.
+    pub death_cause: Option<DeathCause>,
+}
+
+/// The lethal event that ended the game.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum DeathCause {
+    Wall,
+    OwnTrail,
+    EnemyTrail,
+    HeadOn,
+    BombBlast,
+    Laser,
+    TriShotBolt,
+}
+
+impl DeathCause {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DeathCause::Wall => "hit the wall",
+            DeathCause::OwnTrail => "hit own trail",
+            DeathCause::EnemyTrail => "hit enemy trail",
+            DeathCause::HeadOn => "head-on collision",
+            DeathCause::BombBlast => "bomb blast",
+            DeathCause::Laser => "laser beam",
+            DeathCause::TriShotBolt => "tri-shot bolt",
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -192,8 +253,16 @@ pub struct CPUPlayRecord {
     pub seq: u32,
 }
 
+impl Default for WormGame {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl WormGame {
     /// Random range helper — uses seeded RNG when set, thread RNG otherwise.
+    /// (WASM builds are always seeded from JS; the thread-RNG fallback is
+    /// native-only because getrandom has no backend on wasm32-unknown.)
     pub fn rng_range<T, R>(&mut self, range: R) -> T
     where
         R: rand::distr::uniform::SampleRange<T>,
@@ -202,7 +271,10 @@ impl WormGame {
         use rand::RngExt;
         match self.rng.as_mut() {
             Some(rng) => rng.random_range(range),
+            #[cfg(not(target_arch = "wasm32"))]
             None => rand::rng().random_range(range),
+            #[cfg(target_arch = "wasm32")]
+            None => unimplemented!("worm: unseeded RNG on wasm — pass a seed"),
         }
     }
 
@@ -211,70 +283,38 @@ impl WormGame {
         use rand::RngExt;
         match self.rng.as_mut() {
             Some(rng) => rng.random_range(a..b),
+            #[cfg(not(target_arch = "wasm32"))]
             None => rand::rng().random_range(a..b),
+            #[cfg(target_arch = "wasm32")]
+            None => unimplemented!("worm: unseeded RNG on wasm — pass a seed"),
         }
     }
 
     pub fn new() -> Self {
         let dims = Dimensions::get_terminal_size();
-
-        let center_x = dims.width / 2;
-        let center_y = dims.height / 2;
-        let spacing = 12;
-
-        let player = LightCycle::new(
-            center_x.saturating_sub(spacing),
-            center_y,
-            Direction::Right,
-            (0, 255, 255),
-            true,
-        );
-
-        let cpu = LightCycle::new(
-            center_x.saturating_add(spacing),
-            center_y,
-            Direction::Left,
-            (255, 0, 255),
-            false,
-        );
-
-        let width = dims.width;
-        let height = dims.height;
-        let grid = Self::build_grid(width, height);
-
-        let mut game = Self {
-            width,
-            height,
-            grid,
-            cycles: vec![player, cpu],
-            player: 0,
-            food_items: Vec::new(),
-            score: 0,
-            game_over: false,
-            particles: Vec::new(),
-            time: 0,
-            winner: None,
-            difficulty: 1,
-            frame_count: 0,
-            cpu_history: Vec::new(),
-            cpu_brain: crate::cpu_ai::CpuBrain::new(),
-            frames_since_cpu_move: 0,
-            powerups: Vec::new(),
-            projectiles: Vec::new(),
-            bombs: Vec::new(),
-            powerup_timer: 60,
-            rng: None,
-        };
-        game.generate_food_items();
-        game
+        Self::build(dims.width, dims.height, None, None)
     }
 
     /// Create a game with a seeded RNG for deterministic benchmarks.
     pub fn with_seed(seed: u64) -> Self {
         let dims = Dimensions::get_terminal_size();
+        Self::build(dims.width, dims.height, Some(seed), None)
+    }
 
-        let center_x = dims.width / 2;
-        let center_y = dims.height / 2;
+    /// Explicit board size (browser / scripted games). Restarts keep these
+    /// dimensions instead of re-reading the terminal.
+    pub fn with_size(width: u16, height: u16) -> Self {
+        Self::build(width, height, None, Some((width, height)))
+    }
+
+    /// Explicit board size + seeded RNG (the browser game's constructor).
+    pub fn with_size_seed(width: u16, height: u16, seed: u64) -> Self {
+        Self::build(width, height, Some(seed), Some((width, height)))
+    }
+
+    fn build(width: u16, height: u16, seed: Option<u64>, fixed_dims: Option<(u16, u16)>) -> Self {
+        let center_x = width / 2;
+        let center_y = height / 2;
         let spacing = 12;
 
         let player = LightCycle::new(
@@ -293,8 +333,6 @@ impl WormGame {
             false,
         );
 
-        let width = dims.width;
-        let height = dims.height;
         let grid = Self::build_grid(width, height);
 
         let mut game = Self {
@@ -318,7 +356,20 @@ impl WormGame {
             projectiles: Vec::new(),
             bombs: Vec::new(),
             powerup_timer: 60,
-            rng: Some(StdRng::seed_from_u64(seed)),
+            rng: seed.map(StdRng::seed_from_u64),
+            cpu_autopilot: true,
+            session_wins: [0, 0],
+            fixed_dims,
+            food_eaten_total: 0,
+            food_eaten_by: [0, 0],
+            round_pred_hits: 0,
+            round_pred_total: 0,
+            last_scored_prediction: None,
+            last_player_actual: None,
+            last_prediction_hit: None,
+            cpu_decision_reason: crate::cpu_ai::CpuDecisionReason::Opening,
+            cpu_predicted_path: Vec::new(),
+            death_cause: None,
         };
         game.generate_food_items();
         game
@@ -333,8 +384,8 @@ impl WormGame {
         for y in 0..height {
             for x in 0..width {
                 let frame = x == 0 || y == 0 || x == width - 1 || y == height - 1;
-                let arena_wall = corridor
-                    && (x == 2 || y == 2 || x == width - 3 || y == height - 3);
+                let arena_wall =
+                    corridor && (x == 2 || y == 2 || x == width - 3 || y == height - 3);
                 if frame || arena_wall {
                     grid[y as usize][x as usize] = CellType::Wall;
                 }
@@ -350,8 +401,7 @@ impl WormGame {
 
     /// Ring 2 — the arena wall (punchable). Ring 0 is the outer frame (never punchable).
     pub fn is_arena_wall(&self, x: u16, y: u16) -> bool {
-        self.has_corridor()
-            && (x == 2 || y == 2 || x == self.width - 3 || y == self.height - 3)
+        self.has_corridor() && (x == 2 || y == 2 || x == self.width - 3 || y == self.height - 3)
     }
 
     /// Can a cycle occupy this cell? Walls, trails, the frame and live bombs are fatal.
@@ -376,7 +426,12 @@ impl WormGame {
         let (xlo, xhi, ylo, yhi) = if self.has_corridor() {
             (4, self.width - 4, 4, self.height - 4)
         } else {
-            (2, self.width.saturating_sub(2), 2, self.height.saturating_sub(2))
+            (
+                2,
+                self.width.saturating_sub(2),
+                2,
+                self.height.saturating_sub(2),
+            )
         };
         let n = self.rng_range(1..=5);
         self.food_items.clear();
@@ -385,7 +440,10 @@ impl WormGame {
                 let x = self.rng_range(xlo..xhi);
                 let y = self.rng_range(ylo..yhi);
                 if self.grid[y as usize][x as usize] == CellType::Empty
-                    && !self.food_items.iter().any(|(fx, fy, _)| *fx == x && *fy == y)
+                    && !self
+                        .food_items
+                        .iter()
+                        .any(|(fx, fy, _)| *fx == x && *fy == y)
                 {
                     let num = self.rng_range(1..=9);
                     self.food_items.push((x, y, num));
@@ -438,7 +496,7 @@ impl WormGame {
         self.time += 1;
 
         // Update difficulty based on time
-        self.difficulty = (self.time / 300 + 1) as u32;
+        self.difficulty = self.time / 300 + 1;
 
         // Update particles with gravity and fading
         self.particles.retain_mut(|p| {
@@ -450,6 +508,35 @@ impl WormGame {
             p.y += p.vy;
             p.lifetime > 0
         });
+
+        // Opponent-model observation: encode the player's situation BEFORE
+        // the player moves — the label recorded at frame end is the direction
+        // taken from exactly this state (rps-ai: context-before → move-taken).
+        // The tail at this point holds moves through last frame, so the
+        // transition block cannot contain this frame's label (no leakage).
+        let player_ctx_pre =
+            crate::cpu_ai::encode_player_context(self, &self.cpu_brain.player_tail);
+        let player_dir_this_frame = self.cycles[self.player].direction;
+
+        // Last frame's forecasts targeted this input, even when this move is
+        // lethal. Score them before collision early-returns can end the game.
+        if self.cpu_autopilot {
+            if let Some(predicted) = self.cpu_brain.last_opp_prediction {
+                let hit = predicted == player_dir_this_frame;
+                self.cpu_brain.opp_pred_total += 1;
+                self.round_pred_total += 1;
+                if hit {
+                    self.cpu_brain.opp_pred_hits += 1;
+                    self.round_pred_hits += 1;
+                }
+                self.last_scored_prediction = Some(predicted);
+                self.last_player_actual = Some(player_dir_this_frame);
+                self.last_prediction_hit = Some(hit);
+            }
+            self.cpu_brain
+                .ensemble
+                .score_frame(player_dir_this_frame, self.frame_count);
+        }
 
         // Retract player tail first (unless owed growth cells) so the vacated
         // cell isn't a false self-collision.
@@ -465,8 +552,12 @@ impl WormGame {
         let (player_new, player_crashed) = {
             let cycle = &self.cycles[self.player];
             let (dx, dy) = cycle.direction.as_delta();
-            let new_x = (cycle.head.0 as i16 + dx).max(0).min((self.width - 1) as i16) as u16;
-            let new_y = (cycle.head.1 as i16 + dy).max(0).min((self.height - 1) as i16) as u16;
+            let new_x = (cycle.head.0 as i16 + dx)
+                .max(0)
+                .min((self.width - 1) as i16) as u16;
+            let new_y = (cycle.head.1 as i16 + dy)
+                .max(0)
+                .min((self.height - 1) as i16) as u16;
 
             let crashed = !self.passable(new_x, new_y);
 
@@ -475,20 +566,36 @@ impl WormGame {
 
         // Player collision
         if player_crashed {
+            // What killed the player: bomb cell, wall, own trail, or CPU trail.
+            if self.death_cause.is_none() {
+                self.death_cause = Some(
+                    if self
+                        .bombs
+                        .iter()
+                        .any(|b| b.x == player_new.0 && b.y == player_new.1)
+                    {
+                        DeathCause::BombBlast
+                    } else {
+                        match self.grid[player_new.1 as usize][player_new.0 as usize] {
+                            CellType::Player => DeathCause::OwnTrail,
+                            CellType::CPU => DeathCause::EnemyTrail,
+                            _ => DeathCause::Wall,
+                        }
+                    },
+                );
+            }
             // True head-on: the player rams the CPU's head cell while the CPU
             // simultaneously steps into the player's head cell. Both die -> draw
             // (the sequential player-first check would otherwise hand the CPU
             // the win). The CPU's intended move is taken from its current
             // direction; cpu_decide preserves it in every non-turn frame.
-            let cpu_rams_back = self.cycles[1].alive
-                && player_new == self.cycles[1].head
-                && {
-                    let cy = &self.cycles[1];
-                    let (dx, dy) = cy.direction.as_delta();
-                    let nx = (cy.head.0 as i16 + dx).max(0).min((self.width - 1) as i16) as u16;
-                    let ny = (cy.head.1 as i16 + dy).max(0).min((self.height - 1) as i16) as u16;
-                    (nx, ny) == self.cycles[0].head
-                };
+            let cpu_rams_back = self.cycles[1].alive && player_new == self.cycles[1].head && {
+                let cy = &self.cycles[1];
+                let (dx, dy) = cy.direction.as_delta();
+                let nx = (cy.head.0 as i16 + dx).max(0).min((self.width - 1) as i16) as u16;
+                let ny = (cy.head.1 as i16 + dy).max(0).min((self.height - 1) as i16) as u16;
+                (nx, ny) == self.cycles[0].head
+            };
             // Same-frame sibling: the CPU would also crash this frame (boxed in,
             // or about to run into a wall/trail/bomb). The player-crash early
             // return used to skip evaluating the CPU's fate entirely and credit
@@ -501,8 +608,15 @@ impl WormGame {
                 !self.passable(nx, ny)
             };
             self.add_impact_particles(player_new.0, player_new.1, self.cycles[self.player].color);
+            if cpu_rams_back {
+                self.death_cause = Some(DeathCause::HeadOn);
+            }
             if cpu_rams_back || cpu_would_crash {
-                self.add_impact_particles(self.cycles[1].head.0, self.cycles[1].head.1, self.cycles[1].color);
+                self.add_impact_particles(
+                    self.cycles[1].head.0,
+                    self.cycles[1].head.1,
+                    self.cycles[1].color,
+                );
                 self.cycles[1].alive = false;
                 self.winner = None;
             } else {
@@ -510,7 +624,7 @@ impl WormGame {
             }
             self.cycles[self.player].alive = false;
             self.game_over = true;
-            play_beep_sequence(&[440, 330, 220, 110], &[100, 100, 100, 200]);
+            play_death_riff(100);
             // A bomb at fuse 0 still detonates this frame (frame-end order);
             // it may kill the surviving CPU and turn the loss into a draw.
             self.tick_bombs();
@@ -529,6 +643,7 @@ impl WormGame {
             player_food_val = v;
             self.cycles[self.player].score += player_food_val as u32;
             self.score += player_food_val as u32 * 10;
+            self.food_eaten_total += player_food_val as u32;
         }
 
         // Move player head (grow by the food value eaten)
@@ -553,28 +668,49 @@ impl WormGame {
         {
             let (_, _, kind) = self.powerups.remove(idx);
             self.cycles[self.player].held_powerup = Some(kind);
-            play_beep(1560, 40);
+            play_beep(SfxKind::PowerUp, 1560, 40);
         }
 
         if player_food_val > 0 {
+            self.food_eaten_by[0] += player_food_val as u32;
             self.add_impact_particles(player_new.0, player_new.1, player_color);
-            play_beep(880, 50);
-            play_beep(1320, 50);
+            play_food_pickup(player_food_val);
         }
 
         // CPU AI — faithful k-NN memory opponent (rps-ai mechanism).
-        // The CPU fires a held power-up when the heuristic sees a good shot.
-        if crate::cpu_ai::should_fire(self, 1) {
-            self.fire_powerup(1);
-            if self.game_over {
-                // A beam-triggered kill mid-frame must not freeze an armed
-                // bomb at fuse 0 that would have detonated at frame-end.
-                self.tick_bombs();
-                return false;
+        // Only runs when the CPU drives itself: scripted bench opponents
+        // (cpu_autopilot = false) keep their externally-steered heading and
+        // leave no episodes in the learner's brain.
+        let mut cpu_obs = None;
+        let cpu_dir = if self.cpu_autopilot {
+            // The CPU fires a held power-up when the heuristic sees a good shot.
+            if crate::cpu_ai::should_fire(self, 1) {
+                self.fire_powerup(1);
+                if self.game_over {
+                    // A beam-triggered kill mid-frame must not freeze an armed
+                    // bomb at fuse 0 that would have detonated at frame-end.
+                    self.tick_bombs();
+                    return false;
+                }
             }
-        }
-        let cpu_dir = crate::cpu_ai::cpu_decide(self);
-        self.cycles[1].change_direction(cpu_dir);
+            let dir = crate::cpu_ai::cpu_decide(self);
+            // Learn from what the decision actually saw: encode the situation
+            // BEFORE the turn is applied and before the head moves. (The old
+            // code encoded after the move — a one-frame shift that paired
+            // every pre-move decision with a post-move situation.)
+            cpu_obs = Some(crate::cpu_ai::encode_situation(self, &self.cpu_brain));
+            // Survival counter = frames survived on the current heading. It
+            // resets on a turn; previously it was reset EVERY frame, so the
+            // reward's survival term was a constant 1 and the signal was dead.
+            let turned = dir != self.cycles[1].direction;
+            self.cycles[1].change_direction(dir);
+            if turned {
+                self.frames_since_cpu_move = 0;
+            }
+            dir
+        } else {
+            self.cycles[1].direction
+        };
 
         // Retract CPU tail first (unless owed growth cells) so the vacated cell
         // isn't a false self-collision.
@@ -590,8 +726,12 @@ impl WormGame {
         let (cpu_new, cpu_crashed) = {
             let cycle = &self.cycles[1];
             let (dx, dy) = cycle.direction.as_delta();
-            let new_x = (cycle.head.0 as i16 + dx).max(0).min((self.width - 1) as i16) as u16;
-            let new_y = (cycle.head.1 as i16 + dy).max(0).min((self.height - 1) as i16) as u16;
+            let new_x = (cycle.head.0 as i16 + dx)
+                .max(0)
+                .min((self.width - 1) as i16) as u16;
+            let new_y = (cycle.head.1 as i16 + dy)
+                .max(0)
+                .min((self.height - 1) as i16) as u16;
 
             let crashed = !self.passable(new_x, new_y);
 
@@ -602,22 +742,51 @@ impl WormGame {
 
         // CPU collision
         if cpu_crashed {
+            if self.death_cause.is_none() {
+                self.death_cause = Some(
+                    if self
+                        .bombs
+                        .iter()
+                        .any(|b| b.x == cpu_new.0 && b.y == cpu_new.1)
+                    {
+                        DeathCause::BombBlast
+                    } else {
+                        match self.grid[cpu_new.1 as usize][cpu_new.0 as usize] {
+                            CellType::CPU => DeathCause::OwnTrail,
+                            CellType::Player => DeathCause::EnemyTrail,
+                            _ => DeathCause::Wall,
+                        }
+                    },
+                );
+            }
             // Both entered the same cell this frame: the player's crash check
             // ran first and the cell was empty then, so the player moved in,
             // and the CPU then stepped into the same cell. Both die -> draw.
             let same_cell = self.cycles[0].alive && cpu_new == self.cycles[0].head;
-            // Learn: the chosen direction died immediately (reward 0).
-            let obs = crate::cpu_ai::encode_situation(self, &self.cpu_brain);
-            crate::cpu_ai::record_episode(&mut self.cpu_brain, obs, cpu_dir, 0, 0);
+            if same_cell {
+                self.death_cause = Some(DeathCause::HeadOn);
+            }
+            // Learn: the chosen direction died immediately (reward 0). The
+            // episode uses the same pre-move observation as survival episodes
+            // so crash and survival data share one pairing convention.
+            // Scripted CPUs (autopilot off) record nothing — their crashes
+            // are not the learner's decisions.
+            if let Some(obs) = cpu_obs {
+                crate::cpu_ai::record_episode(&mut self.cpu_brain, obs, cpu_dir, 0, 0);
+            }
             self.add_impact_particles(cpu_new.0, cpu_new.1, self.cycles[1].color);
             if same_cell {
-                self.add_impact_particles(self.cycles[0].head.0, self.cycles[0].head.1, self.cycles[0].color);
+                self.add_impact_particles(
+                    self.cycles[0].head.0,
+                    self.cycles[0].head.1,
+                    self.cycles[0].color,
+                );
                 self.cycles[0].alive = false;
             }
             self.cycles[1].alive = false;
             self.game_over = true;
             self.winner = if same_cell { None } else { Some(0) };
-            play_beep_sequence(&[440, 330, 220, 110], &[100, 100, 100, 200]);
+            play_death_riff(100);
             // A bomb at fuse 0 still detonates this frame; it may kill the
             // surviving player and turn the CPU win into a draw.
             self.tick_bombs();
@@ -633,8 +802,10 @@ impl WormGame {
         {
             let (_, _, v) = self.food_items.remove(idx);
             cpu_food_val = v;
+            self.food_eaten_by[1] += cpu_food_val as u32;
             self.cycles[1].score += cpu_food_val as u32;
             self.score += cpu_food_val as u32 * 10;
+            self.food_eaten_total += cpu_food_val as u32;
         }
 
         // If we've cleared the tray, spawn a fresh 1-5.
@@ -664,43 +835,58 @@ impl WormGame {
         {
             let (_, _, kind) = self.powerups.remove(idx);
             self.cycles[1].held_powerup = Some(kind);
-            play_beep(1560, 40);
+            play_beep(SfxKind::PowerUp, 1560, 40);
         }
 
         if cpu_food_val > 0 {
             self.add_impact_particles(cpu_new.0, cpu_new.1, cpu_color);
-            play_beep(880, 50);
-            play_beep(1320, 50);
+            play_food_pickup(cpu_food_val);
         }
 
         // Record this round for learning — faithful to rps-ai: learn from what
         // happened, with a monotonic seq. The CPU survived `frames_since_cpu_move`
         // frames on this direction and ate cpu_food_val food.
-        self.frames_since_cpu_move += 1;
-        let obs = crate::cpu_ai::encode_situation(self, &self.cpu_brain);
-        crate::cpu_ai::record_episode(
-            &mut self.cpu_brain,
-            obs,
-            cpu_dir,
-            self.frames_since_cpu_move,
-            cpu_food_val,
-        );
-        self.frames_since_cpu_move = 0;
-
-        // Player move history feeding the CPU tail (trailing-match bonus).
-        self.cpu_brain
-            .record_player_move(self.cycles[self.player].direction);
+        if let Some(obs) = cpu_obs {
+            self.frames_since_cpu_move += 1;
+            crate::cpu_ai::record_episode(
+                &mut self.cpu_brain,
+                obs,
+                cpu_dir,
+                self.frames_since_cpu_move,
+                cpu_food_val,
+            );
+        }
 
         // --- Opponent Model Learning ---
-        // Encode the player-centric context and record the player's observed
-        // next-direction so the k-NN opponent model can learn the transition.
+        // Store (pre-move player context → direction the player took), encoded
+        // at frame start before the tail saw this frame's move.
         // (rps-ai learns from what the HUMAN played next, not what the AI did.)
-        let player_ctx = crate::cpu_ai::encode_player_context(self, &self.cpu_brain.player_tail);
         crate::cpu_ai::record_player_episode(
             &mut self.cpu_brain,
-            player_ctx,
-            self.cycles[self.player].direction,
+            player_ctx_pre,
+            player_dir_this_frame,
         );
+        // Player move history feeding the CPU tail (trailing-match bonus).
+        self.cpu_brain.record_player_move(player_dir_this_frame);
+
+        // --- The rps-ai ensemble: score last frame's predictions against the
+        // actual move, then refresh every model's prediction for next frame
+        // (counterfactual recording — rps-ai stores model0..5 every round).
+        if self.cpu_autopilot {
+            let (pending, active, confidence) =
+                crate::cpu_ai::compute_ensemble(self, &self.cpu_brain);
+            let e = &mut self.cpu_brain.ensemble;
+            e.pending = pending;
+            e.active = active;
+            e.confidence = confidence;
+            e.predicted_dir = pending[active];
+            self.cpu_brain.last_opp_prediction = e.predicted_dir;
+        }
+
+        // Track each cycle's last-executed direction (documented per-frame
+        // snapshot; corner/transition features read prev_direction).
+        self.cycles[0].snapshot_direction();
+        self.cycles[1].snapshot_direction();
 
         // Live projectiles and planted bombs (can end the game).
         self.advance_projectiles();
@@ -730,7 +916,21 @@ impl WormGame {
     }
 
     pub fn restart(&mut self) {
-        let dims = Dimensions::get_terminal_size();
+        // Explicit-size games (browser) keep their dimensions; native games
+        // re-read the terminal so resizes take effect.
+        let dims = match self.fixed_dims {
+            Some((w, h)) => Dimensions {
+                width: w,
+                height: h,
+            },
+            None => Dimensions::get_terminal_size(),
+        };
+
+        // Session scoreboard: bank the finished game (rps-ai's You-vs-Computer
+        // counter) before resetting the board.
+        if let Some(w) = self.winner {
+            self.session_wins[w] += 1;
+        }
 
         let center_x = dims.width / 2;
         let center_y = dims.height / 2;
@@ -768,20 +968,65 @@ impl WormGame {
         // so the CPU starts the new game with experience. Only reset the
         // CPU-sequence timer that gates recording (frames_since_cpu_move).
         self.frames_since_cpu_move = 0;
+        // rps-ai wipes its per-game record each game: ensemble model scores are
+        // per-game (responsive), the k-NN memory beneath persists (the corpus).
+        self.cpu_brain.ensemble.reset_scores();
+        self.cpu_brain.last_opp_prediction = None;
         self.cpu_history.clear();
         self.powerups.clear();
         self.projectiles.clear();
         self.bombs.clear();
         self.powerup_timer = 60;
+        self.food_eaten_total = 0;
+        self.food_eaten_by = [0, 0];
+        self.round_pred_hits = 0;
+        self.round_pred_total = 0;
+        self.last_scored_prediction = None;
+        self.last_player_actual = None;
+        self.last_prediction_hit = None;
+        self.cpu_decision_reason = crate::cpu_ai::CpuDecisionReason::Opening;
+        self.cpu_predicted_path.clear();
+        self.death_cause = None;
         self.generate_food_items();
     }
 
     pub fn frame_delay(&self) -> Duration {
-        // Speed increases over time (100ms → 35ms)
-        let base_delay = 100u64;
-        let speedup = (self.frame_count / 60) as u64 * 3;
-        let delay = (base_delay - speedup).max(35);
-        Duration::from_millis(delay)
+        // Speed is EARNED BY EATING: every food value point (either cycle)
+        // shaves time off the frame, from a relaxed 115ms opening down to the
+        // 35ms floor — proportional to the size of the food, not the clock.
+        let speedup = (self.food_eaten_total as u64 / 2).min(80);
+        Duration::from_millis(115u64.saturating_sub(speedup).max(35))
+    }
+
+    /// 0 = opening crawl, 100 = max speed (HUD + music/sfx intensity).
+    pub fn speed_pct(&self) -> u32 {
+        let ms = self.frame_delay().as_millis() as u32;
+        ((115u32.saturating_sub(ms)) * 100) / 80
+    }
+
+    /// Current-game active-prediction accuracy. Lifetime accuracy lives on the
+    /// persisted CpuBrain; keeping this scope on WormGame makes restart reset it.
+    pub fn round_pred_accuracy(&self) -> f32 {
+        if self.round_pred_total == 0 {
+            0.0
+        } else {
+            self.round_pred_hits as f32 / self.round_pred_total as f32
+        }
+    }
+
+    /// Wins for display: the banked scoreboard PLUS the current game's
+    /// winner. The scoreboard is banked in restart() (one game stale at
+    /// game-over time); display code must show the game that just ended or
+    /// the champion check fires a round late (the "I won but the CPU is the
+    /// champion" bug).
+    pub fn displayed_wins(&self) -> [u32; 2] {
+        let mut w = self.session_wins;
+        if self.game_over {
+            if let Some(i) = self.winner {
+                w[i] += 1;
+            }
+        }
+        w
     }
 
     /* ------------------------------ power-ups ------------------------------ */
@@ -814,6 +1059,9 @@ impl WormGame {
                     let (ox, oy) = self.cycles[opp].head;
                     self.add_impact_particles(ox, oy, self.cycles[opp].color);
                     self.cycles[opp].alive = false;
+                    if self.death_cause.is_none() {
+                        self.death_cause = Some(DeathCause::Laser);
+                    }
                     if self.game_over {
                         // A beam-triggered bomb blast already killed someone
                         // this frame; the beam then reaching the other head
@@ -822,7 +1070,7 @@ impl WormGame {
                     } else {
                         self.game_over = true;
                         self.winner = Some(who);
-                        play_beep_sequence(&[440, 330, 220, 110], &[80, 80, 80, 160]);
+                        play_death_riff(80);
                     }
                 }
                 // Beam flash particles along the whole path. Lifetime in the
@@ -838,7 +1086,7 @@ impl WormGame {
                         color: (255, 255, 120),
                     });
                 }
-                play_beep(1800, 30);
+                play_beep(SfxKind::Laser, 1800, 30);
             }
             PowerUpKind::TriShot => {
                 // Straight ahead plus the two forward diagonals.
@@ -855,13 +1103,20 @@ impl WormGame {
                 }
                 // Muzzle flash so the fire is visible at the head.
                 self.add_impact_particles(hx, hy, self.cycles[who].color);
-                play_beep(1200, 40);
+                play_beep(SfxKind::TriShot, 1200, 40);
             }
             PowerUpKind::Bomb => {
-                let fuse = (BOMB_FUSE_MS / self.frame_delay().as_millis().max(1) as u64).max(8) as u32;
-                self.bombs.push(Bomb { x: hx, y: hy, fuse, owner: who as u8 });
+                let fuse =
+                    (BOMB_FUSE_MS / self.frame_delay().as_millis().max(1) as u64).max(8) as u32;
+                self.bombs.push(Bomb {
+                    x: hx,
+                    y: hy,
+                    fuse,
+                    owner: who as u8,
+                });
                 self.add_impact_particles(hx, hy, (255, 120, 40));
-                play_beep(220, 60);
+                // Two-beat "thud" — audible countdown cue without blocking.
+                play_beep_sequence(SfxKind::BombPlant, &[220, 160], &[90, 90]);
             }
             PowerUpKind::WallPunch => {
                 // Fly to the first wall cell; if it is the punchable arena wall, open a hole.
@@ -878,7 +1133,7 @@ impl WormGame {
                         if self.is_arena_wall(ux, uy) {
                             self.grid[uy as usize][ux as usize] = CellType::Hole;
                             self.add_impact_particles(ux, uy, (120, 255, 120));
-                            play_beep(660, 60);
+                            play_beep(SfxKind::WallPunch, 660, 60);
                         }
                         break;
                     }
@@ -929,11 +1184,16 @@ impl WormGame {
             let (ux, uy) = (x as u16, y as u16);
             let hit = (0..2).find(|&c| {
                 let c = c as u8;
-                c != from && self.cycles[c as usize].alive && self.cycles[c as usize].head == (ux, uy)
+                c != from
+                    && self.cycles[c as usize].alive
+                    && self.cycles[c as usize].head == (ux, uy)
             });
             if let Some(c) = hit {
                 self.add_impact_particles(ux, uy, self.cycles[c].color);
                 self.cycles[c].alive = false;
+                if self.death_cause.is_none() {
+                    self.death_cause = Some(DeathCause::TriShotBolt);
+                }
                 if self.game_over {
                     // A bolt (or bomb) already killed the other head earlier
                     // this frame — both died, so it is a draw, never a
@@ -942,7 +1202,7 @@ impl WormGame {
                 } else {
                     self.game_over = true;
                     self.winner = Some(1 - c);
-                    play_beep_sequence(&[440, 330, 220, 110], &[80, 80, 80, 160]);
+                    play_death_riff(80);
                 }
                 self.projectiles.remove(i);
                 continue;
@@ -978,7 +1238,8 @@ impl WormGame {
     /// than overwriting the first kill's winner.
     fn detonate(&mut self, x: u16, y: u16, owner: u8) {
         self.add_impact_particles(x, y, (255, 120, 40));
-        play_beep(110, 120);
+        // Three-note descending rumble.
+        play_beep_sequence(SfxKind::Detonate, &[110, 90, 70], &[110, 110, 110]);
         let r = BOMB_RADIUS_CELLS as i32;
         let (cx, cy) = (x as i32, y as i32);
         for yy in (cy - r)..=(cy + r) {
@@ -1008,19 +1269,22 @@ impl WormGame {
         }
         // Kill heads in the radius (owner excluded; both can die -> draw).
         let mut dead = [false; 2];
-        for c in 0..2 {
+        for (c, is_dead) in dead.iter_mut().enumerate() {
             if c as u8 == owner {
                 continue;
             }
             let (hx, hy) = self.cycles[c].head;
             let d = (hx as i32 - cx).abs().max((hy as i32 - cy).abs());
             if d <= r {
-                dead[c] = true;
+                *is_dead = true;
             }
         }
         if dead[0] || dead[1] {
-            for c in 0..2 {
-                if dead[c] && self.cycles[c].alive {
+            if self.death_cause.is_none() {
+                self.death_cause = Some(DeathCause::BombBlast);
+            }
+            for (c, &is_dead) in dead.iter().enumerate() {
+                if is_dead && self.cycles[c].alive {
                     self.cycles[c].alive = false;
                     let (hx, hy) = self.cycles[c].head;
                     self.add_impact_particles(hx, hy, self.cycles[c].color);
@@ -1040,7 +1304,7 @@ impl WormGame {
                     (false, true) => Some(0),
                     _ => None,
                 };
-                play_beep_sequence(&[440, 330, 220, 110], &[100, 100, 100, 200]);
+                play_death_riff(100);
             }
         }
     }
@@ -1053,7 +1317,12 @@ impl WormGame {
         let (xlo, xhi, ylo, yhi) = if self.has_corridor() {
             (4, self.width - 4, 4, self.height - 4)
         } else {
-            (2, self.width.saturating_sub(2), 2, self.height.saturating_sub(2))
+            (
+                2,
+                self.width.saturating_sub(2),
+                2,
+                self.height.saturating_sub(2),
+            )
         };
         for _ in 0..200 {
             let x = self.rng_range(xlo..xhi);
@@ -1083,6 +1352,8 @@ impl WormGame {
         }
     }
 
+    /// Terminal renderer (native only — the browser build draws to canvas).
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn render(&self, stdout: &mut std::io::Stdout) {
         use crossterm::{
             cursor::MoveTo,
@@ -1090,38 +1361,118 @@ impl WormGame {
             style::{Color, Print, ResetColor, SetForegroundColor},
             terminal::{Clear, ClearType},
         };
-        
 
         execute!(stdout, Clear(ClearType::All), MoveTo(0, 0)).unwrap();
 
-        let pulse = ((self.time as f32 * 0.2).sin() * 0.3 + 0.7) as f32;
+        let pulse = (self.time as f32 * 0.2).sin() * 0.3 + 0.7;
+
+        // Body-index lookup for trail gradients (head = 0, tail tip = len-1).
+        let mut body_idx: [std::collections::HashMap<(u16, u16), usize>; 2] = [
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+        ];
+        for (c, index) in body_idx.iter_mut().enumerate() {
+            for (i, &p) in self.cycles[c].positions.iter().enumerate() {
+                index.insert(p, i);
+            }
+        }
+
+        // Head glyph shows the cycle's current heading.
+        fn dir_glyph(d: Direction) -> char {
+            match d {
+                Direction::Up => '▲',
+                Direction::Down => '▼',
+                Direction::Left => '◀',
+                Direction::Right => '▶',
+            }
+        }
 
         for y in 0..self.height as usize {
             let mut line = String::new();
             for x in 0..self.width as usize {
                 let cell = self.grid[y][x];
-                let (r, g, b, ch): (u8, u8, u8, char) = match cell {
-                    CellType::Empty => (0, 0, 0, ' '),
-                    CellType::Player => {
-                        let player_head = self.cycles[0].head;
-                        if (x, y) == (player_head.0 as usize, player_head.1 as usize) {
-                            // Head: white core with cyan glow
-                            (255, 255, 255, '●')
+                // Each game cell renders as TWO terminal chars — terminal
+                // cells are ~2:1 tall, so 1-char cells made horizontal travel
+                // look twice as fast as vertical. `double` = print glyph twice
+                // (emoji are already ~2 cols wide, so they print once).
+                let (r, g, b, ch, double): (u8, u8, u8, char, bool) = match cell {
+                    CellType::Empty => {
+                        // Bomb danger telegraph: empty cells inside the blast
+                        // radius of a bomb with <= 15 frames left smoulder red
+                        // (the zone pulses as the fuse runs out).
+                        let mut danger = false;
+                        for b in &self.bombs {
+                            if b.fuse <= 15 {
+                                let dx = (x as i32 - b.x as i32).abs();
+                                let dy = (y as i32 - b.y as i32).abs();
+                                if dx <= BOMB_RADIUS_CELLS as i32 && dy <= BOMB_RADIUS_CELLS as i32
+                                {
+                                    danger = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if danger {
+                            let heat = ((self.time as f32 * 0.4).sin() * 0.5 + 0.5) * 60.0;
+                            ((70.0 + heat) as u8, 15, 10, '░', true)
                         } else {
-                            // Trail: cyan with varying intensity
-                            (0, (255 as f32 * pulse) as u8, (255 as f32 * pulse) as u8, '█')
+                            (0, 0, 0, ' ', true)
+                        }
+                    }
+                    CellType::Player => {
+                        let c = &self.cycles[0];
+                        if (x, y) == (c.head.0 as usize, c.head.1 as usize) {
+                            // Head: white core, glyph shows heading.
+                            (255, 255, 255, dir_glyph(c.direction), true)
+                        } else {
+                            // Trail: cyan fading from head (█) to tail tip (░).
+                            let len = c.positions.len().max(1);
+                            let i = body_idx[0]
+                                .get(&(x as u16, y as u16))
+                                .copied()
+                                .unwrap_or(len - 1);
+                            let t = (i.min(len - 1)) as f32 / (len - 1).max(1) as f32;
+                            let g = (235.0 * (1.0 - t * 0.8) * pulse + 20.0) as u8;
+                            let ch = if t < 0.33 {
+                                '█'
+                            } else if t < 0.66 {
+                                '▓'
+                            } else {
+                                '░'
+                            };
+                            (0, g, g, ch, true)
                         }
                     }
                     CellType::CPU => {
-                        let cpu_head = self.cycles[1].head;
-                        if (x, y) == (cpu_head.0 as usize, cpu_head.1 as usize) {
-                            // CPU head: magenta white core
-                            (255, 255, 255, '◆')
+                        let c = &self.cycles[1];
+                        if (x, y) == (c.head.0 as usize, c.head.1 as usize) {
+                            (255, 255, 255, dir_glyph(c.direction), true)
                         } else {
-                            (200, 0, (200 as f32 * pulse) as u8, '▓')
+                            let len = c.positions.len().max(1);
+                            let i = body_idx[1]
+                                .get(&(x as u16, y as u16))
+                                .copied()
+                                .unwrap_or(len - 1);
+                            let t = (i.min(len - 1)) as f32 / (len - 1).max(1) as f32;
+                            let g = (235.0 * (1.0 - t * 0.8) * pulse + 20.0) as u8;
+                            let ch = if t < 0.33 {
+                                '█'
+                            } else if t < 0.66 {
+                                '▓'
+                            } else {
+                                '░'
+                            };
+                            (g, 0, g, ch, true)
                         }
                     }
-                    CellType::Wall => (0, 80, 80, '·'),
+                    CellType::Wall => {
+                        // Ring-2 arena wall reads solid; the outer frame stays dim.
+                        if self.is_arena_wall(x as u16, y as u16) {
+                            (0, 140, 140, '▒', true)
+                        } else {
+                            (0, 60, 60, '·', true)
+                        }
+                    }
                     CellType::Food => {
                         let num = self
                             .food_items
@@ -1129,85 +1480,120 @@ impl WormGame {
                             .find(|&&(fx, fy, _)| fx as usize == x && fy as usize == y)
                             .map(|&(_, _, n)| n)
                             .unwrap_or(0);
-                        let ch = char::from_digit(num as u32, 10).unwrap_or('?');
+                        // Value-sized glyph — bigger number, bigger morsel,
+                        // no digit shown.
+                        let ch = match num {
+                            1..=2 => '·',
+                            3..=4 => '○',
+                            5..=6 => '◎',
+                            7..=8 => '●',
+                            _ => '◆',
+                        };
                         let hue = num as f32 * 18.0;
                         let (r, g, b) = hsv_to_rgb(hue, 1.0, 1.0);
                         let intensity = ((pulse * 255.0) as u8).max(100);
-                         (r.max(intensity), g.max(intensity), b.max(intensity), ch)
-                     }
-                     CellType::Hole => (60, 60, 60, '·'),
-                     CellType::PowerUp => {
-                         let pu = self
-                             .powerups
-                             .iter()
-                             .find(|&&(px, py, _)| px as usize == x && py as usize == y)
-                             .map(|&(_, _, k)| k)
-                             .unwrap_or(PowerUpKind::Laser);
+                        (
+                            r.max(intensity),
+                            g.max(intensity),
+                            b.max(intensity),
+                            ch,
+                            true,
+                        )
+                    }
+                    CellType::Hole => (140, 140, 140, '○', true),
+                    CellType::PowerUp => {
+                        let pu = self
+                            .powerups
+                            .iter()
+                            .find(|&&(px, py, _)| px as usize == x && py as usize == y)
+                            .map(|&(_, _, k)| k)
+                            .unwrap_or(PowerUpKind::Laser);
                         let ch = match pu {
                             PowerUpKind::Laser => '⚡',
                             PowerUpKind::TriShot => '✦',
                             PowerUpKind::Bomb => '💣',
                             PowerUpKind::WallPunch => '🔨',
                         };
-                         (200, 200, 0, ch)
-                     }
-                 };
+                        (200, 200, 0, ch, false)
+                    }
+                };
 
                 if ch == ' ' {
-                    line.push(' ');
+                    line.push_str("  ");
+                } else if double {
+                    line.push_str(&format!("\x1b[38;2;{};{};{}m{}{}", r, g, b, ch, ch));
                 } else {
                     line.push_str(&format!("\x1b[38;2;{};{};{}m{}", r, g, b, ch));
                 }
             }
 
-            execute!(stdout, MoveTo(0, y as u16), Print(format!("\x1b[0m{}", line))).unwrap();
+            execute!(
+                stdout,
+                MoveTo(0, y as u16),
+                Print(format!("\x1b[0m{}", line))
+            )
+            .unwrap();
         }
 
-        // Draw border
+        // Draw border (screen is 2 chars per cell wide → right edge at 2w-1).
+        let rw = 2 * self.width - 1;
         execute!(
             stdout,
-            SetForegroundColor(Color::Rgb { r: 0, g: 200, b: 255 }),
+            SetForegroundColor(Color::Rgb {
+                r: 0,
+                g: 200,
+                b: 255
+            }),
             MoveTo(0, 0),
             Print("╔"),
-            MoveTo(self.width - 1, 0),
+            MoveTo(rw, 0),
             Print("╗"),
             MoveTo(0, self.height - 1),
             Print("╚"),
-            MoveTo(self.width - 1, self.height - 1),
+            MoveTo(rw, self.height - 1),
             Print("╝"),
-        ).unwrap();
+        )
+        .unwrap();
 
-        for x in 1..self.width - 1 {
+        for x in 1..rw {
             execute!(stdout, MoveTo(x, 0), Print("═")).unwrap();
             execute!(stdout, MoveTo(x, self.height - 1), Print("═")).unwrap();
         }
         for y in 1..self.height - 1 {
             execute!(stdout, MoveTo(0, y), Print("║")).unwrap();
-            execute!(stdout, MoveTo(self.width - 1, y), Print("║")).unwrap();
+            execute!(stdout, MoveTo(rw, y), Print("║")).unwrap();
         }
 
         // Draw live tri-shot bolts (separate from the grid — overlay).
         for p in &self.projectiles {
             execute!(
                 stdout,
-                SetForegroundColor(Color::Rgb { r: 255, g: 255, b: 60 }),
-                MoveTo(p.x, p.y),
-                Print("✹")
-            ).unwrap();
+                SetForegroundColor(Color::Rgb {
+                    r: 255,
+                    g: 255,
+                    b: 60
+                }),
+                MoveTo(p.x * 2, p.y),
+                Print("✹✹")
+            )
+            .unwrap();
         }
 
         // Draw planted bombs (separate from the grid — overlay). The grid cell
         // under a bomb reads Empty, so without this a bomb is an invisible
         // fatal wall: you crash into it with no visual.
         for b in &self.bombs {
-            let hot = ((self.time as f32 * 0.15).sin() * 0.4 + 0.6) as f32;
+            // Blink rate accelerates as the fuse runs down (urgency cue).
+            let urgency = 1.0 - (b.fuse as f32 / 60.0).min(1.0);
+            let hot = (self.time as f32 * (0.15 + urgency * 0.65)).sin() * 0.4 + 0.6;
             let (r, g, bl) = (255, (120.0 * hot) as u8, 0);
             execute!(
                 stdout,
                 SetForegroundColor(Color::Rgb { r, g, b: bl }),
-                MoveTo(b.x, b.y),
+                MoveTo(b.x * 2, b.y),
                 Print("💣")
-            ).unwrap();
+            )
+            .unwrap();
         }
 
         // Draw particles (over trails, walls and holes too — the beam flash
@@ -1221,62 +1607,141 @@ impl WormGame {
                 let fade_r = (r as f32 * alpha) as u8;
                 let fade_g = (g as f32 * alpha) as u8;
                 let fade_b = (b as f32 * alpha) as u8;
-                execute!(stdout, MoveTo(x, y), SetForegroundColor(Color::Rgb { r: fade_r, g: fade_g, b: fade_b }), Print("·")).unwrap();
+                execute!(
+                    stdout,
+                    MoveTo(x * 2, y),
+                    SetForegroundColor(Color::Rgb {
+                        r: fade_r,
+                        g: fade_g,
+                        b: fade_b
+                    }),
+                    Print("··")
+                )
+                .unwrap();
             }
         }
 
         // Draw UI bar
         let bar_color = if self.game_over {
-            Color::Rgb { r: 255, g: 85, b: 128 }
+            Color::Rgb {
+                r: 255,
+                g: 85,
+                b: 128,
+            }
         } else {
-            Color::Rgb { r: 0, g: 255, b: 255 }
+            Color::Rgb {
+                r: 0,
+                g: 255,
+                b: 255,
+            }
         };
 
+        // Brain-memory readout (wide terminals only — keeps narrow HUDs clean):
+        // self-episodes / opponent-episodes / opponent-prediction accuracy.
+        let wide = self.width * 2 >= 100;
+        let mem = if wide {
+            format!(
+                " │ MEM: {}/{}·{:.0}%",
+                self.cpu_brain.episodes.len(),
+                self.cpu_brain.opp_brain.episodes.len(),
+                self.cpu_brain.opp_pred_accuracy() * 100.0,
+            )
+        } else {
+            String::new()
+        };
+        let dw = self.displayed_wins();
         execute!(
             stdout,
             SetForegroundColor(bar_color),
             MoveTo(0, self.height),
             Print(format!(
-                "╔{}╗ P1 (CYAN): {:4} PWR: {:<9} │ P2 (MAGENTA): {:4} PWR: {:<9} │ SCORE: {:5} │ SPEED: {:3}% │ FOOD: {:2} │ TIME: {}",
-                "═".repeat((self.width.saturating_sub(1)) as usize),
-                self.cycles[0].score,
+                "╔{}╗ P1 FOOD: {:3} PWR: {:<9} │ P2 FOOD: {:3} PWR: {:<9} │ WINS {}:{} │ SPEED: {:3}% │ FOOD ON BOARD: {:2} │ FRAME: {}{}",
+                "═".repeat(((2 * self.width).saturating_sub(1)) as usize),
+                self.food_eaten_by[0],
                 Self::powerup_name(self.cycles[0].held_powerup),
-                self.cycles[1].score,
+                self.food_eaten_by[1],
                 Self::powerup_name(self.cycles[1].held_powerup),
-                self.score,
-                100 - (self.frame_count / 60).min(50) as u32,
+                dw[0],
+                dw[1],
+                self.speed_pct(),
                 self.food_items.len(),
                 self.time,
+                mem,
             )),
         ).unwrap();
 
-        // Bottom bar
+        // Bottom bar: the live brain panel on wide terminals (rps-ai never
+        // showed its models — we do), static help text otherwise.
+        let bottom = if wide {
+            let e = &self.cpu_brain.ensemble;
+            let mut s = String::from("BRAIN ");
+            for (i, name) in crate::cpu_ai::MODEL_NAMES.iter().enumerate() {
+                let mark = if i == e.active { '*' } else { ' ' };
+                s.push_str(&format!("{}:{:+.2}{} ", name, e.score(i), mark));
+            }
+            let arrow = e.predicted_dir.map(dir_glyph).unwrap_or('·');
+            format!(
+                "{}→ {}  round:{:.0}%/{} lifetime:{:.0}%/{} source:{} action:{}",
+                s,
+                arrow,
+                self.round_pred_accuracy() * 100.0,
+                self.round_pred_total,
+                self.cpu_brain.opp_pred_accuracy() * 100.0,
+                self.cpu_brain.opp_pred_total,
+                crate::cpu_ai::MODEL_NAMES[e.active],
+                self.cpu_decision_reason.as_str(),
+            )
+        } else {
+            "←→ ARROW KEYS or WASD: Move │ SPACE: Fire Power-up │ R: Restart │ Q: Quit │ EAT NUMBERS TO GROW • COLLIDE TO DIE".to_string()
+        };
         execute!(
             stdout,
-            SetForegroundColor(Color::Rgb { r: 255, g: 85, b: 128 }),
+            SetForegroundColor(Color::Rgb {
+                r: 255,
+                g: 85,
+                b: 128
+            }),
             MoveTo(0, self.height + 1),
-            Print("←→ ARROW KEYS or WASD: Move │ SPACE: Fire Power-up │ R: Restart │ Q: Quit │ EAT NUMBERS TO GROW • COLLIDE TO DIE"),
+            Print(bottom),
             ResetColor,
-        ).unwrap();
+        )
+        .unwrap();
 
         if self.game_over {
             let winner_text = match self.winner {
-                Some(0) => "PLAYER WINS!",
-                Some(1) => "CPU WINS!",
-                _ => "DRAW!",
+                Some(0) => "PLAYER WINS!".to_string(),
+                Some(1) => "CPU WINS!".to_string(),
+                _ => "DRAW!".to_string(),
+            };
+            let winner_text = match self.death_cause {
+                Some(c) => format!("{} — {}", winner_text, c.as_str()),
+                None => winner_text,
             };
 
             execute!(
                 stdout,
                 SetForegroundColor(Color::Rgb { r: 255, g: 85, b: 128 }),
-                MoveTo(self.width / 2 - 8, self.height / 2 - 1),
+                MoveTo(self.width.saturating_sub(8), self.height / 2 - 1),
                 Print("═════════════════════"),
-                MoveTo(self.width / 2 - 8, self.height / 2),
+                MoveTo(self.width.saturating_sub(8), self.height / 2),
                 Print(format!("  {}  ", winner_text)),
-                MoveTo(self.width / 2 - 8, self.height / 2 + 1),
+                MoveTo(self.width.saturating_sub(8), self.height / 2 + 1),
                 Print("═════════════════════"),
-                MoveTo(self.width / 2 - 10, self.height / 2 + 2),
-                Print(format!("SCORE: P1={}  P2={}  │  Press R to restart, Q to quit", self.cycles[0].score, self.cycles[1].score)),
+                MoveTo(self.width.saturating_sub(10), self.height / 2 + 2),
+                Print(format!("FOOD: P1={}  P2={}  FRAMES={}  │  Press R to restart, Q to quit", self.food_eaten_by[0], self.food_eaten_by[1], self.frame_count)),
+                // Brain summary: prediction accuracy, the driving model, session wins.
+                MoveTo(self.width.saturating_sub(12), self.height / 2 + 3),
+                Print(format!(
+                    "BRAIN round:{:.0}%/{} lifetime:{:.0}%/{} source:{} action:{} wins you:{} cpu:{}",
+                    self.round_pred_accuracy() * 100.0,
+                    self.round_pred_total,
+                    self.cpu_brain.opp_pred_accuracy() * 100.0,
+                    self.cpu_brain.opp_pred_total,
+                    crate::cpu_ai::MODEL_NAMES[self.cpu_brain.ensemble.active],
+                    self.cpu_decision_reason.as_str(),
+                    dw[0],
+                    dw[1],
+                )),
                 ResetColor,
             ).unwrap();
         }
@@ -1292,10 +1757,25 @@ pub struct Dimensions {
 
 impl Dimensions {
     pub fn get_terminal_size() -> Self {
-        let (w, h) = size().unwrap_or((120, 40));
-        Self {
-            width: w,
-            height: h.saturating_sub(2),
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let (w, h) = size().unwrap_or((120, 40));
+            Self {
+                // 2 terminal chars per game cell (see render): the board uses
+                // half the terminal's columns so horizontal and vertical
+                // travel read as the same speed.
+                width: (w / 2).max(20),
+                height: h.saturating_sub(2),
+            }
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            // No terminal in the browser — the JS shell passes explicit board
+            // dimensions; this is only a default for with_seed-style callers.
+            Self {
+                width: 120,
+                height: 38,
+            }
         }
     }
 }
@@ -1349,18 +1829,228 @@ pub fn rgb_to_hue((r, g, b): (u8, u8, u8)) -> f32 {
     (hue * 60.0).rem_euclid(360.0)
 }
 
-pub fn play_beep(freq: u32, duration_ms: u64) {
-    // Terminal bell for sound effect
-    let _ = std::io::Write::write_all(&mut std::io::stderr(), b"\x07");
-    let _ = std::io::Write::flush(&mut std::io::stderr());
-    let _ = freq; // Frequency would be used with actual audio lib
-    if duration_ms > 0 {
-        std::thread::sleep(Duration::from_millis(duration_ms));
+/* ------------------------------ sound effects ------------------------------ */
+
+// On native, the terminal bell (threaded for jingles) — kinds are ignored,
+// the bell has no pitch. In the browser (wasm), TYPED events are queued for
+// the JS shell, which maps each kind to a chiptune patch in web/audio.js and
+// drains the queue via drain_sfx_events()/sfx_json() each frame.
+//
+// Wire protocol (sfx_json): [[kind, freq_hz, dur_ms, delay_ms], ...]
+//   kind      SfxKind as u8 (the JS-side patch contract).
+//   Food      TWO events (the pickup blip, base freqs 880/1320). Both freqs
+//             carry the food value as a pitch shift:
+//               freq = base + value * FOOD_VALUE_STEP_HZ  (1-9 → +40..+360 Hz)
+//             JS can play the freqs verbatim (richer pickups already sound
+//             higher) or recover value = (freq - 880) / FOOD_VALUE_STEP_HZ
+//             from the first event.
+//   DeathRiff ONE event per kill — web/audio.js sequences the four-note
+//             descending riff itself. freq carries the first note (440),
+//             dur the per-note step in ms (100 crash, 80 weapon kill).
+//   Others    one queue event per bell, delays accumulating within a jingle
+//             exactly like v1 (BombPlant two-beat, Detonate three-note).
+
+/// Sound-event kinds for the browser chiptune synth — the discriminant IS the
+/// wire contract (see the protocol comment above). Native ignores kinds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub enum SfxKind {
+    Food = 0,
+    PowerUp = 1,
+    Laser = 2,
+    TriShot = 3,
+    BombPlant = 4,
+    Detonate = 5,
+    WallPunch = 6,
+    DeathRiff = 7,
+}
+
+/// One queued sound event: (kind, freq_hz, duration_ms, delay_ms). A plain
+/// tuple — serde-free, like the rest of the wasm API surface.
+pub type SfxEvent = (u8, u32, u64, u64);
+
+/// Hz of pitch shift per food value point — see the protocol comment above.
+pub const FOOD_VALUE_STEP_HZ: u32 = 40;
+
+/// The descending four-note death riff (pitches; tempo is the per-note step).
+const DEATH_RIFF_NOTES: [u32; 4] = [440, 330, 220, 110];
+
+#[cfg(target_arch = "wasm32")]
+mod sfx_queue {
+    use std::cell::RefCell;
+    thread_local! {
+        static EVENTS: RefCell<Vec<super::SfxEvent>> = RefCell::new(Vec::new());
+    }
+    pub fn push(ev: super::SfxEvent) {
+        EVENTS.with(|e| e.borrow_mut().push(ev));
+    }
+    pub fn drain() -> Vec<super::SfxEvent> {
+        EVENTS.with(|e| std::mem::take(&mut *e.borrow_mut()))
     }
 }
 
-pub fn play_beep_sequence(freqs: &[u32], durations_ms: &[u64]) {
-    for (freq, dur) in freqs.iter().zip(durations_ms.iter()) {
-        play_beep(*freq, *dur);
+/// Drain queued sound events (kind, freq_hz, duration_ms, delay_ms). Browser only.
+#[cfg(target_arch = "wasm32")]
+pub fn drain_sfx_events() -> Vec<SfxEvent> {
+    sfx_queue::drain()
+}
+
+/// Expand a kind-tagged jingle into queue entries with accumulating delays —
+/// the wasm mirror of the native threaded bell sequence. Pure: unit-tested
+/// on native (see sfx_tests).
+#[cfg(any(target_arch = "wasm32", test))]
+fn sequence_events(kind: SfxKind, freqs: &[u32], durations_ms: &[u64]) -> Vec<SfxEvent> {
+    let notes = freqs.len().min(durations_ms.len());
+    let mut out = Vec::with_capacity(notes);
+    let mut delay = 0u64;
+    for i in 0..notes {
+        out.push((kind as u8, freqs[i], durations_ms[i], delay));
+        delay += durations_ms[i];
+    }
+    out
+}
+
+/// Food pickup events: the two-note blip, both pitches shifted by the food
+/// value (see the protocol comment above). Pure: unit-tested on native.
+#[cfg(any(target_arch = "wasm32", test))]
+fn food_events(value: u8) -> Vec<SfxEvent> {
+    let shift = value as u32 * FOOD_VALUE_STEP_HZ;
+    sequence_events(SfxKind::Food, &[880 + shift, 1320 + shift], &[70, 0])
+}
+
+/// The death riff as ONE queue event: freq = first note, dur = per-note step
+/// (the tempo hint); web/audio.js sequences the four notes itself. Pure.
+#[cfg(any(target_arch = "wasm32", test))]
+fn death_riff_event(step_ms: u64) -> SfxEvent {
+    (SfxKind::DeathRiff as u8, DEATH_RIFF_NOTES[0], step_ms, 0)
+}
+
+/// Hand-rolled JSON for the sfx queue: [[kind, freq_hz, dur_ms, delay_ms], ...].
+/// Lives here (not wasm_api.rs) so the wire format is unit-testable on native
+/// builds, where the wasm feature — and wasm_api.rs — is not compiled.
+pub fn format_sfx_json(events: &[SfxEvent]) -> String {
+    let mut s = String::from("[");
+    for (i, ev) in events.iter().enumerate() {
+        if i > 0 {
+            s.push(',');
+        }
+        s.push_str(&format!("[{},{},{},{}]", ev.0, ev.1, ev.2, ev.3));
+    }
+    s.push(']');
+    s
+}
+
+/// Sound effect — never blocks the game loop.
+pub fn play_beep(kind: SfxKind, freq: u32, duration_ms: u64) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), b"\x07");
+        let _ = std::io::Write::flush(&mut std::io::stderr());
+        let _ = (kind, freq, duration_ms); // pitch/duration need a real audio lib
+    }
+    #[cfg(target_arch = "wasm32")]
+    sfx_queue::push((kind as u8, freq, duration_ms, 0));
+}
+
+/// Multi-note jingle (threaded bell on native; queued delays in browser).
+pub fn play_beep_sequence(kind: SfxKind, freqs: &[u32], durations_ms: &[u64]) {
+    let notes = freqs.len().min(durations_ms.len());
+    if notes == 0 {
+        return;
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = kind; // the bell has no patches
+        let gaps: Vec<u64> = durations_ms[..notes].to_vec();
+        std::thread::spawn(move || {
+            for gap in gaps.iter().take(notes) {
+                let _ = std::io::Write::write_all(&mut std::io::stderr(), b"\x07");
+                let _ = std::io::Write::flush(&mut std::io::stderr());
+                std::thread::sleep(Duration::from_millis(*gap));
+            }
+        });
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        for ev in sequence_events(kind, freqs, durations_ms) {
+            sfx_queue::push(ev);
+        }
+    }
+}
+
+/// The descending four-note death riff. Native keeps the threaded 4-bell
+/// jingle (gap `step_ms` per note, final hold `2 * step_ms`); the browser
+/// receives ONE DeathRiff event and web/audio.js sequences the notes itself.
+fn play_death_riff(step_ms: u64) {
+    #[cfg(not(target_arch = "wasm32"))]
+    play_beep_sequence(
+        SfxKind::DeathRiff,
+        &DEATH_RIFF_NOTES,
+        &[step_ms, step_ms, step_ms, step_ms * 2],
+    );
+    #[cfg(target_arch = "wasm32")]
+    sfx_queue::push(death_riff_event(step_ms));
+}
+
+/// Food pickup jingle. The browser's two Food events carry the value as a
+/// pitch shift (see the protocol comment above); native rings the same
+/// two-bell blip as always (freqs unused on the terminal).
+fn play_food_pickup(value: u8) {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = value;
+        play_beep_sequence(SfxKind::Food, &[880, 1320], &[70, 0]);
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        for ev in food_events(value) {
+            sfx_queue::push(ev);
+        }
+    }
+}
+
+#[cfg(test)]
+mod sfx_tests {
+    use super::*;
+
+    #[test]
+    fn event_encoders_tag_kind_value_and_tempo() {
+        // Jingle: every note tagged with its kind, delays accumulate per duration.
+        let evs = sequence_events(SfxKind::Detonate, &[110, 90, 70], &[110, 110, 110]);
+        assert_eq!(
+            evs,
+            vec![
+                (SfxKind::Detonate as u8, 110, 110, 0),
+                (SfxKind::Detonate as u8, 90, 110, 110),
+                (SfxKind::Detonate as u8, 70, 110, 220),
+            ]
+        );
+        // Mismatched lengths truncate to the shorter, like the bell path.
+        assert!(sequence_events(SfxKind::Laser, &[1800], &[]).is_empty());
+        // Food: the value rides the pitch shift on both notes of the blip.
+        let evs = food_events(9);
+        assert_eq!(
+            evs[0],
+            (SfxKind::Food as u8, 880 + 9 * FOOD_VALUE_STEP_HZ, 70, 0)
+        );
+        assert_eq!(
+            evs[1],
+            (SfxKind::Food as u8, 1320 + 9 * FOOD_VALUE_STEP_HZ, 0, 70)
+        );
+        // Death riff: ONE event — first note + per-note step as the tempo hint.
+        assert_eq!(
+            death_riff_event(100),
+            (SfxKind::DeathRiff as u8, DEATH_RIFF_NOTES[0], 100, 0)
+        );
+    }
+
+    #[test]
+    fn format_sfx_json_emits_typed_quads() {
+        let evs = [
+            (SfxKind::Laser as u8, 1800, 30, 0),
+            (SfxKind::Food as u8, 920, 70, 0),
+        ];
+        assert_eq!(format_sfx_json(&evs), "[[2,1800,30,0],[0,920,70,0]]");
+        assert_eq!(format_sfx_json(&[]), "[]");
     }
 }

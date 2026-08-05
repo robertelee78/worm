@@ -1,48 +1,96 @@
-//! Faithful port of rps-ai's learning *mechanism* to the TRON light-cycle CPU,
-//! recontextualised for what actually matters in a 2D survival duel.
+//! The CPU opponent's live-learning brain, ported from the REAL rps-ai
+//! mechanism (/opt/rps-ai/src/model.py — a Flask app; there is no TypeScript
+//! rps-ai, and no k-NN/temperature machinery in it — earlier revisions of
+//! this file claimed otherwise):
 //!
-//! rps-ai does **k-NN memory over a coded situation vector** (not neural net
-//! training). We keep that exact architecture — situation → vector → store →
-//! recall k nearest → inverse-distance weighted vote → confidence =
-//! margin·support·maturity → blend with base-rate prior → temperature sample +
-//! 5% explore — but the situation vector, the "what happened next" signal, and
-//! the move scoring are tuned to TRON:
+//!   - **The rps-ai ensemble** (`Ensemble`, `compute_ensemble`): seven
+//!     specialist models, each a falsifiable assumption about the player
+//!     (rep/pat/frq/due/wlR/wlL/knn). Every model predicts every frame;
+//!     predictions are recorded and scored next frame with quadratic
+//!     recency weights (frame j counts j² — a figured-out model craters
+//!     fast). The argmax-score model drives the opponent prediction.
+//!     Scores reset per game; the k-NN memory persists as the corpus.
 //!
-//!   - situation = local topology around the CPU head (open neighbours, wall
-//!     and trail distances, food direction, player head direction, phase depth),
-//!   - the remembered signal is *how long each candidate move survived + food
-//!     eaten from it* (the survival+food reward, rps-ai's "next move that won"),
-//!   - move scoring scores each legal direction by open-space-ahead (survival
-//!     floor) + food-pull (points from eating) + hunt-pull (points from killing
-//!     the player), then the k-NN vote re-weights by situations that led to long
-//!     survivals,
-//!   - recency decay (exp(-age/150) on a monotonic seq), the
-//!     seq-vs-size footgun, Laplace-smoothed EMA prior, margin/support/maturity
-//!     confidence, prior-strength gating, and temperature+explore anti-
-//!     exploitation are all copied verbatim from rps-ai.
+//!   - **The k-NN opponent model** (`PlayerBrain`, `predict_player_move`):
+//!     the ensemble's sophisticated member — k-NN over player-centric
+//!     context vectors (cosine recall, proximity × recency × trailing-match
+//!     weights, margin·support·maturity confidence, Laplace-smoothed EMA
+//!     prior blend). Abstains while cold, like rps-ai's NN/DT models.
 //!
-//! See /opt/rps-ai/src/lib/{feature-embed,predict,prior}.ts and the README.
+//!   - **The self-survival memory** (`CpuBrain`, `record_episode`):
+//!     something rps-ai never had — k-NN over CPU-centric situation vectors
+//!     recording (pre-move situation → direction taken → frames survived on
+//!     the heading + 10× food). It casts one gated vote in cpu_decide; the
+//!     wall-follow floor and flood-fill openness veto traps.
 
 use crate::{CellType, Direction, LightCycle, WormGame};
 use std::collections::VecDeque;
 
 /* ----------------------------- constants (rps-ai) ----------------------------- */
 
-const EPS: f32 = 0.01;            // 1/(EPS + d^2) softening
-const DECAY_TAU: f32 = 150.0;     // exp(-age/DECAY_TAU)
-const MATCH_BONUS: f32 = 1.0;     // trailing-match re-rank multiplier
-const SUPPORT_TARGET: f32 = 5.0;  // effective-N full-support threshold
-const COLD_START_EPISODES: usize = 60;
-const EXPLORE_RATE: f32 = 0.05;   // outright random legal throw rate
+const EPS: f32 = 0.01; // 1/(EPS + d^2) softening
+                       // exp(-age/DECAY_TAU) — rps-ai's corpus NEVER decays (their Postgres record
+                       // grows with every game ever played and retrains the sophisticated models).
+                       // A 150-frame tau made our "persistent" memory effectively one game long;
+                       // 1500 keeps ~10 games of experience live while proximity dominates recency,
+                       // exactly the reference split (corpus global, per-game ensemble responsive).
+const DECAY_TAU: f32 = 1500.0;
+const MATCH_BONUS: f32 = 1.0; // trailing-match re-rank multiplier
+const SUPPORT_TARGET: f32 = 5.0; // effective-N full-support threshold
+pub const COLD_START_EPISODES: usize = 60;
+const EXPLORE_RATE: f32 = 0.05; // outright random legal throw rate
 const MEMORY_VOTE_MIN_OPEN: f32 = 0.05; // destination must keep >=5% of the arena reachable
+/// Survival floor for hunt-layer deviations: the destination must keep at
+/// least this much of the arena reachable (and at least half of wall-follow's
+/// space) — the anti-kamikaze gate.
+const SURVIVAL_MIN_OPEN: f32 = 0.12;
 const SELF_VOTE_MIN_CONFIDENCE: f32 = 0.4; // margin x support x maturity gate (rps-ai confidence)
 const RECALL_K: usize = 16;
-const CLEAR_BIAS: f32 = 0.125;    // prior saturation point (1/8 bias over 4 dirs)
-const PRIOR_DECAY: f32 = 0.99;    // EMA prior (~100-round window)
+const CLEAR_BIAS: f32 = 0.125; // prior saturation point (1/8 bias over 4 dirs)
+const PRIOR_DECAY: f32 = 0.99; // EMA prior (~100-round window)
 
-/// Retention cap — mirrors rps-ai's 5000 window. The seq counter keeps climbing
-/// past this; that is what recency decay ages against, NOT the episode count.
-const MAX_EPISODES: usize = 800;
+/// Retention cap — the corpus, mirroring rps-ai's ever-growing record table.
+/// The seq counter keeps climbing past this; that is what recency decay ages
+/// against, NOT the episode count.
+pub const MAX_EPISODES: usize = 4000;
+
+/// Why the CPU chose its final heading this frame. This is deliberately
+/// separate from the ensemble's active model: the model predicts the player;
+/// safety, item, intercept, memory, and wall-follow layers decide the move.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum CpuDecisionReason {
+    Opening,
+    NoLegalMove,
+    ForcedMove,
+    WarmingUp,
+    ThreatDodge,
+    CloseEvasion,
+    ItemPickup,
+    ItemPath,
+    CornerIntercept,
+    DirectIntercept,
+    SurvivalMemory,
+    WallFollow,
+}
+
+impl CpuDecisionReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Opening => "opening scan",
+            Self::NoLegalMove => "no safe move",
+            Self::ForcedMove => "only safe move",
+            Self::WarmingUp => "warming up · wall safety",
+            Self::ThreatDodge => "dodging a weapon",
+            Self::CloseEvasion => "evading your predicted path",
+            Self::ItemPickup => "taking a nearby item",
+            Self::ItemPath => "routing to an item",
+            Self::CornerIntercept => "cutting off your next corner",
+            Self::DirectIntercept => "intercepting your predicted path",
+            Self::SurvivalMemory => "reusing a surviving move",
+            Self::WallFollow => "following the survival floor",
+        }
+    }
+}
 
 pub const CPU_FEATURE_DIM: usize = 25;
 /// Dimensionality of the opponent-centric context vector. Slots 0..13 are
@@ -53,7 +101,7 @@ pub const PLAYER_FEATURE_DIM: usize = 32;
 
 /// A learned episode: the situation vector, the direction that won from it, the
 /// reward that move earned (survival frames + food), and a monotonic seq.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CpuEpisode {
     pub vector: [f32; CPU_FEATURE_DIM],
     pub surviving_dir: Direction,
@@ -64,7 +112,7 @@ pub struct CpuEpisode {
 /// An opponent-centric learned episode: the context vector before the player
 /// moved, and the direction the player took next. The k-NN vote operates on
 /// `next_dir` to build a prediction of the player's intent.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PlayerEpisode {
     pub vector: [f32; PLAYER_FEATURE_DIM],
     pub next_dir: Direction,
@@ -74,7 +122,7 @@ pub struct PlayerEpisode {
 /// A dual-mode brain: the legacy self-centric CpuBrain is always present as a
 /// survival fallback; the optional opp_brain is the opponent model that
 /// powers adaptive play once it has enough data.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PlayerBrain {
     pub episodes: VecDeque<PlayerEpisode>,
     /// Monotonic counter, mirrors CpuBrain's usage for recency decay.
@@ -102,7 +150,11 @@ impl PlayerBrain {
     pub fn remember(&mut self, vector: [f32; PLAYER_FEATURE_DIM], next_dir: Direction) {
         let seq = self.seq;
         self.seq += 1;
-        self.episodes.push_back(PlayerEpisode { vector, next_dir, seq });
+        self.episodes.push_back(PlayerEpisode {
+            vector,
+            next_dir,
+            seq,
+        });
         while self.episodes.len() > MAX_EPISODES {
             self.episodes.pop_front();
         }
@@ -119,7 +171,12 @@ impl PlayerBrain {
         ];
         let total: f32 = counts.iter().sum();
         let inv = 1.0 / total;
-        [counts[0] * inv, counts[1] * inv, counts[2] * inv, counts[3] * inv]
+        [
+            counts[0] * inv,
+            counts[1] * inv,
+            counts[2] * inv,
+            counts[3] * inv,
+        ]
     }
 
     /// TV-distance from uniform, normalised (see CpuBrain::prior_strength).
@@ -151,7 +208,7 @@ pub struct CpuAggregate {
 }
 
 /// The CPU's vector memory plus its base-rate prior (rps-ai `moveTally`/`priorFrom`).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CpuBrain {
     pub episodes: VecDeque<CpuEpisode>,
     /// Monotonic counter — the recency term ages against THIS, never episode count.
@@ -164,6 +221,15 @@ pub struct CpuBrain {
     /// Opponent model: predicts the player's next move. Optional but always
     /// initialised so game restart/reset logic is unchanged.
     pub opp_brain: PlayerBrain,
+    /// The direction the opponent model predicted for the CURRENT frame (set
+    /// at frame end by the ensemble refresh; scored against the actual move
+    /// next frame).
+    pub last_opp_prediction: Option<Direction>,
+    /// Prediction hit/miss bookkeeping — accuracy = hits / total.
+    pub opp_pred_hits: u32,
+    pub opp_pred_total: u32,
+    /// The rps-ai ensemble: per-model quadratic scores + the active driver.
+    pub ensemble: Ensemble,
 }
 
 impl Default for CpuBrain {
@@ -175,6 +241,10 @@ impl Default for CpuBrain {
             player_tail: VecDeque::new(),
             tail_len: 4,
             opp_brain: PlayerBrain::default(),
+            last_opp_prediction: None,
+            opp_pred_hits: 0,
+            opp_pred_total: 0,
+            ensemble: Ensemble::default(),
         }
     }
 }
@@ -196,7 +266,12 @@ impl CpuBrain {
         ];
         let total: f32 = counts.iter().sum();
         let inv = 1.0 / total;
-        [counts[0] * inv, counts[1] * inv, counts[2] * inv, counts[3] * inv]
+        [
+            counts[0] * inv,
+            counts[1] * inv,
+            counts[2] * inv,
+            counts[3] * inv,
+        ]
     }
 
     /// TV-distance from uniform, normalised so CLEAR_BIAS is fully established
@@ -237,7 +312,59 @@ impl CpuBrain {
         }
         self.observe(dir, reward);
     }
+
+    /// Opponent-model hit rate over the session (0.0 before any prediction
+    /// has been scored). The honest gauge of whether the player model is
+    /// learning anything — watch it climb past the 25% chance floor.
+    pub fn opp_pred_accuracy(&self) -> f32 {
+        if self.opp_pred_total == 0 {
+            0.0
+        } else {
+            self.opp_pred_hits as f32 / self.opp_pred_total as f32
+        }
+    }
+
+    /* -------------------- persistence (per-player memory) -------------------- */
+
+    /// Serialize the whole brain (both k-NN memories, priors, tail, ensemble
+    /// scores, prediction bookkeeping) with a magic/version tag. This is the
+    /// per-player corpus: saved to a local file on native, to IndexedDB in
+    /// the browser (keyed by the deviceId cookie).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut out = BRAIN_MAGIC.to_le_bytes().to_vec();
+        out.extend(bincode::serialize(self).expect("CpuBrain serialize"));
+        out
+    }
+
+    /// Inverse of to_bytes; None on corruption or version mismatch (a stale
+    /// brain is dropped, never half-loaded).
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < 4 {
+            return None;
+        }
+        let (magic, payload) = bytes.split_at(4);
+        if u32::from_le_bytes(magic.try_into().ok()?) != BRAIN_MAGIC {
+            return None;
+        }
+        bincode::deserialize(payload).ok()
+    }
+
+    /// Load a brain from a file (native terminal play).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn load_file(path: &std::path::Path) -> Option<Self> {
+        let bytes = std::fs::read(path).ok()?;
+        Self::from_bytes(&bytes)
+    }
+
+    /// Save the brain to a file (native terminal play).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn save_file(&self, path: &std::path::Path) -> std::io::Result<()> {
+        std::fs::write(path, self.to_bytes())
+    }
 }
+
+/// Magic + version for brain persistence ("WRM1" — bump on schema change).
+const BRAIN_MAGIC: u32 = 0x31524D57;
 
 #[inline]
 fn dir_index(dir: Direction) -> usize {
@@ -260,51 +387,71 @@ fn index_dir(i: usize) -> Direction {
 }
 
 /// Whether stepping one cell in `dir` from `(hx,hy)` is free and in-bounds.
+/// Delegates to `WormGame::passable` so the AI's view of legality matches the
+/// physics exactly (Empty | Food | Hole | PowerUp; bombs and out-of-bounds
+/// fatal). Previously this used its own bounds + Empty|Food check, which read
+/// punched holes and power-up cells as illegal and bomb cells as safe.
 pub fn free_step(game: &WormGame, hx: u16, hy: u16, dir: Direction) -> bool {
     let (dx, dy) = dir.as_delta();
-    let nx = (hx as i16 + dx) as i32;
-    let ny = (hy as i16 + dy) as i32;
-    if nx < 1 || ny < 1 || nx as u16 >= game.width - 1 || ny as u16 >= game.height - 1 {
+    let nx = hx as i16 + dx;
+    let ny = hy as i16 + dy;
+    if nx < 0 || ny < 0 || nx >= game.width as i16 || ny >= game.height as i16 {
         return false;
     }
-    let cell = game.grid[ny as usize][nx as usize];
-    cell == CellType::Empty || cell == CellType::Food
+    game.passable(nx as u16, ny as u16)
 }
 
 /// BFS flood-fill open space — the survival prior. The k-NN vote must beat this.
+/// Counts every occupiable cell (Empty | Food | Hole | PowerUp) with no
+/// artificial cap, and can flow through punched holes into the outer corridor.
+/// Previously this capped at 2000 (~44% of a 120×38 board) and hard-clipped to
+/// the arena interior, so `norm_open` was systematically under-reported.
 pub fn count_open_space(game: &WormGame, start_x: u16, start_y: u16) -> f32 {
     let mut visited = vec![vec![false; game.width as usize]; game.height as usize];
     let mut queue: VecDeque<(u16, u16)> = VecDeque::new();
     queue.push_back((start_x, start_y));
     visited[start_y as usize][start_x as usize] = true;
     let mut count = 0.0;
+    let max_cells = game.width as f32 * game.height as f32;
     let neighbors = [(0i16, -1i16), (0, 1), (-1, 0), (1, 0)];
     while let Some((x, y)) = queue.pop_front() {
         count += 1.0;
-        if count > 2000.0 {
+        if count >= max_cells {
             break;
         }
         for (dx, dy) in &neighbors {
             let nx = x as i16 + dx;
             let ny = y as i16 + dy;
-            if nx >= 2 && nx < game.width as i16 - 2 && ny >= 2 && ny < game.height as i16 - 2 {
-                let (nx, ny) = (nx as u16, ny as u16);
-                if !visited[ny as usize][nx as usize]
-                    && game.grid[ny as usize][nx as usize] == CellType::Empty
-                {
-                    visited[ny as usize][nx as usize] = true;
-                    queue.push_back((nx, ny));
-                }
+            if nx < 0 || ny < 0 || nx >= game.width as i16 || ny >= game.height as i16 {
+                continue;
+            }
+            let (nx, ny) = (nx as u16, ny as u16);
+            if !visited[ny as usize][nx as usize]
+                && matches!(
+                    game.grid[ny as usize][nx as usize],
+                    CellType::Empty | CellType::Food | CellType::Hole | CellType::PowerUp
+                )
+            {
+                visited[ny as usize][nx as usize] = true;
+                queue.push_back((nx, ny));
             }
         }
     }
     count
 }
 
-/// BFS from (sx,sy) to find the nearest food item. Returns (direction_to_take, open_space_at_food).
-/// Only considers legal directions from the start, and checks that the food cell is reachable.
-fn bfs_nearest_food_dir(game: &WormGame, sx: u16, sy: u16, legal: &[Direction]) -> Option<(Direction, f32)> {
-    if game.food_items.is_empty() { return None; }
+/// BFS from (sx,sy) to the nearest collectible (food or power-up). Returns
+/// (direction_to_take, open_space_at_item). Only considers legal directions
+/// from the start, and checks that the item cell is reachable.
+fn bfs_nearest_food_dir(
+    game: &WormGame,
+    sx: u16,
+    sy: u16,
+    legal: &[Direction],
+) -> Option<(Direction, f32)> {
+    if game.food_items.is_empty() && game.powerups.is_empty() {
+        return None;
+    }
 
     let mut visited = vec![vec![false; game.width as usize]; game.height as usize];
     let mut queue: VecDeque<(u16, u16, Direction)> = VecDeque::new();
@@ -312,9 +459,13 @@ fn bfs_nearest_food_dir(game: &WormGame, sx: u16, sy: u16, legal: &[Direction]) 
     // Seed the queue with all legal first steps.
     for &d in legal {
         let (dx, dy) = d.as_delta();
-        let nx = (sx as i16 + dx).max(0).min((game.width - 1) as i16) as u16;
-        let ny = (sy as i16 + dy).max(0).min((game.height - 1) as i16) as u16;
-        if (nx, ny) != (sx, sy) {
+        let nx = sx as i16 + dx;
+        let ny = sy as i16 + dy;
+        if nx < 0 || ny < 0 || nx >= game.width as i16 || ny >= game.height as i16 {
+            continue;
+        }
+        let (nx, ny) = (nx as u16, ny as u16);
+        if (nx, ny) != (sx, sy) && !visited[ny as usize][nx as usize] {
             visited[ny as usize][nx as usize] = true;
             queue.push_back((nx, ny, d));
         }
@@ -323,33 +474,50 @@ fn bfs_nearest_food_dir(game: &WormGame, sx: u16, sy: u16, legal: &[Direction]) 
     let dirs = [(0i16, -1i16), (0, 1), (-1, 0), (1, 0)];
 
     while let Some((x, y, start_dir)) = queue.pop_front() {
-        // Check if this cell is food.
-        if game.grid[y as usize][x as usize] == CellType::Food {
+        // Check if this cell is a collectible (food or power-up).
+        if matches!(
+            game.grid[y as usize][x as usize],
+            CellType::Food | CellType::PowerUp
+        ) {
             let open = count_open_space(game, x, y);
             return Some((start_dir, open));
         }
 
-        // Expand neighbors.
+        // Expand neighbors: travel through any occupiable non-food cell
+        // (walls and trails block; holes and power-ups are walkable).
         for (dx, dy) in &dirs {
             let nx = x as i16 + dx;
             let ny = y as i16 + dy;
-            if nx >= 2 && nx < game.width as i16 - 2 && ny >= 2 && ny < game.height as i16 - 2 {
-                let (nx, ny) = (nx as u16, ny as u16);
-                if !visited[ny as usize][nx as usize]
-                    && game.grid[ny as usize][nx as usize] == CellType::Empty
-                {
-                    visited[ny as usize][nx as usize] = true;
-                    queue.push_back((nx, ny, start_dir));
-                }
+            if nx < 0 || ny < 0 || nx >= game.width as i16 || ny >= game.height as i16 {
+                continue;
+            }
+            let (nx, ny) = (nx as u16, ny as u16);
+            if !visited[ny as usize][nx as usize]
+                && matches!(
+                    game.grid[ny as usize][nx as usize],
+                    CellType::Empty | CellType::Hole | CellType::PowerUp
+                )
+            {
+                visited[ny as usize][nx as usize] = true;
+                queue.push_back((nx, ny, start_dir));
             }
         }
     }
     None
 }
 
-/// Per-direction Manhattan distance to the nearest food.
+/// Per-direction Manhattan distance to the nearest food, in the half-plane
+/// the direction faces: `along + perp` for targets ahead, `cap` for targets
+/// behind or exactly perpendicular. The old code clamped the projection at 0,
+/// so food BEHIND the head read as distance 0 ("right here") in the opposite
+/// direction, and off-axis food ignored its perpendicular offset entirely.
 fn nearest_food_distance(game: &WormGame, hx: u16, hy: u16, cap: f32) -> [f32; 4] {
-    let dirs = [Direction::Up, Direction::Down, Direction::Left, Direction::Right];
+    let dirs = [
+        Direction::Up,
+        Direction::Down,
+        Direction::Left,
+        Direction::Right,
+    ];
     let mut out = [cap; 4];
     for (i, d) in dirs.iter().enumerate() {
         let (dx, dy) = d.as_delta();
@@ -357,9 +525,14 @@ fn nearest_food_distance(game: &WormGame, hx: u16, hy: u16, cap: f32) -> [f32; 4
         for f in &game.food_items {
             let nx = (f.0 as i16 - hx as i16) as f32;
             let ny = (f.1 as i16 - hy as i16) as f32;
-            let proj = (nx * dx as f32 + ny * dy as f32).max(0.0);
-            if proj < best {
-                best = proj;
+            let along = nx * dx as f32 + ny * dy as f32;
+            if along <= 0.0 {
+                continue; // behind or exactly perpendicular — not this way
+            }
+            let perp = (nx * dy as f32 - ny * dx as f32).abs();
+            let dist = along + perp;
+            if dist < best {
+                best = dist;
             }
         }
         out[i] = best;
@@ -368,23 +541,42 @@ fn nearest_food_distance(game: &WormGame, hx: u16, hy: u16, cap: f32) -> [f32; 4
 }
 
 /// Per-direction distance to the player head (for kill pursuit awareness).
+/// Same half-plane metric as `nearest_food_distance`; the old projection read
+/// a player directly behind as distance 0 in the forward direction.
 fn directional_player_distance(game: &WormGame, hx: u16, hy: u16, cap: f32) -> [f32; 4] {
-    let dirs = [Direction::Up, Direction::Down, Direction::Left, Direction::Right];
+    let dirs = [
+        Direction::Up,
+        Direction::Down,
+        Direction::Left,
+        Direction::Right,
+    ];
     let ph = game.cycles[0].head;
     let mut out = [cap; 4];
     for (i, d) in dirs.iter().enumerate() {
         let (dx, dy) = d.as_delta();
         let nx = (ph.0 as i16 - hx as i16) as f32;
         let ny = (ph.1 as i16 - hy as i16) as f32;
-        let proj = (nx * dx as f32 + ny * dy as f32).max(0.0);
-        out[i] = proj.min(cap);
+        let along = nx * dx as f32 + ny * dy as f32;
+        if along <= 0.0 {
+            continue;
+        }
+        let perp = (nx * dy as f32 - ny * dx as f32).abs();
+        out[i] = (along + perp).min(cap);
     }
     out
 }
 
-/// Distance to the nearest wall per direction.
+/// Distance to the nearest wall per direction, stopping at the first Wall
+/// grid cell. The old version never looked at the grid and counted through
+/// the ring-2 arena wall into the outer corridor, over-reporting by 2+ in
+/// every direction on any terminal big enough to have a corridor.
 fn wall_distance(game: &WormGame, hx: u16, hy: u16) -> [f32; 4] {
-    let dirs = [Direction::Up, Direction::Down, Direction::Left, Direction::Right];
+    let dirs = [
+        Direction::Up,
+        Direction::Down,
+        Direction::Left,
+        Direction::Right,
+    ];
     let mut out = [0.0f32; 4];
     for (i, d) in dirs.iter().enumerate() {
         let (dx, dy) = d.as_delta();
@@ -394,7 +586,10 @@ fn wall_distance(game: &WormGame, hx: u16, hy: u16) -> [f32; 4] {
         loop {
             x += dx;
             y += dy;
-            if x < 1 || y < 1 || x as u16 >= game.width - 1 || y as u16 >= game.height - 1 {
+            if x < 0 || y < 0 || x as u16 >= game.width || y as u16 >= game.height {
+                break;
+            }
+            if game.grid[y as usize][x as usize] == CellType::Wall {
                 break;
             }
             dist += 1.0;
@@ -410,9 +605,7 @@ fn wall_distance(game: &WormGame, hx: u16, hy: u16) -> [f32; 4] {
 /// Slots (fixed width → cosine is meaningful), with a phase-depth block so the
 /// all-zero "new game" situation is not distance 1.0 to everything (the rps-ai
 /// zero-vector trap):
-///   0..3    open-neighbour one-hot {Up,Down,Left,Right} (only 3 fit in 4 slots, see below)
-/// We use 4 open-neighbour slots; layout:
-///   0..4    open neighbour one-hot
+///   0..4    open neighbour one-hot {Up,Down,Left,Right}
 ///   4..8    wall distance per direction, normalised by arena diagonal
 ///   8..12   nearest-own-trail distance per direction (binned 0..6)
 ///  12..16   nearest-food distance per direction (binned 0..6)
@@ -425,7 +618,12 @@ pub fn encode_situation(game: &WormGame, brain: &CpuBrain) -> [f32; CPU_FEATURE_
     let (hx, hy) = cpu.head;
 
     // 0..4 open neighbour one-hot
-    let dirs = [Direction::Up, Direction::Down, Direction::Left, Direction::Right];
+    let dirs = [
+        Direction::Up,
+        Direction::Down,
+        Direction::Left,
+        Direction::Right,
+    ];
     for (i, &d) in dirs.iter().enumerate() {
         vector[i] = if free_step(game, hx, hy, d) { 1.0 } else { 0.0 };
     }
@@ -462,15 +660,12 @@ pub fn encode_situation(game: &WormGame, brain: &CpuBrain) -> [f32; CPU_FEATURE_
     vector[24] = (game.frame_count as f32 / 200.0).min(1.0);
 
     // L2-normalise so cosine is 1 − dot, like rps-ai.
-    let mut norm = 0.0f32;
-    for i in 0..CPU_FEATURE_DIM {
-        norm += vector[i] * vector[i];
-    }
+    let mut norm = vector.iter().map(|value| value * value).sum::<f32>();
     norm = norm.sqrt();
     if norm > 0.0 {
         let inv = 1.0 / norm;
-        for i in 0..CPU_FEATURE_DIM {
-            vector[i] *= inv;
+        for value in &mut vector {
+            *value *= inv;
         }
     }
     // silence the unused-parameter warning on `brain` — the encoder is pure
@@ -486,7 +681,7 @@ pub fn encode_situation(game: &WormGame, brain: &CpuBrain) -> [f32; CPU_FEATURE_
 ///   4..8    distance to player's own trail per direction (binned 0..6)
 ///   8..12   distance from player head toward nearest food per direction
 ///  12      player→CPU proximity (binned 0..12, inverted: near = high)
-///   Note: 13..PLAYER_FEATURE_DIM are zero-padded to reach 16 dims.
+///  13..29  4×4 direction-transition matrix (see below); 29..32 zero-padded.
 ///
 /// Phase depth is intentionally omitted here because the player's *intent*
 /// does not depend on the clock — it depends on topology. We rely on the
@@ -495,11 +690,19 @@ pub fn encode_situation(game: &WormGame, brain: &CpuBrain) -> [f32; CPU_FEATURE_
 /// history (from `player_tail`) is encoded as a 4×4 transition matrix in slots
 /// 13..29: (prev_dir → curr_dir), capturing corner behaviour. This is the
 /// order-matters analogue of rps-ai's `bg` bigram block.
-pub fn encode_player_context(game: &WormGame, tail: &VecDeque<Direction>) -> [f32; PLAYER_FEATURE_DIM] {
+pub fn encode_player_context(
+    game: &WormGame,
+    tail: &VecDeque<Direction>,
+) -> [f32; PLAYER_FEATURE_DIM] {
     let mut vector = [0.0f32; PLAYER_FEATURE_DIM];
     let player = &game.cycles[0];
     let (hx, hy) = player.head;
-    let dirs = [Direction::Up, Direction::Down, Direction::Left, Direction::Right];
+    let dirs = [
+        Direction::Up,
+        Direction::Down,
+        Direction::Left,
+        Direction::Right,
+    ];
 
     // 0..4 player open-neighbour one-hot
     for (i, &d) in dirs.iter().enumerate() {
@@ -529,7 +732,12 @@ pub fn encode_player_context(game: &WormGame, tail: &VecDeque<Direction>) -> [f3
     // We use the player_tail (recent directions) to build observed transitions:
     // for each adjacent pair (tail[i-1], tail[i]), increment the corresponding
     // cell. This captures corner patterns like "Right→Up" (bottom-right corner).
-    let dirs_arr = [Direction::Up, Direction::Down, Direction::Left, Direction::Right];
+    let dirs_arr = [
+        Direction::Up,
+        Direction::Down,
+        Direction::Left,
+        Direction::Right,
+    ];
     let tail_vec: Vec<Direction> = tail.iter().copied().collect();
     for w in tail_vec.windows(2) {
         let from_idx = dirs_arr.iter().position(|&d| d == w[0]).unwrap_or(3);
@@ -538,22 +746,24 @@ pub fn encode_player_context(game: &WormGame, tail: &VecDeque<Direction>) -> [f3
     }
 
     // L2-normalise
-    let mut norm = 0.0f32;
-    for i in 0..PLAYER_FEATURE_DIM {
-        norm += vector[i] * vector[i];
-    }
+    let mut norm = vector.iter().map(|value| value * value).sum::<f32>();
     norm = norm.sqrt();
     if norm > 0.0 {
         let inv = 1.0 / norm;
-        for i in 0..PLAYER_FEATURE_DIM {
-            vector[i] *= inv;
+        for value in &mut vector {
+            *value *= inv;
         }
     }
     vector
 }
 
 fn nearest_trail_distance(game: &WormGame, hx: u16, hy: u16, max_range: f32) -> [f32; 4] {
-    let dirs = [Direction::Up, Direction::Down, Direction::Left, Direction::Right];
+    let dirs = [
+        Direction::Up,
+        Direction::Down,
+        Direction::Left,
+        Direction::Right,
+    ];
     let mut out = [max_range; 4];
     for (i, d) in dirs.iter().enumerate() {
         let (dx, dy) = d.as_delta();
@@ -567,7 +777,9 @@ fn nearest_trail_distance(game: &WormGame, hx: u16, hy: u16, max_range: f32) -> 
                 break;
             }
             let cell = game.grid[y as usize][x as usize];
-            if cell != CellType::Empty && cell != CellType::Food {
+            // Only solid obstacles count — holes and power-ups are passable,
+            // so they must not read as "trail" for the distance feature.
+            if matches!(cell, CellType::Wall | CellType::Player | CellType::CPU) {
                 out[i] = dist;
                 break;
             }
@@ -604,7 +816,11 @@ pub fn recall(brain: &CpuBrain, query: &[f32; CPU_FEATURE_DIM], k: usize) -> Vec
             }
         })
         .collect();
-    all.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal));
+    all.sort_by(|a, b| {
+        a.distance
+            .partial_cmp(&b.distance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     all.truncate(k);
     all
 }
@@ -629,7 +845,11 @@ struct PlayerRec {
     distance: f32,
 }
 
-fn recall_player(brain: &PlayerBrain, query: &[f32; PLAYER_FEATURE_DIM], k: usize) -> Vec<PlayerRec> {
+fn recall_player(
+    brain: &PlayerBrain,
+    query: &[f32; PLAYER_FEATURE_DIM],
+    k: usize,
+) -> Vec<PlayerRec> {
     let mut all: Vec<PlayerRec> = brain
         .episodes
         .iter()
@@ -642,7 +862,11 @@ fn recall_player(brain: &PlayerBrain, query: &[f32; PLAYER_FEATURE_DIM], k: usiz
             }
         })
         .collect();
-    all.sort_by(|a, b| a.distance.partial_cmp(&b.distance).unwrap_or(std::cmp::Ordering::Equal));
+    all.sort_by(|a, b| {
+        a.distance
+            .partial_cmp(&b.distance)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
     all.truncate(k);
     all
 }
@@ -650,14 +874,17 @@ fn recall_player(brain: &PlayerBrain, query: &[f32; PLAYER_FEATURE_DIM], k: usiz
 fn argmax(distribution: &[f32; 4]) -> Direction {
     let mut best = 0;
     let mut best_val = distribution[0];
-    for i in 1..4 {
-        if distribution[i] > best_val { best_val = distribution[i]; best = i; }
+    for (i, &value) in distribution.iter().enumerate().skip(1) {
+        if value > best_val {
+            best_val = value;
+            best = i;
+        }
     }
     index_dir(best)
 }
 
 fn trailing_match_dir(a: &VecDeque<Direction>, ep: &PlayerRec) -> f32 {
-    let span = (a.len().min(4)).max(1);
+    let span = a.len().clamp(1, 4);
     let matches = a.iter().filter(|d| **d == ep.next_dir).count();
     (matches as f32 / span as f32).min(1.0)
 }
@@ -676,24 +903,37 @@ fn aggregate_player(
 
     if cold {
         return PlayerAggregate {
-            distribution: prior, confidence: 0.0, margin: 0.0, support: 0.0,
-            maturity, prior_weight: 1.0, predicted_dir: argmax(&prior),
+            distribution: prior,
+            confidence: 0.0,
+            margin: 0.0,
+            support: 0.0,
+            maturity,
+            prior_weight: 1.0,
+            predicted_dir: argmax(&prior),
         };
     }
 
-    let weights: Vec<f32> = recalled.iter().map(|ep| {
-        let proximity = 1.0 / (EPS + ep.distance * ep.distance);
-        let age = (current_seq as i64 - ep.seq as i64).max(0) as u32;
-        let recency = (-(age as f32 / DECAY_TAU)).exp();
-        let trail = trailing_match_dir(tail, ep);
-        proximity * recency * (1.0 + MATCH_BONUS * trail)
-    }).collect();
+    let weights: Vec<f32> = recalled
+        .iter()
+        .map(|ep| {
+            let proximity = 1.0 / (EPS + ep.distance * ep.distance);
+            let age = (current_seq as i64 - ep.seq as i64).max(0) as u32;
+            let recency = (-(age as f32 / DECAY_TAU)).exp();
+            let trail = trailing_match_dir(tail, ep);
+            proximity * recency * (1.0 + MATCH_BONUS * trail)
+        })
+        .collect();
 
     let total_weight: f32 = weights.iter().sum();
     if total_weight <= 0.0 {
         return PlayerAggregate {
-            distribution: prior, confidence: 0.0, margin: 0.0, support: 0.0,
-            maturity, prior_weight: 1.0, predicted_dir: argmax(&prior),
+            distribution: prior,
+            confidence: 0.0,
+            margin: 0.0,
+            support: 0.0,
+            maturity,
+            prior_weight: 1.0,
+            predicted_dir: argmax(&prior),
         };
     }
 
@@ -710,7 +950,9 @@ fn aggregate_player(
     sorted.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
     let margin = if sorted[0] + sorted[1] > 0.0 {
         (sorted[0] - sorted[1]) / (sorted[0] + sorted[1])
-    } else { 0.0 };
+    } else {
+        0.0
+    };
     let memory_confidence = margin * support * maturity;
     let w = ((1.0 - memory_confidence) * prior_strength).min(1.0);
     let distribution: [f32; 4] = [
@@ -732,20 +974,42 @@ fn aggregate_player(
 }
 
 /// Public entry point: predict the player's next direction.
-pub fn predict_player_move(game: &WormGame, brain: &CpuBrain, tail: &VecDeque<Direction>) -> PlayerAggregate {
+pub fn predict_player_move(
+    game: &WormGame,
+    brain: &CpuBrain,
+    tail: &VecDeque<Direction>,
+) -> PlayerAggregate {
     let memory_size = brain.opp_brain.episodes.len();
     let context = encode_player_context(game, &brain.player_tail);
 
     if memory_size < COLD_START_EPISODES {
-        return aggregate_player(&brain.opp_brain, &[], brain.opp_brain.seq, memory_size, tail);
+        return aggregate_player(
+            &brain.opp_brain,
+            &[],
+            brain.opp_brain.seq,
+            memory_size,
+            tail,
+        );
     }
 
     let recalled = recall_player(&brain.opp_brain, &context, RECALL_K.min(memory_size));
     if recalled.is_empty() {
-        return aggregate_player(&brain.opp_brain, &[], brain.opp_brain.seq, memory_size, tail);
+        return aggregate_player(
+            &brain.opp_brain,
+            &[],
+            brain.opp_brain.seq,
+            memory_size,
+            tail,
+        );
     }
 
-    aggregate_player(&brain.opp_brain, &recalled, brain.opp_brain.seq, memory_size, tail)
+    aggregate_player(
+        &brain.opp_brain,
+        &recalled,
+        brain.opp_brain.seq,
+        memory_size,
+        tail,
+    )
 }
 
 /// The faithful `aggregate` from predict.ts, ported to directions.
@@ -836,7 +1100,7 @@ pub fn aggregate(
 /// Trailing-match bonus: fraction of the query tail that agrees with the
 /// recalled direction, rightmost-aligned, in [0,1] (rps-ai `trailingMatchScore`).
 fn trailing_match(a: &VecDeque<Direction>, ep: &Recalled) -> f32 {
-    let span = (a.len().min(4)).max(1);
+    let span = a.len().clamp(1, 4);
     let matches = a.iter().filter(|d| **d == ep.surviving_dir).count();
     (matches as f32 / span as f32).min(1.0)
 }
@@ -859,8 +1123,8 @@ pub fn sample_with_temperature(
         return index_dir(rng_fn(0.0, 4.0) as usize);
     }
     let mut ticket = rng_fn(0.0, total);
-    for i in 0..4 {
-        ticket -= adjusted[i];
+    for (i, value) in adjusted.iter().enumerate() {
+        ticket -= value;
         if ticket <= 0.0 {
             return index_dir(i);
         }
@@ -881,23 +1145,43 @@ fn cell_threatened_by_projectile(game: &WormGame, x: u16, y: u16) -> bool {
         // Check if the cell is on the projectile's path.
         if p.dx != 0 && p.dy != 0 {
             // Diagonal bolt: must be on the diagonal path.
-            if dx.abs() != dy.abs() { continue; }
-            if (p.dx > 0 && dx < 0) || (p.dx < 0 && dx > 0) { continue; }
-            if (p.dy > 0 && dy < 0) || (p.dy < 0 && dy > 0) { continue; }
-            let steps = dx.abs().max(dy.abs()) as u8;
-            if steps <= p.steps_left { return true; }
+            if dx.abs() != dy.abs() {
+                continue;
+            }
+            if (p.dx > 0 && dx < 0) || (p.dx < 0 && dx > 0) {
+                continue;
+            }
+            if (p.dy > 0 && dy < 0) || (p.dy < 0 && dy > 0) {
+                continue;
+            }
+            let steps = dx.unsigned_abs().max(dy.unsigned_abs());
+            if steps <= p.steps_left as u16 {
+                return true;
+            }
         } else if p.dx != 0 {
             // Horizontal bolt.
-            if dy != 0 { continue; }
-            if (p.dx > 0 && dx < 0) || (p.dx < 0 && dx > 0) { continue; }
-            let steps = dx.abs() as u8;
-            if steps <= p.steps_left { return true; }
+            if dy != 0 {
+                continue;
+            }
+            if (p.dx > 0 && dx < 0) || (p.dx < 0 && dx > 0) {
+                continue;
+            }
+            let steps = dx.unsigned_abs();
+            if steps <= p.steps_left as u16 {
+                return true;
+            }
         } else if p.dy != 0 {
             // Vertical bolt.
-            if dx != 0 { continue; }
-            if (p.dy > 0 && dy < 0) || (p.dy < 0 && dy > 0) { continue; }
-            let steps = dy.abs() as u8;
-            if steps <= p.steps_left { return true; }
+            if dx != 0 {
+                continue;
+            }
+            if (p.dy > 0 && dy < 0) || (p.dy < 0 && dy > 0) {
+                continue;
+            }
+            let steps = dy.unsigned_abs();
+            if steps <= p.steps_left as u16 {
+                return true;
+            }
         }
     }
     false
@@ -907,6 +1191,12 @@ fn cell_threatened_by_projectile(game: &WormGame, x: u16, y: u16) -> bool {
 fn cell_threatened_by_bomb(game: &WormGame, x: u16, y: u16, frames_ahead: u8) -> bool {
     let r = crate::game::BOMB_RADIUS_CELLS as i32;
     for b in &game.bombs {
+        // The CPU's own bombs cannot kill it (detonate() excludes the owner),
+        // so they are not threats — the old code made the AI dodge blasts
+        // that were physically harmless to it.
+        if b.owner == 1 {
+            continue;
+        }
         // Bomb detonates when fuse reaches 0. Each frame fuse decreases by 1,
         // so a bomb at fuse=1 goes off during THIS frame's tick — a cell the
         // CPU steps onto now is threatened at frames_ahead=0. Count the
@@ -915,20 +1205,22 @@ fn cell_threatened_by_bomb(game: &WormGame, x: u16, y: u16, frames_ahead: u8) ->
         if frames_to_detonate <= frames_ahead as u32 + 1 {
             let dx = (x as i32 - b.x as i32).abs();
             let dy = (y as i32 - b.y as i32).abs();
-            if dx <= r && dy <= r { return true; }
+            if dx <= r && dy <= r {
+                return true;
+            }
         }
     }
     false
 }
 
-/// Iterative multi-frame player prediction: predict direction, step, repeat.
+/// Iterative multi-frame player prediction: step the player's position
+/// forward, turning at obstacles with the ensemble's predicted direction.
 /// Returns a vector of (x, y) positions for frames 1..max_frames.
-/// Uses a simplified wall-avoidance model (no full game clone) to predict
-/// when the player will turn at corners.
+/// One brain, one place: corner turns use the same ensemble prediction the
+/// hunt layers use (the old version ran a second, divergent k-NN recall here).
 fn predict_player_positions_iterative(
     game: &WormGame,
-    brain: &CpuBrain,
-    tail: &VecDeque<Direction>,
+    predicted_dir: Direction,
     max_frames: usize,
 ) -> Vec<(u16, u16)> {
     let mut positions = Vec::with_capacity(max_frames);
@@ -936,71 +1228,51 @@ fn predict_player_positions_iterative(
     let mut py = game.cycles[0].head.1 as i16;
     let mut pdir = game.cycles[0].direction;
 
+    // Occupancy for prediction: any cell the player could physically occupy.
+    let open = |x: i16, y: i16| -> bool {
+        x >= 0
+            && y >= 0
+            && x < game.width as i16
+            && y < game.height as i16
+            && matches!(
+                game.grid[y as usize][x as usize],
+                crate::game::CellType::Empty
+                    | crate::game::CellType::Food
+                    | crate::game::CellType::Hole
+                    | crate::game::CellType::PowerUp
+            )
+    };
+
     for _ in 0..max_frames {
         // Check if the player will hit a wall/trail in their current direction.
         let (ddx, ddy) = pdir.as_delta();
-        let next_x = px + ddx;
-        let next_y = py + ddy;
-        let blocked = next_x < 2 || next_y < 2
-            || next_x >= game.width as i16 - 2
-            || next_y >= game.height as i16 - 2
-            || !matches!(
-                game.grid[clamp(next_y, 0, game.height as i16 - 1) as usize]
-                     [clamp(next_x, 0, game.width as i16 - 1) as usize],
-                crate::game::CellType::Empty | crate::game::CellType::Food
-            );
+        let blocked = !open(px + ddx, py + ddy);
 
         if blocked {
-            // Use the opponent model to predict which way they'll turn.
-            // Build a simplified context: the player is at a corner.
-            let mut ctx = [0.0f32; PLAYER_FEATURE_DIM];
-            // Encode that the player is blocked ahead (open neighbours = 0 in current dir).
-            let dirs = [Direction::Up, Direction::Down, Direction::Left, Direction::Right];
-            for (i, &d) in dirs.iter().enumerate() {
-                let (dx, dy) = d.as_delta();
-                let nx = px + dx;
-                let ny = py + dy;
-                let free = nx >= 2 && ny >= 2 && nx < game.width as i16 - 2 && ny < game.height as i16 - 2
-                    && matches!(
-                        game.grid[clamp(ny, 0, game.height as i16 - 1) as usize]
-                             [clamp(nx, 0, game.width as i16 - 1) as usize],
-                        crate::game::CellType::Empty | crate::game::CellType::Food
-                    );
-                ctx[i] = if free { 1.0 } else { 0.0 };
-            }
-            // L2-normalise
-            let mut norm = 0.0f32;
-            for i in 0..PLAYER_FEATURE_DIM { norm += ctx[i] * ctx[i]; }
-            norm = norm.sqrt();
-            if norm > 0.0 { let inv = 1.0 / norm; for i in 0..PLAYER_FEATURE_DIM { ctx[i] *= inv; } }
-
-            let memory_size = brain.opp_brain.episodes.len();
-            if memory_size >= COLD_START_EPISODES {
-                let recalled = recall_player(&brain.opp_brain, &ctx, RECALL_K.min(memory_size));
-                if !recalled.is_empty() {
-                    let agg = aggregate_player(&brain.opp_brain, &recalled, brain.opp_brain.seq, memory_size, tail);
-                    pdir = agg.predicted_dir;
-                } else {
-                    // Fallback: wall-follow right turn.
-                    pdir = right_turn(pdir);
-                }
+            // Corner: follow the ensemble's prediction when it leads anywhere
+            // occupiable; otherwise assume the canonical right-hand turn.
+            let (pdx, pdy) = predicted_dir.as_delta();
+            if open(px + pdx, py + pdy) {
+                pdir = predicted_dir;
             } else {
-                // Cold start: assume wall-follow right turn.
                 pdir = right_turn(pdir);
             }
         }
 
         let (dx, dy) = pdir.as_delta();
-        px = clamp(px + dx, 2, game.width as i16 - 3);
-        py = clamp(py + dy, 2, game.height as i16 - 3);
+        // Advance only into a physically occupiable cell; otherwise hold
+        // position. The old code clamped coordinates into [2, w-3], which
+        // pushed predicted positions INSIDE the ring-2 arena wall and
+        // poisoned intercept targeting with unreachable cells.
+        let nx = px + dx;
+        let ny = py + dy;
+        if open(nx, ny) {
+            px = nx;
+            py = ny;
+        }
         positions.push((px as u16, py as u16));
     }
     positions
-}
-
-#[inline]
-fn clamp(v: i16, lo: i16, hi: i16) -> i16 {
-    v.max(lo).min(hi)
 }
 
 fn right_turn(dir: Direction) -> Direction {
@@ -1010,6 +1282,274 @@ fn right_turn(dir: Direction) -> Direction {
         Direction::Down => Direction::Left,
         Direction::Left => Direction::Up,
     }
+}
+
+fn left_turn(dir: Direction) -> Direction {
+    match dir {
+        Direction::Up => Direction::Left,
+        Direction::Left => Direction::Down,
+        Direction::Down => Direction::Right,
+        Direction::Right => Direction::Up,
+    }
+}
+
+/* ============================ The rps-ai ensemble ============================
+ *
+ * The REAL rps-ai mechanism (src/model.py), faithfully ported: six+ specialist
+ * models, each a falsifiable assumption about the player. Every model predicts
+ * every frame and every prediction is recorded (counterfactual recording) —
+ * then scored next frame against what the player actually did with QUADRATIC
+ * recency weights (frame j counts j², so a figured-out model craters fast and
+ * the ensemble rotates away from it). The argmax-score model's prediction is
+ * the one that drives play. Scores are per-game (reset on restart, like
+ * rps-ai's per-game record); the k-NN memory beneath persists as the corpus.
+ */
+
+pub const ENSEMBLE_MODELS: usize = 7;
+/// Short names for the HUD brain panel, in model order.
+pub const MODEL_NAMES: [&str; ENSEMBLE_MODELS] = ["rep", "pat", "frq", "due", "wlR", "wlL", "knn"];
+/// Score bonus for the sophisticated model once warm (rps-ai's +0.15).
+const KNN_SCORE_BONUS: f32 = 0.15;
+
+/// Live per-model state. `num`/`den` accumulate ±j² / j² per game;
+/// `hits`/`total` are plain per-game counters for the HUD hit-rates.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct Ensemble {
+    pub num: [f32; ENSEMBLE_MODELS],
+    pub den: [f32; ENSEMBLE_MODELS],
+    pub hits: [u32; ENSEMBLE_MODELS],
+    pub total: [u32; ENSEMBLE_MODELS],
+    /// Each model's prediction for the upcoming frame (scored next frame).
+    pub pending: [Option<Direction>; ENSEMBLE_MODELS],
+    /// Index of the model whose prediction currently drives play.
+    pub active: usize,
+    /// Rolling hit-rate of the active model — the confidence the hunt
+    /// layers gate on (rps-ai: trust the model that's earning its keep).
+    pub confidence: f32,
+    /// The active model's prediction for the player's next direction.
+    pub predicted_dir: Option<Direction>,
+}
+
+impl Default for Ensemble {
+    fn default() -> Self {
+        Self {
+            num: [0.0; ENSEMBLE_MODELS],
+            den: [0.0; ENSEMBLE_MODELS],
+            hits: [0; ENSEMBLE_MODELS],
+            total: [0; ENSEMBLE_MODELS],
+            pending: [None; ENSEMBLE_MODELS],
+            active: 0,
+            confidence: 0.0,
+            predicted_dir: None,
+        }
+    }
+}
+
+impl Ensemble {
+    /// Per-game reset (rps-ai wipes its record each game; the k-NN memory
+    /// below persists). Clears scores, hit-rates and pending predictions.
+    pub fn reset_scores(&mut self) {
+        *self = Self::default();
+    }
+
+    /// Model's quadratic score in [-1, 1] (0.0 when never scored).
+    pub fn score(&self, model: usize) -> f32 {
+        if self.den[model] <= 0.0 {
+            0.0
+        } else {
+            self.num[model] / self.den[model]
+        }
+    }
+
+    /// Score the pending predictions against the player's actual move.
+    /// `frame_idx` is the in-game frame index — its square is the recency
+    /// weight (rps-ai's j²).
+    pub fn score_frame(&mut self, actual: Direction, frame_idx: u32) {
+        let w = (frame_idx as f32).max(1.0);
+        let w2 = w * w;
+        for i in 0..ENSEMBLE_MODELS {
+            if let Some(pred) = self.pending[i].take() {
+                let hit = pred == actual;
+                self.num[i] += if hit { w2 } else { -w2 };
+                self.den[i] += w2;
+                self.total[i] += 1;
+                if hit {
+                    self.hits[i] += 1;
+                }
+            }
+        }
+    }
+}
+
+/* --------------------------- the seven assumptions --------------------------- */
+
+/// M0 `rep`: the player repeats on a streak, otherwise turns (right bias).
+/// (rps-ai model0: beats-last on repeat-streak, loses-to-last otherwise.)
+fn m_repeat(tail: &VecDeque<Direction>) -> Option<Direction> {
+    let last = *tail.back()?;
+    let n = tail.len();
+    if n >= 3 {
+        let repeats = (1..=2).filter(|&i| tail[n - i] == tail[n - i - 1]).count();
+        if repeats >= 2 {
+            return Some(last);
+        }
+    }
+    Some(right_turn(last))
+}
+
+/// M1 `pat`: the player's transition vector (straight/left/right) follows a
+/// pattern — predict the modal recent transition applied to the last move.
+/// (rps-ai model1: mode of the last four transition vectors.)
+fn m_pattern(tail: &VecDeque<Direction>) -> Option<Direction> {
+    if tail.len() < 2 {
+        return None;
+    }
+    let vec_of = |a: Direction, b: Direction| -> i8 {
+        if a == b {
+            0 // straight
+        } else if b == right_turn(a) {
+            1 // right
+        } else if b == left_turn(a) {
+            -1 // left
+        } else {
+            2 // 180 — impossible under game rules
+        }
+    };
+    let n = tail.len();
+    let start = n.saturating_sub(4).max(1);
+    let mut counts = [0usize; 3]; // [-1, 0, +1]
+    for i in start..n {
+        let v = vec_of(tail[i - 1], tail[i]);
+        if v != 2 {
+            counts[(v + 1) as usize] += 1;
+        }
+    }
+    let mode = counts
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, &c)| c)
+        .map(|(i, _)| i as i8 - 1)
+        .unwrap_or(0);
+    let last = *tail.back().unwrap();
+    Some(match mode {
+        0 => last,
+        1 => right_turn(last),
+        _ => left_turn(last),
+    })
+}
+
+/// M2 `frq`: the player favours one direction — predict their most frequent
+/// recent move. (rps-ai model2.)
+fn m_frequent(tail: &VecDeque<Direction>) -> Option<Direction> {
+    if tail.is_empty() {
+        return None;
+    }
+    let mut counts = [0usize; 4];
+    for &d in tail {
+        counts[dir_index(d)] += 1;
+    }
+    let best = counts
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, &c)| c)
+        .map(|(i, _)| i)
+        .unwrap_or(3);
+    Some(index_dir(best))
+}
+
+/// M3 `due`: the player rotates to whatever they've used least — predict the
+/// least frequent recent move (longest-unseen wins ties). (rps-ai model3.)
+fn m_due(tail: &VecDeque<Direction>) -> Option<Direction> {
+    if tail.is_empty() {
+        return None;
+    }
+    let mut counts = [0usize; 4];
+    let mut last_seen = [usize::MAX; 4];
+    for (i, &d) in tail.iter().enumerate() {
+        counts[dir_index(d)] += 1;
+        last_seen[dir_index(d)] = i;
+    }
+    let best = (0..4)
+        .min_by_key(|&i| (counts[i], usize::MAX - last_seen[i].min(usize::MAX - 1)))
+        .unwrap_or(3);
+    Some(index_dir(best))
+}
+
+/// M4/M5 `wlR`/`wlL`: the player is a wall-follower — straight while the
+/// road ahead is open, then turn (right-handed and left-handed variants).
+/// TRON has a chirality rps doesn't, so the assumption comes in both hands.
+fn m_wall(game: &WormGame, right_handed: bool) -> Option<Direction> {
+    let p = &game.cycles[0];
+    let dir = p.direction;
+    if free_step(game, p.head.0, p.head.1, dir) {
+        Some(dir)
+    } else if right_handed {
+        Some(right_turn(dir))
+    } else {
+        Some(left_turn(dir))
+    }
+}
+
+/// M6 `knn`: the sophisticated model — k-NN opponent memory over the
+/// player-centric context. Cold (fewer than COLD_START_EPISODES) it abstains,
+/// exactly like rps-ai's NN/DT needing 5–7 rounds of history.
+fn m_knn(game: &WormGame, brain: &CpuBrain) -> Option<Direction> {
+    if brain.opp_brain.episodes.len() < COLD_START_EPISODES {
+        return None;
+    }
+    Some(predict_player_move(game, brain, &brain.player_tail).predicted_dir)
+}
+
+/// Compute every model's prediction for the next frame, pick the driver by
+/// quadratic score (knn gets its sophistication bonus once warm), and report
+/// the driver's rolling hit-rate as the ensemble confidence.
+/// (rps-ai `computer_choice`.)
+pub fn compute_ensemble(
+    game: &WormGame,
+    brain: &CpuBrain,
+) -> ([Option<Direction>; ENSEMBLE_MODELS], usize, f32) {
+    let tail = &brain.player_tail;
+    let pending = [
+        m_repeat(tail),
+        m_pattern(tail),
+        m_frequent(tail),
+        m_due(tail),
+        m_wall(game, true),
+        m_wall(game, false),
+        m_knn(game, brain),
+    ];
+
+    let e = &brain.ensemble;
+    let mut best = usize::MAX;
+    let mut best_score = f32::NEG_INFINITY;
+    for i in 0..ENSEMBLE_MODELS {
+        if e.den[i] <= 0.0 {
+            continue; // never scored — not eligible yet
+        }
+        let s = ensemble_rank_score(brain, i);
+        if s > best_score {
+            best_score = s;
+            best = i;
+        }
+    }
+    // First frame (no scores yet): rps-ai forces model 0.
+    let active = if best == usize::MAX { 0 } else { best };
+    let confidence = if e.total[active] > 0 {
+        e.hits[active] as f32 / e.total[active] as f32
+    } else {
+        0.0
+    };
+    (pending, active, confidence)
+}
+
+/// Effective score used by ensemble selection. The UI exports this alongside
+/// the raw quadratic score so a warm k-NN bonus is never an invisible tie-break.
+pub fn ensemble_rank_score(brain: &CpuBrain, model: usize) -> f32 {
+    let mut score = brain.ensemble.score(model);
+    if model == ENSEMBLE_MODELS - 1 && brain.opp_brain.episodes.len() >= COLD_START_EPISODES {
+        score += KNN_SCORE_BONUS;
+    }
+    score
 }
 
 /// Heuristic for when the CPU should fire a held power-up.
@@ -1024,7 +1564,9 @@ pub fn should_fire(game: &mut WormGame, who: usize) -> bool {
         None => return false,
     };
     let opp = 1 - who;
-    if !game.cycles[opp].alive { return false; }
+    if !game.cycles[opp].alive {
+        return false;
+    }
     let (hx, hy) = game.cycles[who].head;
     let (ox, oy) = game.cycles[opp].head;
 
@@ -1032,9 +1574,15 @@ pub fn should_fire(game: &mut WormGame, who: usize) -> bool {
         crate::game::PowerUpKind::Laser => {
             // Player must be in line of fire (same row or col, no walls between).
             let (dx, dy) = game.cycles[who].direction.as_delta();
-            if dx != 0 && hy != oy { return false; }
-            if dy != 0 && hx != ox { return false; }
-            if dx == 0 && dy == 0 { return false; }
+            if dx != 0 && hy != oy {
+                return false;
+            }
+            if dy != 0 && hx != ox {
+                return false;
+            }
+            if dx == 0 && dy == 0 {
+                return false;
+            }
             // Check no walls between us and the player.
             let beam = beam_cells(game, hx, hy, dx, dy);
             beam.contains(&(ox, oy))
@@ -1046,7 +1594,9 @@ pub fn should_fire(game: &mut WormGame, who: usize) -> bool {
         }
         crate::game::PowerUpKind::Bomb => {
             // Player within bomb blast radius.
-            let dist = ((hx as i32 - ox as i32).abs().max((hy as i32 - oy as i32).abs())) as i16;
+            let dist = ((hx as i32 - ox as i32)
+                .abs()
+                .max((hy as i32 - oy as i32).abs())) as i16;
             dist <= crate::game::BOMB_RADIUS_CELLS
         }
         crate::game::PowerUpKind::WallPunch => {
@@ -1065,9 +1615,13 @@ fn beam_cells(game: &WormGame, hx: u16, hy: u16, dx: i16, dy: i16) -> Vec<(u16, 
     loop {
         x += dx;
         y += dy;
-        if x < 0 || y < 0 || x >= game.width as i16 || y >= game.height as i16 { break; }
+        if x < 0 || y < 0 || x >= game.width as i16 || y >= game.height as i16 {
+            break;
+        }
         let (ux, uy) = (x as u16, y as u16);
-        if game.grid[uy as usize][ux as usize] == crate::game::CellType::Wall { break; }
+        if game.grid[uy as usize][ux as usize] == crate::game::CellType::Wall {
+            break;
+        }
         out.push((ux, uy));
     }
     out
@@ -1075,41 +1629,54 @@ fn beam_cells(game: &WormGame, hx: u16, hy: u16, dx: i16, dy: i16) -> Vec<(u16, 
 
 /// Faithful to rps-ai's `think` + `decide`: memory-driven read, confidence-gated,
 /// blended with a base-rate prior, temperature-sampled with 5% explore.
-pub fn cpu_decide(
-    game: &mut WormGame,
-) -> Direction {
-    let brain = &game.cpu_brain;
-    let legal = legal_directions(game, &game.cycles[1]);
-    if legal.is_empty() {
-        return game.cycles[1].direction;
-    }
-    if legal.len() == 1 {
-        return legal[0];
+pub fn cpu_decide(game: &mut WormGame) -> Direction {
+    game.cpu_predicted_path.clear();
+    macro_rules! choose {
+        ($direction:expr, $reason:expr) => {{
+            let chosen = $direction;
+            game.cpu_decision_reason = $reason;
+            return chosen;
+        }};
     }
 
-    let memory_size = brain.episodes.len();
+    let legal = legal_directions(game, &game.cycles[1]);
+    if legal.is_empty() {
+        choose!(game.cycles[1].direction, CpuDecisionReason::NoLegalMove);
+    }
+    if legal.len() == 1 {
+        choose!(legal[0], CpuDecisionReason::ForcedMove);
+    }
+
+    let memory_size = game.cpu_brain.episodes.len();
 
     // Cold start / low memory: use a simple wall-follower heuristic (same as
     // the naive benchmark opponent) until the memory has enough data to drive
     // decisions. This guarantees the adaptive CPU is at least as good as the
     // baseline during the warm-up phase.
     if memory_size < COLD_START_EPISODES {
-        return wall_follow_decide(game, &game.cycles[1]);
+        choose!(
+            wall_follow_decide(game, &game.cycles[1]),
+            CpuDecisionReason::WarmingUp
+        );
     }
 
     // Memory-driven: wall-follow base + defensive avoidance + adjacent food.
-    // The wall-follow pattern is the survival strategy. The opponent model
-    // only modifies it defensively (avoid predicted collisions) and
-    // opportunistically (grab adjacent food).
+    // The wall-follow pattern is the survival strategy. The ensemble's
+    // opponent prediction (refreshed at frame end) drives the hunt layers.
 
-    // --- Opponent Model Prediction (iterative multi-frame) ---
-    let tail = brain.player_tail.clone();
-    let player_pred = predict_player_move(game, brain, &tail);
+    // --- Opponent Model Prediction (the rps-ai ensemble, refreshed at frame end) ---
+    let player_pred_dir = game
+        .cpu_brain
+        .ensemble
+        .predicted_dir
+        .unwrap_or(game.cycles[0].direction);
+    let player_pred_conf = game.cpu_brain.ensemble.confidence;
     let cpu = &game.cycles[1];
     let (cx, cy) = cpu.head;
 
     // Iterative multi-frame prediction: predicts direction changes at corners.
-    let predicted_positions = predict_player_positions_iterative(game, brain, &tail, 5);
+    let predicted_positions = predict_player_positions_iterative(game, player_pred_dir, 5);
+    game.cpu_predicted_path = predicted_positions.clone();
 
     // --- THREAT AVOIDANCE: dodge projectiles and bombs ---
     // Check each legal direction for threats. If the wall-follow direction is
@@ -1120,16 +1687,17 @@ pub fn cpu_decide(
         let (ddx, ddy) = d.as_delta();
         let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
         let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
-        if cell_threatened_by_projectile(game, nx, ny)
-            || cell_threatened_by_bomb(game, nx, ny, 3)
-        {
+        if cell_threatened_by_projectile(game, nx, ny) || cell_threatened_by_bomb(game, nx, ny, 3) {
             threatened_dirs.push(d);
         }
     }
 
     // If wall-follow is threatened, find a safe alternative immediately.
     if threatened_dirs.contains(&wall_dir) {
-        let safe_dirs: Vec<&Direction> = legal.iter().filter(|d| !threatened_dirs.contains(d)).collect();
+        let safe_dirs: Vec<&Direction> = legal
+            .iter()
+            .filter(|d| !threatened_dirs.contains(d))
+            .collect();
         if !safe_dirs.is_empty() {
             // Pick the safe direction closest to wall-follow (minimises deviation).
             let mut best_dir = *safe_dirs[0];
@@ -1138,7 +1706,7 @@ pub fn cpu_decide(
                 let (ddx, ddy) = d.as_delta();
                 let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
                 let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
-                let open = count_open_space(game, nx, ny) as f32;
+                let open = count_open_space(game, nx, ny);
                 let norm_open = open / (game.width as f32 * game.height as f32);
                 let score = norm_open * 1000.0;
                 if score > best_score {
@@ -1146,28 +1714,97 @@ pub fn cpu_decide(
                     best_dir = *d;
                 }
             }
-            return best_dir;
+            choose!(best_dir, CpuDecisionReason::ThreatDodge);
         }
     }
 
-    // --- FOOD: grab food that's on our wall-follow path ---
-    // Only deviate for food that's already in our path — we don't abandon the
-    // perimeter. Two tiers:
-    //   1. Food directly adjacent (1 cell) in a legal direction — grab it.
-    //   2. Food up to 3 cells ahead along the wall-follow axis — keep going.
-    //   3. BFS pathfinding to nearest safe food (when open space is sufficient).
-    if !game.food_items.is_empty() {
-        // Tier 1: adjacent food in a legal direction.
-        if let Some(&(fx, fy, _)) = game.food_items.iter().find(|&&(fx, fy, _)| {
-            ((fx as i16 - cx as i16).abs() + (fy as i16 - cy as i16).abs()) == 1
-        }) {
-            for &d in &legal {
+    // Candidate directions for every layer below: legal minus threatened.
+    // The threat gate used to protect ONLY wall-follow — the food/intercept/
+    // defensive layers could then return a direction with a projectile or
+    // bomb blast landing on it. Fall back to full legal when everything is
+    // threatened (a dodge is impossible; let the layers pick the least-bad).
+    let safe_legal: Vec<Direction> = legal
+        .iter()
+        .copied()
+        .filter(|d| !threatened_dirs.contains(d))
+        .collect();
+    let candidates: &[Direction] = if safe_legal.is_empty() {
+        &legal
+    } else {
+        &safe_legal
+    };
+
+    // Survival floor for every deviation from wall-follow: the destination
+    // must keep at least this much of the arena reachable (absolute), and at
+    // least half of what wall-follow keeps (relative). Prevents hunt dives
+    // into pockets behind our own trail — the kamikaze move.
+    let total_cells = game.width as f32 * game.height as f32;
+    let (wdx, wdy) = wall_dir.as_delta();
+    let wx = (cx as i16 + wdx).max(0).min((game.width - 1) as i16) as u16;
+    let wy = (cy as i16 + wdy).max(0).min((game.height - 1) as i16) as u16;
+    let wall_open = count_open_space(game, wx, wy) / total_cells;
+    let open_floor = SURVIVAL_MIN_OPEN.max(wall_open * 0.5);
+
+    // --- DEFENSIVE: avoid predicted player when very close ---
+    // SURVIVAL BEFORE HUNTING: this used to run AFTER the intercept layers,
+    // so a confident hunt could steer us head-on into the player and the
+    // dodge never ran. Now it outranks food and intercepts alike.
+    if player_pred_conf >= 0.4 {
+        let mut min_dist = i16::MAX;
+        for &(px, py) in &predicted_positions {
+            let dist = (cx as i16 - px as i16).abs() + (cy as i16 - py as i16).abs();
+            min_dist = min_dist.min(dist);
+        }
+        if min_dist <= 2 {
+            let mut best_dir = wall_dir;
+            let mut best_score = f32::NEG_INFINITY;
+            for &d in candidates {
                 let (ddx, ddy) = d.as_delta();
                 let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
                 let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
-                if (nx, ny) == (fx, fy) {
-                    return d;
+                let mut dmin = i16::MAX;
+                for &(px, py) in &predicted_positions {
+                    let dd = (nx as i16 - px as i16).abs() + (ny as i16 - py as i16).abs();
+                    dmin = dmin.min(dd);
                 }
+                let wall_bonus = if d == wall_dir { 3.0 } else { 0.0 };
+                let score = dmin as f32 + wall_bonus;
+                if score > best_score {
+                    best_score = score;
+                    best_dir = d;
+                }
+            }
+            if game.rng_f32(0.0, 1.0) < EXPLORE_RATE {
+                choose!(
+                    legal[(game.rng_f32(0.0, legal.len() as f32) as usize).min(legal.len() - 1)],
+                    CpuDecisionReason::CloseEvasion
+                );
+            }
+            choose!(best_dir, CpuDecisionReason::CloseEvasion);
+        }
+    }
+
+    // --- ITEMS: grab food / power-ups on or near our path ---
+    // Only deviate for items already near our path — we don't abandon the
+    // perimeter. Three tiers:
+    //   1. Food or power-up directly adjacent (1 cell) — grab it.
+    //   2. Food up to 3 cells ahead along the wall-follow axis — keep going.
+    //   3. BFS pathfinding to the nearest food or power-up (when the
+    //      destination has enough open space to not trap us).
+    if !game.food_items.is_empty() || !game.powerups.is_empty() {
+        // Tier 1: adjacent food OR power-up in a candidate direction. The CPU
+        // used to walk straight past power-ups; anything collectible one step
+        // away is worth the deviation. Grid-based check (candidates are
+        // already passable-verified, so bombs are out).
+        for &d in candidates {
+            let (ddx, ddy) = d.as_delta();
+            let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
+            let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
+            if matches!(
+                game.grid[ny as usize][nx as usize],
+                CellType::Food | CellType::PowerUp
+            ) {
+                choose!(d, CpuDecisionReason::ItemPickup);
             }
         }
 
@@ -1181,27 +1818,31 @@ pub fn cpu_decide(
                     Direction::Up | Direction::Down => fx == cx,
                     Direction::Left | Direction::Right => fy == cy,
                 };
-                if !on_axis { continue; }
+                if !on_axis {
+                    continue;
+                }
                 let dist = ((fx as i16 - cx as i16).abs() + (fy as i16 - cy as i16).abs()) as f32;
-                if dist < 1.0 || dist > 3.0 { continue; }
+                if !(1.0..=3.0).contains(&dist) {
+                    continue;
+                }
                 if nearest.is_none() || dist < nearest.unwrap() {
                     nearest = Some(dist);
                 }
             }
             if nearest.is_some() {
-                return wall_dir;
+                choose!(wall_dir, CpuDecisionReason::ItemPath);
             }
         }
 
         // Tier 3: BFS pathfinding to nearest safe food.
         // Only used when the food isn't on the wall-follow path and the
         // destination has enough open space to not trap us.
-        if let Some((food_dir, food_open)) = bfs_nearest_food_dir(game, cx, cy, &legal) {
+        if let Some((food_dir, food_open)) = bfs_nearest_food_dir(game, cx, cy, candidates) {
             let norm_open = food_open / (game.width as f32 * game.height as f32);
             // Only take the BFS path if the destination is reasonably open
             // (at least 10% of arena is reachable from there).
             if norm_open > 0.10 && food_dir != wall_dir {
-                return food_dir;
+                choose!(food_dir, CpuDecisionReason::ItemPath);
             }
         }
     }
@@ -1210,32 +1851,38 @@ pub fn cpu_decide(
     // When the player is a wall-follower (confidence high, direction stable),
     // predict which corner they'll reach and cut across to lay a trail barrier.
     // This works even when the player is >10 cells away (standard intercept range).
-    if player_pred.confidence >= 0.5 {
+    if player_pred_conf >= 0.5 {
         // Predict the corner the player will reach next.
         // Wall-followers turn right at corners. We predict their path to the next corner.
-        let corner_target = predict_next_corner(game, &game.cycles[0], player_pred.predicted_dir);
+        let corner_target = predict_next_corner(game, &game.cycles[0], player_pred_dir);
 
         if let Some((corner_x, corner_y)) = corner_target {
-            let dist_to_corner = ((cx as i16 - corner_x as i16).abs()
-                + (cy as i16 - corner_y as i16).abs()) as f32;
+            let dist_to_corner =
+                ((cx as i16 - corner_x as i16).abs() + (cy as i16 - corner_y as i16).abs()) as f32;
 
             // Only intercept if the corner is reachable (within ~20 cells)
             // and we're not too close to the player (avoid head-on).
-            if dist_to_corner <= 25.0 && dist_to_corner >= 5.0 {
+            if (5.0..=25.0).contains(&dist_to_corner) {
                 let mut best_dir = wall_dir;
                 let mut best_score = f32::NEG_INFINITY;
-                for &d in &legal {
+                for &d in candidates {
                     let (ddx, ddy) = d.as_delta();
                     let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
                     let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
 
                     // Distance from new position to corner (lower = closer).
                     let corner_dist = ((nx as i16 - corner_x as i16).abs()
-                        + (ny as i16 - corner_y as i16).abs()) as f32;
+                        + (ny as i16 - corner_y as i16).abs())
+                        as f32;
 
                     // Open space from destination (higher = safer).
-                    let open = count_open_space(game, nx, ny) as f32;
+                    let open = count_open_space(game, nx, ny);
                     let norm_open = open / (game.width as f32 * game.height as f32);
+
+                    // Survival floor: never dive into a pocket for a hunt.
+                    if norm_open < open_floor {
+                        continue;
+                    }
 
                     // Score: prefer closer to corner + more open space.
                     // Wall-follow gets a bonus so we don't abandon the wall
@@ -1250,7 +1897,7 @@ pub fn cpu_decide(
                 }
                 // Only take the chokepoint intercept if it's meaningfully better.
                 if best_dir != wall_dir && best_score > 5.0 {
-                    return best_dir;
+                    choose!(best_dir, CpuDecisionReason::CornerIntercept);
                 }
             }
         }
@@ -1262,7 +1909,7 @@ pub fn cpu_decide(
     // it, leaving a trail the player crashes into. Against wall-followers this
     // triggers at the corners where both cycles converge; against chasers it
     // triggers constantly because the player is always approaching.
-    if player_pred.confidence >= 0.6 {
+    if player_pred_conf >= 0.6 {
         // Target: where the player will be in 2-5 frames (from iterative prediction).
         let mut best_intercept: Option<(u16, u16, f32)> = None;
         for (i, &(px, py)) in predicted_positions.iter().enumerate() {
@@ -1281,21 +1928,27 @@ pub fn cpu_decide(
 
             // Intercept range: 2-10 cells. Too close risks head-on,
             // too far means we can't reach it in time.
-            if dist_to_target >= 2 && dist_to_target <= 10 {
+            if (2..=10).contains(&dist_to_target) {
                 let mut best_dir = wall_dir;
                 let mut best_score = f32::NEG_INFINITY;
-                for &d in &legal {
+                for &d in candidates {
                     let (ddx, ddy) = d.as_delta();
                     let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
                     let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
 
                     // Distance from new position to intercept point (lower = closer).
                     let intercept_dist = ((nx as i16 - target_px as i16).abs()
-                        + (ny as i16 - target_py as i16).abs()) as f32;
+                        + (ny as i16 - target_py as i16).abs())
+                        as f32;
 
                     // Open space from destination (higher = safer).
-                    let open = count_open_space(game, nx, ny) as f32;
+                    let open = count_open_space(game, nx, ny);
                     let norm_open = open / (game.width as f32 * game.height as f32);
+
+                    // Survival floor: never dive into a pocket for a hunt.
+                    if norm_open < open_floor {
+                        continue;
+                    }
 
                     // Score: prefer closer to intercept + more open space.
                     // Wall-follow gets a bonus so we don't abandon the wall
@@ -1310,46 +1963,9 @@ pub fn cpu_decide(
                 }
                 // Only take the intercept if it's meaningfully better than wall-follow.
                 if best_dir != wall_dir && best_score > 5.0 {
-                    return best_dir;
+                    choose!(best_dir, CpuDecisionReason::DirectIntercept);
                 }
             }
-        }
-    }
-
-    // --- DEFENSIVE: avoid predicted player when very close ---
-    // Only kicks in when the predicted player is about to collide with us.
-    // We pick the direction that maximises distance to the predicted player,
-    // with a strong wall-follow bonus so we don't abandon the perimeter
-    // unless there's a genuine collision risk.
-    if player_pred.confidence >= 0.4 {
-        let mut min_dist = i16::MAX;
-        for &(px, py) in &predicted_positions {
-            let dist = (cx as i16 - px as i16).abs() + (cy as i16 - py as i16).abs();
-            min_dist = min_dist.min(dist as i16);
-        }
-        if min_dist <= 2 {
-            let mut best_dir = wall_dir;
-            let mut best_score = f32::NEG_INFINITY;
-            for &d in &legal {
-                let (ddx, ddy) = d.as_delta();
-                let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
-                let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
-                let mut dmin = i16::MAX;
-                for &(px, py) in &predicted_positions {
-                    let dd = (nx as i16 - px as i16).abs() + (ny as i16 - py as i16).abs();
-                    dmin = dmin.min(dd as i16);
-                }
-                let wall_bonus = if d == wall_dir { 3.0 } else { 0.0 };
-                let score = dmin as f32 + wall_bonus;
-                if score > best_score {
-                    best_score = score;
-                    best_dir = d;
-                }
-            }
-            if game.rng_f32(0.0, 1.0) < EXPLORE_RATE {
-                return legal[(game.rng_f32(0.0, legal.len() as f32) as usize).min(legal.len() - 1)];
-            }
-            return best_dir;
         }
     }
 
@@ -1377,7 +1993,7 @@ pub fn cpu_decide(
             // The vote is over all 4 directions; restrict it to legal ones.
             let mut legal_dist = [0.0f32; 4];
             let mut total = 0.0f32;
-            for &d in &legal {
+            for &d in candidates {
                 let w = agg.distribution[dir_index(d)].max(0.0);
                 legal_dist[dir_index(d)] = w;
                 total += w;
@@ -1388,7 +2004,7 @@ pub fn cpu_decide(
                 // (intercept/defensive/food/wall-follow) already earned its
                 // wins; the memory only gets to *modify* it, so no temperature
                 // or explore noise on top of an optimal base.
-                let sampled = legal
+                let sampled = candidates
                     .iter()
                     .max_by(|a, b| {
                         legal_dist[dir_index(**a)]
@@ -1402,31 +2018,31 @@ pub fn cpu_decide(
                 // replaces it. Fire the vote only when the aggregate is
                 // confident (margin × support × maturity) AND the sampled
                 // destination is at least as open as wall-follow's.
-                let total_cells = game.width as f32 * game.height as f32;
                 let (ddx, ddy) = sampled.as_delta();
                 let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
                 let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
                 let vote_open = count_open_space(game, nx, ny) / total_cells;
-                let (wdx, wdy) = wall_dir.as_delta();
-                let wx = (cx as i16 + wdx).max(0).min((game.width - 1) as i16) as u16;
-                let wy = (cy as i16 + wdy).max(0).min((game.height - 1) as i16) as u16;
-                let wall_open = count_open_space(game, wx, wy) / total_cells;
                 if agg.confidence >= SELF_VOTE_MIN_CONFIDENCE
                     && vote_open >= wall_open
                     && vote_open >= MEMORY_VOTE_MIN_OPEN
                 {
-                    return sampled;
+                    choose!(sampled, CpuDecisionReason::SurvivalMemory);
                 }
             }
         }
     }
 
+    game.cpu_decision_reason = CpuDecisionReason::WallFollow;
     wall_dir
 }
 
 /// Predict which corner a cycle will reach next given their current direction.
 /// Returns (corner_x, corner_y) or None if no clear corner pattern.
-fn predict_next_corner(game: &WormGame, cycle: &LightCycle, predicted_dir: Direction) -> Option<(u16, u16)> {
+fn predict_next_corner(
+    game: &WormGame,
+    cycle: &LightCycle,
+    predicted_dir: Direction,
+) -> Option<(u16, u16)> {
     let (hx, hy) = cycle.head;
     let (dx, dy) = predicted_dir.as_delta();
 
@@ -1440,7 +2056,9 @@ fn predict_next_corner(game: &WormGame, cycle: &LightCycle, predicted_dir: Direc
         x += dx;
         y += dy;
         steps += 1;
-        if steps > max_steps { return None; }
+        if steps > max_steps {
+            return None;
+        }
         if x < 2 || y < 2 || x >= game.width as i16 - 2 || y >= game.height as i16 - 2 {
             // Hit the arena wall — this is the corner.
             return Some((x as u16, y as u16));
@@ -1477,17 +2095,28 @@ pub fn wall_follow_decide(game: &WormGame, cpu: &LightCycle) -> Direction {
         (Direction::Right, Direction::Left),
     ];
 
-    let right_dir = right_map.iter().find(|(d, _)| *d == current_dir).map(|(_, r)| *r).unwrap_or(current_dir);
-    let left_dir = left_map.iter().find(|(d, _)| *d == current_dir).map(|(_, l)| *l).unwrap_or(current_dir);
-    let back_dir = back_map.iter().find(|(d, _)| *d == current_dir).map(|(_, b)| *b).unwrap_or(current_dir);
+    let right_dir = right_map
+        .iter()
+        .find(|(d, _)| *d == current_dir)
+        .map(|(_, r)| *r)
+        .unwrap_or(current_dir);
+    let left_dir = left_map
+        .iter()
+        .find(|(d, _)| *d == current_dir)
+        .map(|(_, l)| *l)
+        .unwrap_or(current_dir);
+    let back_dir = back_map
+        .iter()
+        .find(|(d, _)| *d == current_dir)
+        .map(|(_, b)| *b)
+        .unwrap_or(current_dir);
 
+    // Use the same legality predicate as physics (passable via free_step):
+    // the old Empty-only check refused to step onto food, punched holes and
+    // power-ups, and its coordinate clamping aliased out-of-bounds steps to
+    // the head's own cell.
     for dir in [right_dir, current_dir, left_dir, back_dir] {
-        let (dx, dy) = dir.as_delta();
-        let new_x = (head.0 as i16 + dx).max(1).min((game.width - 2) as i16) as u16;
-        let new_y = (head.1 as i16 + dy).max(1).min((game.height - 2) as i16) as u16;
-        if new_x >= 1 && new_x < game.width - 1 && new_y >= 1 && new_y < game.height - 1
-            && game.grid[new_y as usize][new_x as usize] == CellType::Empty
-        {
+        if free_step(game, head.0, head.1, dir) {
             return dir;
         }
     }
@@ -1496,7 +2125,12 @@ pub fn wall_follow_decide(game: &WormGame, cpu: &LightCycle) -> Direction {
 
 /// Legal directions: no 180° reversal, in-bounds and free.
 pub fn legal_directions(game: &WormGame, cpu: &LightCycle) -> Vec<Direction> {
-    let dirs = [Direction::Up, Direction::Down, Direction::Left, Direction::Right];
+    let dirs = [
+        Direction::Up,
+        Direction::Down,
+        Direction::Left,
+        Direction::Right,
+    ];
     dirs.iter()
         .copied()
         .filter(|&d| {
@@ -1525,7 +2159,11 @@ pub fn record_episode(
     food_value: u8,
 ) {
     let reward = survived_frames as f32 + (food_value as f32) * 10.0;
-    let copies = ((survived_frames as f32 / 20.0).floor() as u32).clamp(1, 2);
+    // Long survivals get double-stored so the vote over-weights moves that
+    // lasted (rps-ai re-stores good outcomes). Written explicitly: the old
+    // `(x/20).clamp(1,2)` was constant-1 because the frame counter feeding it
+    // was reset every frame; the counter is fixed, and this is the intent.
+    let copies = if survived_frames >= 40 { 2 } else { 1 };
     for _ in 0..copies {
         brain.remember(vector, dir, reward);
     }
@@ -1580,14 +2218,11 @@ mod tests {
     fn encode_situation_stub() -> [f32; CPU_FEATURE_DIM] {
         let mut v = [0.0f32; CPU_FEATURE_DIM];
         v[0] = 1.0;
-        let mut norm = 0.0f32;
-        for i in 0..CPU_FEATURE_DIM {
-            norm += v[i] * v[i];
-        }
+        let mut norm = v.iter().map(|value| value * value).sum::<f32>();
         norm = norm.sqrt();
         if norm > 0.0 {
-            for i in 0..CPU_FEATURE_DIM {
-                v[i] /= norm;
+            for value in &mut v {
+                *value /= norm;
             }
         }
         v
@@ -1598,11 +2233,12 @@ mod tests {
     fn encode_player_context_stub() -> [f32; PLAYER_FEATURE_DIM] {
         let mut v = [0.0f32; PLAYER_FEATURE_DIM];
         v[0] = 1.0;
-        let mut norm = 0.0f32;
-        for i in 0..PLAYER_FEATURE_DIM { norm += v[i] * v[i]; }
+        let mut norm = v.iter().map(|value| value * value).sum::<f32>();
         norm = norm.sqrt();
         if norm > 0.0 {
-            for i in 0..PLAYER_FEATURE_DIM { v[i] /= norm; }
+            for value in &mut v {
+                *value /= norm;
+            }
         }
         v
     }
@@ -1612,7 +2248,12 @@ mod tests {
         // Spike 1 (refactored): Validate the integrated `CpuBrain.opp_brain`
         // can learn a deterministic player sequence.
         // Sequence: Up -> Right -> Down -> Left (repeating).
-        let pattern = [Direction::Up, Direction::Right, Direction::Down, Direction::Left];
+        let pattern = [
+            Direction::Up,
+            Direction::Right,
+            Direction::Down,
+            Direction::Left,
+        ];
         let mut brain = CpuBrain::new();
         let tail = VecDeque::new();
 
@@ -1630,7 +2271,7 @@ mod tests {
         // so this test validates that the *infrastructure* (record_player_episode,
         // predict_player_move, CpuAggregate) compiles and runs without panic.
         // A true pattern test requires a game state, which is covered in Spike 2.
-        let agg = predict_player_move(&crate::WormGame::new(), &brain, &tail);
+        let agg = predict_player_move(&crate::WormGame::with_size(120, 38), &brain, &tail);
         assert!((0.0..=1.0).contains(&agg.confidence));
     }
 
@@ -1640,7 +2281,7 @@ mod tests {
     fn spike_2_transition_features_encode_corner_patterns() {
         // With a populated player_tail, the 4x4 transition matrix in slots
         // 13..29 should capture direction changes (e.g. Right -> Up).
-        let game = WormGame::new();
+        let game = WormGame::with_size(120, 38);
         let mut tail: VecDeque<Direction> = VecDeque::new();
 
         // Simulate the corner pattern: Right -> Up -> Left -> Down (clockwise)
@@ -1651,24 +2292,158 @@ mod tests {
         tail.push_back(Direction::Right);
 
         // Cap tail length like the brain does.
-        while tail.len() > 5 { tail.pop_front(); }
+        while tail.len() > 5 {
+            tail.pop_front();
+        }
 
         let ctx = encode_player_context(&game, &tail);
 
         // Transition matrix: slot 13 + from*4 + to
         // Right(3) -> Up(0): should have weight
-        let right_to_up = ctx[13 + 3 * 4 + 0];
-        let up_to_left = ctx[13 + 0 * 4 + 2];
+        let right_to_up = ctx[13 + 3 * 4];
+        let up_to_left = ctx[13 + 2];
         let left_to_down = ctx[13 + 2 * 4 + 1];
-        let down_to_right = ctx[13 + 1 * 4 + 3];
+        let down_to_right = ctx[13 + 4 + 3];
 
         assert!(right_to_up > 0.0, "Right->Up transition should be encoded");
         assert!(up_to_left > 0.0, "Up->Left transition should be encoded");
-        assert!(left_to_down > 0.0, "Left->Down transition should be encoded");
-        assert!(down_to_right > 0.0, "Down->Right transition should be encoded");
+        assert!(
+            left_to_down > 0.0,
+            "Left->Down transition should be encoded"
+        );
+        assert!(
+            down_to_right > 0.0,
+            "Down->Right transition should be encoded"
+        );
 
         // Diagonal transitions shouldn't appear in a wall-follower.
         let right_to_down = ctx[13 + 3 * 4 + 1];
-        assert!(right_to_down == 0.0, "Right->Down should be zero (not a wall-follow turn)");
+        assert!(
+            right_to_down == 0.0,
+            "Right->Down should be zero (not a wall-follow turn)"
+        );
+    }
+
+    /* ---------------------- regression: encoder fixes ---------------------- */
+
+    /// Regression: wall_distance must stop at the ring-2 arena wall, not count
+    /// through it into the outer corridor (it never consulted the grid).
+    #[test]
+    fn wall_distance_stops_at_arena_wall() {
+        let game = WormGame::with_size(120, 38);
+        assert!(game.has_corridor(), "test assumes a corridor arena");
+        let (hx, hy) = (5u16, 10u16);
+        let walls = wall_distance(&game, hx, hy);
+        // Left: free cells x=4,3 then wall at x=2 -> distance 2.
+        assert_eq!(walls[2], 2.0, "left wall distance must stop at ring 2");
+        // Right: free cells x=6..(w-4) then wall at x=w-3.
+        let expect_right = (game.width - 3 - hx - 1) as f32;
+        assert_eq!(walls[3], expect_right);
+        // Up: free cells y=9..3 then wall at y=2.
+        assert_eq!(walls[0], (hy - 3) as f32);
+        // Down: free cells y=11..(h-4) then wall at y=h-3.
+        let expect_down = (game.height - 3 - hy - 1) as f32;
+        assert_eq!(walls[1], expect_down);
+    }
+
+    /// Regression: food/player directly behind or perpendicular must read as
+    /// `cap`, not 0 ("right here"); off-axis targets must pay the
+    /// perpendicular Manhattan offset.
+    #[test]
+    fn projection_distances_respect_half_plane() {
+        let mut game = WormGame::with_size(120, 38);
+        let (hx, hy) = (20u16, 20u16);
+        // Food 3 cells to the LEFT: ahead for Left (3), behind for Right (cap),
+        // perpendicular for Up/Down (cap — old code read these as 0).
+        game.food_items = vec![(hx - 3, hy, 1)];
+        let food = nearest_food_distance(&game, hx, hy, 6.0);
+        assert_eq!(food, [6.0, 6.0, 3.0, 6.0]);
+        // Food 2 ahead and 4 to the side for Right: along 2 + perp 4 = 6.
+        game.food_items = vec![(hx + 2, hy - 4, 1)];
+        let food = nearest_food_distance(&game, hx, hy, 8.0);
+        assert_eq!(food[3], 6.0);
+        // Player 4 cells to the left of the CPU.
+        game.cycles[0].head = (hx - 4, hy);
+        let player = directional_player_distance(&game, hx, hy, 6.0);
+        assert_eq!(player, [6.0, 6.0, 4.0, 6.0]);
+    }
+
+    /// Regression: free_step must agree with physics (passable) — a punched
+    /// Hole is steppable, a live bomb cell is fatal.
+    #[test]
+    fn free_step_matches_passable_semantics() {
+        let mut game = WormGame::with_size(120, 38);
+        let (hx, hy) = (20u16, 20u16);
+        game.grid[hy as usize][(hx + 1) as usize] = CellType::Hole;
+        assert!(
+            free_step(&game, hx, hy, Direction::Right),
+            "holes are passable"
+        );
+        game.grid[hy as usize][(hx + 1) as usize] = CellType::Empty;
+        game.bombs.push(crate::game::Bomb {
+            x: hx + 1,
+            y: hy,
+            fuse: 99,
+            owner: 0,
+        });
+        assert!(
+            !free_step(&game, hx, hy, Direction::Right),
+            "bomb cells are fatal"
+        );
+    }
+
+    /// Regression: count_open_space counts the whole reachable interior with
+    /// no 2000-cell cap.
+    #[test]
+    fn count_open_space_has_no_artificial_cap() {
+        let game = WormGame::with_size(120, 38);
+        let (cx, cy) = (game.width / 2, game.height / 2);
+        let count = count_open_space(&game, cx, cy);
+        // Expected: every Empty|Food cell inside the ring-2 arena wall is
+        // reachable from the centre of a fresh board (corridor unreachable).
+        let mut expected = 0usize;
+        for y in 3..(game.height - 3) {
+            for x in 3..(game.width - 3) {
+                if matches!(
+                    game.grid[y as usize][x as usize],
+                    CellType::Empty | CellType::Food
+                ) {
+                    expected += 1;
+                }
+            }
+        }
+        assert_eq!(count, expected as f32);
+        if expected > 2000 {
+            assert!(count > 2000.0, "old cap would truncate this board");
+        }
+    }
+
+    /// Regression: the CPU's own bombs cannot kill it (detonate owner
+    /// exclusion), so they must not register as threats.
+    #[test]
+    fn own_bomb_is_not_a_threat() {
+        let mut game = WormGame::with_size(120, 38);
+        let (hx, hy) = (20u16, 20u16);
+        game.bombs.push(crate::game::Bomb {
+            x: hx,
+            y: hy,
+            fuse: 1,
+            owner: 1,
+        });
+        assert!(
+            !cell_threatened_by_bomb(&game, hx, hy, 3),
+            "own bomb is harmless to the CPU"
+        );
+        game.bombs.clear();
+        game.bombs.push(crate::game::Bomb {
+            x: hx,
+            y: hy,
+            fuse: 1,
+            owner: 0,
+        });
+        assert!(
+            cell_threatened_by_bomb(&game, hx, hy, 3),
+            "player bomb is a threat"
+        );
     }
 }

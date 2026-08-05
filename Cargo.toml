@@ -10,12 +10,29 @@ path = "src/main.rs"
 [lib]
 name = "worm"
 path = "src/lib/mod.rs"
+# rlib for tests/bench/bin; cdylib for wasm-pack.
+crate-type = ["rlib", "cdylib"]
 
 [[bench]]
 name = "cpu_ai_bench"
 harness = false
 
+[features]
+# Browser build: wasm-pack build --target web --features wasm
+wasm = ["dep:wasm-bindgen"]
+
 [dependencies]
+serde = { version = "1", features = ["derive"] }
+bincode = "1"
+wasm-bindgen = { version = "0.2", optional = true }
+
+# Terminal UI only — the WASM build renders to canvas instead.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 crossterm = "0.28"
 libc = "0.2"
 rand = "0.10.2"
+
+# Browser build: StdRng only (seeded by JS) — no sys/thread RNG backend
+# (getrandom has no backend on wasm32-unknown; rand 0.10 calls it sys_rng).
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+rand = { version = "0.10.2", default-features = false, features = ["std", "std_rng"] }
