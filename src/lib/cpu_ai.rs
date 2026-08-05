@@ -557,10 +557,74 @@ impl CpuBrain {
             return None;
         }
         let magic = u32::from_le_bytes(bytes[0..4].try_into().ok()?);
-        match magic {
+        let (mut brain, mut report) = match magic {
             BRAIN_MAGIC_V1 => Self::from_bytes_v1(&bytes[4..]),
             BRAIN_MAGIC_V2 => Self::from_bytes_v2(&bytes[4..]),
             _ => None,
+        }?;
+        brain.sanitize(&mut report);
+        Some((brain, report))
+    }
+
+    /// Bring a decoded brain back into its invariants.
+    ///
+    /// The framing is bounds-checked, but a structurally VALID blob can still
+    /// carry values the rest of the code assumes away. IndexedDB contents are
+    /// editable by anyone with devtools, and a corrupt write is possible
+    /// without any malice at all. The failure this guards is nastier than a
+    /// crash: a NaN round-trips intact, `prior_distribution` then returns
+    /// `[NaN; 4]`, every comparison goes false, argmax degrades to a constant,
+    /// and the CPU becomes *silently* useless — no panic, nothing reported,
+    /// just an opponent that stopped thinking.
+    ///
+    /// Same philosophy as the section decoder: drop the unusable part, keep
+    /// everything else, and report what was dropped.
+    fn sanitize(&mut self, report: &mut BrainRestore) {
+        let before_cpu = self.episodes.len();
+        self.episodes
+            .retain(|e| e.vector.iter().all(|v| v.is_finite()) && e.reward.is_finite());
+        report.cpu_episodes_dropped += before_cpu - self.episodes.len();
+
+        let before_opp = self.opp_brain.episodes.len();
+        self.opp_brain
+            .episodes
+            .retain(|e| e.vector.iter().all(|v| v.is_finite()));
+        report.opp_episodes_dropped += before_opp - self.opp_brain.episodes.len();
+
+        // A non-finite or negative tally poisons every prior that reads it.
+        // Zeroing yields a uniform prior, which is inert rather than wrong.
+        for tally in [&mut self.tally, &mut self.opp_brain.tally] {
+            if tally.iter().any(|v| !v.is_finite() || *v < 0.0) {
+                *tally = [0.0; 4];
+            }
+        }
+
+        // `record_player_move` trims to tail_len; a huge value makes the trim
+        // loop never fire and the tail grow without bound, a zero makes the
+        // pattern models silently blind.
+        self.tail_len = self.tail_len.clamp(1, 16);
+        while self.player_tail.len() > self.tail_len {
+            self.player_tail.pop_front();
+        }
+
+        // Accuracy is hits/total; hits > total reports above 100%.
+        self.opp_pred_hits = self.opp_pred_hits.min(self.opp_pred_total);
+
+        if self.ensemble.active >= ENSEMBLE_MODELS {
+            self.ensemble.active = 0;
+        }
+        for v in self
+            .ensemble
+            .num
+            .iter_mut()
+            .chain(self.ensemble.den.iter_mut())
+        {
+            if !v.is_finite() {
+                *v = 0.0;
+            }
+        }
+        if !self.ensemble.confidence.is_finite() {
+            self.ensemble.confidence = 0.0;
         }
     }
 
@@ -2739,6 +2803,39 @@ pub fn record_player_episode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A poisoned brain must degrade to a usable one, not to a silently
+    /// useless one. NaN is the dangerous case precisely because it does NOT
+    /// crash: it propagates through `prior_distribution`, makes every
+    /// comparison false, and leaves an opponent that has quietly stopped
+    /// thinking with nothing reported.
+    #[test]
+    fn a_poisoned_brain_is_sanitized_on_load() {
+        let mut brain = CpuBrain::new();
+        brain.remember([f32::NAN; CPU_FEATURE_DIM], Direction::Up, 1.0);
+        brain.remember([0.5; CPU_FEATURE_DIM], Direction::Down, 1.0);
+        brain
+            .opp_brain
+            .remember([f32::INFINITY; PLAYER_FEATURE_DIM], Direction::Left);
+        brain.tally = [f32::NAN; 4];
+        brain.tail_len = usize::MAX;
+        brain.opp_pred_hits = 900;
+        brain.opp_pred_total = 10;
+        brain.ensemble.active = 999;
+
+        let (clean, report) = CpuBrain::from_bytes_report(&brain.to_bytes()).unwrap();
+
+        assert_eq!(clean.episodes.len(), 1, "the NaN episode is dropped");
+        assert!(report.cpu_episodes_dropped >= 1);
+        assert!(clean.opp_brain.episodes.is_empty(), "the Inf episode is dropped");
+        assert!(
+            clean.prior_distribution().iter().all(|p| p.is_finite()),
+            "a poisoned tally must not yield a NaN prior"
+        );
+        assert!((1..=16).contains(&clean.tail_len));
+        assert!(clean.opp_pred_accuracy() <= 1.0, "accuracy cannot exceed 100%");
+        assert!(clean.ensemble.active < ENSEMBLE_MODELS);
+    }
 
     /// A blast is dangerous while escape is still possible, and the CPU has to
     /// react during that window — not after it closes. The old check fired at

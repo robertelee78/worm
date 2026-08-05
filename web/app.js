@@ -16,14 +16,12 @@ const CELL_EMPTY = 0, CELL_WALL = 1, CELL_PLAYER = 2, CELL_CPU = 3, CELL_FOOD = 
 
 /* ---------------- per-player identity + brain store ---------------- */
 
-let deviceId = localStorage.getItem('worm_device_id');
-if (!deviceId) {
-  deviceId = (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random());
-  localStorage.setItem('worm_device_id', deviceId);
-}
+// Resolved by resolveIdentity() before anything reads it. Deliberately not
+// initialised from localStorage at module scope any more — see below.
+let deviceId = null;
 
 const dbPromise = new Promise((resolve, reject) => {
-  const rq = indexedDB.open('worm_brain_db', 2);
+  const rq = indexedDB.open('worm_brain_db', 3);
   rq.onupgradeneeded = () => {
     const db = rq.result;
     if (!db.objectStoreNames.contains('brains')) db.createObjectStore('brains');
@@ -31,12 +29,59 @@ const dbPromise = new Promise((resolve, reject) => {
       const rounds = db.createObjectStore('rounds', { keyPath: 'id' });
       rounds.createIndex('deviceEnded', ['deviceId', 'endedAt']);
     }
+    // v3: identity moves in here, beside the data it keys.
+    if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta');
   };
   rq.onsuccess = () => resolve(rq.result);
   rq.onerror = () => reject(rq.error);
 });
 
+/**
+ * Resolve the player identity, preferring IndexedDB.
+ *
+ * The id used to live in localStorage while the brain it keys lives in
+ * IndexedDB. Those have DIFFERENT EVICTION POLICIES — Safari's ITP clears
+ * localStorage after seven days without interaction, IndexedDB survives — so a
+ * player returning after a break got a freshly minted id, while the brain they
+ * had spent twenty matches teaching sat unreachable under the old key,
+ * consuming quota forever. No corruption required, just time. For a game whose
+ * premise is that the opponent remembers you, that is the worst bug in the
+ * codebase.
+ *
+ * Identity now lives beside the brain so the two share a fate. The
+ * localStorage read is kept as a ONE-TIME ADOPTION: shipping this without it
+ * would orphan every existing player in the very release that fixes orphaning.
+ */
+async function resolveIdentity() {
+  const mint = () =>
+    crypto.randomUUID ? crypto.randomUUID() : String(Date.now()) + Math.random();
+  try {
+    const db = await dbPromise;
+    const stored = await new Promise((resolve) => {
+      const rq = db.transaction('meta', 'readonly').objectStore('meta').get('profileId');
+      rq.onsuccess = () => resolve(rq.result || null);
+      rq.onerror = () => resolve(null);
+    });
+    if (stored) {
+      deviceId = stored;
+    } else {
+      deviceId = localStorage.getItem('worm_device_id') || mint();
+      db.transaction('meta', 'readwrite').objectStore('meta').put(deviceId, 'profileId');
+    }
+  } catch {
+    // No IndexedDB at all — degrade rather than lose the session.
+    deviceId = localStorage.getItem('worm_device_id') || mint();
+  }
+  // Mirrored for diagnostics and for the adoption path above. Never the
+  // source of truth.
+  try { localStorage.setItem('worm_device_id', deviceId); } catch { /* private mode */ }
+  // Ask the browser not to evict us under storage pressure.
+  try { navigator.storage?.persist?.(); } catch { /* not supported */ }
+  return deviceId;
+}
+
 async function brainRead() {
+  if (!deviceId) return null;
   try {
     const db = await dbPromise;
     return await new Promise((resolve) => {
@@ -48,6 +93,7 @@ async function brainRead() {
 }
 
 async function brainWrite(bytes) {
+  if (!deviceId) return;
   try {
     const db = await dbPromise;
     db.transaction('brains', 'readwrite').objectStore('brains').put(bytes, deviceId);
@@ -244,6 +290,8 @@ function applyBoardLayout(layout) {
 
 async function boot() {
   await init();
+  // Must resolve before anything reads or writes a keyed store.
+  await resolveIdentity();
   const layout = measureBoardLayout();
   applyBoardLayout(layout);
   const seed = BigInt((Date.now() ^ (Math.random() * 0xffffffff)) >>> 0);
@@ -727,7 +775,7 @@ function renderHistory() {
 
 function setBrainStatus(msg) {
   document.getElementById('brain-status').textContent = `brain: ${msg}`;
-  document.getElementById('device-id').textContent = deviceId.slice(0, 8);
+  document.getElementById('device-id').textContent = (deviceId || '········').slice(0, 8);
 }
 setInterval(() => {
   if (game && !game.is_over()) {
@@ -736,6 +784,12 @@ setInterval(() => {
   }
 }, 10000);
 window.addEventListener('pagehide', () => { if (game) brainWrite(game.brain_save()); });
+// pagehide is not reliably delivered on mobile Safari when the app is
+// backgrounded or the tab is discarded; visibilitychange is. Belt and braces —
+// losing a round's learning is exactly the failure this game cannot afford.
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden' && game) brainWrite(game.brain_save());
+});
 
 // Safari changes visualViewport dimensions as browser chrome expands/collapses.
 // Keep presentation fitted without reconstructing the active WasmGame.

@@ -3,6 +3,8 @@
 export const memory: WebAssembly.Memory;
 export const __wbg_wasmgame_free: (a: number, b: number) => void;
 export const wasmgame_brain_load: (a: number, b: number, c: number) => number;
+export const wasmgame_brain_restore_summary: (a: number) => [number, number];
+export const wasmgame_brain_restore_was_partial: (a: number) => number;
 export const wasmgame_brain_save: (a: number) => [number, number];
 export const wasmgame_fire: (a: number) => number;
 export const wasmgame_frame_delay_ms: (a: number) => bigint;

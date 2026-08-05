@@ -19,11 +19,42 @@ use worm::{Direction, WormGame};
 
 /// Per-player brain file (the terminal player's cross-session corpus).
 /// Override with WORM_BRAIN=/path/to/file.
+///
+/// Lives under `$XDG_DATA_HOME/worm` (or `~/.local/share/worm`). It used to
+/// default to a RELATIVE `worm_brain.bin`, so launching the game from a
+/// different directory silently started a brand-new brain and orphaned the
+/// old one — a data-loss bug in a game whose entire premise is that the
+/// opponent remembers you across sessions.
 #[cfg(not(target_arch = "wasm32"))]
 fn brain_path() -> std::path::PathBuf {
-    std::env::var("WORM_BRAIN")
+    if let Ok(explicit) = std::env::var("WORM_BRAIN") {
+        return std::path::PathBuf::from(explicit);
+    }
+    let dir = std::env::var("XDG_DATA_HOME")
         .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::path::PathBuf::from("worm_brain.bin"))
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| ".".into()))
+                .join(".local/share")
+        })
+        .join("worm");
+    let _ = std::fs::create_dir_all(&dir);
+    dir.join("worm_brain.bin")
+}
+
+/// Where to LOAD from: the current location, else the legacy relative file in
+/// the working directory. A player upgrading past this change keeps the brain
+/// they earned; the next save rewrites it to the stable location.
+#[cfg(not(target_arch = "wasm32"))]
+fn brain_load_path() -> std::path::PathBuf {
+    let current = brain_path();
+    if current.exists() {
+        return current;
+    }
+    let legacy = std::path::PathBuf::from("worm_brain.bin");
+    if legacy.exists() {
+        return legacy;
+    }
+    current
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -150,7 +181,7 @@ fn main() -> std::io::Result<()> {
     let mut game = WormGame::new();
     // Per-player memory: the brain from previous sessions rides again
     // (rps-ai: "what someone opens with is a habit, it is stored").
-    if let Some(brain) = worm::CpuBrain::load_file(&brain_path()) {
+    if let Some(brain) = worm::CpuBrain::load_file(&brain_load_path()) {
         game.cpu_brain = brain;
     }
     let mut last_update = Instant::now();
@@ -227,8 +258,16 @@ fn main() -> std::io::Result<()> {
                 Some((key, n)) => {
                     match key {
                         PlayKey::Dir(d) => game.change_direction(d),
+                        // Firing is gated on !paused. It was not, and the game
+                        // clock is: only update() is skipped while paused, so
+                        // a paused player could fire a laser in frozen time —
+                        // and a laser kill ends the game outright. Direction
+                        // input stays live because it only latches a pending
+                        // turn that the next frame would apply anyway.
                         PlayKey::Fire => {
-                            let _ = game.fire_powerup(0);
+                            if !paused {
+                                let _ = game.fire_powerup(0);
+                            }
                         }
                         PlayKey::Pause => {
                             paused = !paused;

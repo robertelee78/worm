@@ -6,8 +6,25 @@ export class WasmGame {
     [Symbol.dispose](): void;
     /**
      * Restore a previously exported brain (deviceId-keyed corpus).
+     *
+     * A brain written by an older build is MIGRATED, not rejected: sections
+     * whose schema this build no longer understands are dropped individually
+     * while the player's habit priors and head-to-head record carry forward.
+     * Call [`brain_restore_summary`](Self::brain_restore_summary) afterwards
+     * for a line to show the player.
      */
     brain_load(bytes: Uint8Array): boolean;
+    /**
+     * Human-readable outcome of the last `brain_load` (empty before one).
+     * Shown in the brain panel so a returning player can see the opponent
+     * still remembers them — and, after a schema change, exactly what was
+     * carried forward versus reset.
+     */
+    brain_restore_summary(): string;
+    /**
+     * True when the last `brain_load` had to discard some learned state.
+     */
+    brain_restore_was_partial(): boolean;
     /**
      * Per-player brain export → IndexedDB.
      */
@@ -63,6 +80,8 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly __wbg_wasmgame_free: (a: number, b: number) => void;
     readonly wasmgame_brain_load: (a: number, b: number, c: number) => number;
+    readonly wasmgame_brain_restore_summary: (a: number) => [number, number];
+    readonly wasmgame_brain_restore_was_partial: (a: number) => number;
     readonly wasmgame_brain_save: (a: number) => [number, number];
     readonly wasmgame_fire: (a: number) => number;
     readonly wasmgame_frame_delay_ms: (a: number) => bigint;

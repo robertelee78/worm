@@ -13,6 +13,12 @@ export class WasmGame {
     }
     /**
      * Restore a previously exported brain (deviceId-keyed corpus).
+     *
+     * A brain written by an older build is MIGRATED, not rejected: sections
+     * whose schema this build no longer understands are dropped individually
+     * while the player's habit priors and head-to-head record carry forward.
+     * Call [`brain_restore_summary`](Self::brain_restore_summary) afterwards
+     * for a line to show the player.
      * @param {Uint8Array} bytes
      * @returns {boolean}
      */
@@ -20,6 +26,33 @@ export class WasmGame {
         const ptr0 = passArray8ToWasm0(bytes, wasm.__wbindgen_malloc);
         const len0 = WASM_VECTOR_LEN;
         const ret = wasm.wasmgame_brain_load(this.__wbg_ptr, ptr0, len0);
+        return ret !== 0;
+    }
+    /**
+     * Human-readable outcome of the last `brain_load` (empty before one).
+     * Shown in the brain panel so a returning player can see the opponent
+     * still remembers them — and, after a schema change, exactly what was
+     * carried forward versus reset.
+     * @returns {string}
+     */
+    brain_restore_summary() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.wasmgame_brain_restore_summary(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
+     * True when the last `brain_load` had to discard some learned state.
+     * @returns {boolean}
+     */
+    brain_restore_was_partial() {
+        const ret = wasm.wasmgame_brain_restore_was_partial(this.__wbg_ptr);
         return ret !== 0;
     }
     /**
