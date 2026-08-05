@@ -1,7 +1,7 @@
 # ADR-004: Fix the CPU's Fundamentals Before Teaching It Anything
 
 ## Status
-In Progress
+Implemented
 
 ## Date
 2026-08-05
@@ -131,6 +131,32 @@ sudden death starts at 3,000. Pinned by
 `test_ring_seal_eta_reports_the_scheduled_ring` and
 `test_cpu_steps_off_a_ring_that_is_about_to_seal`.
 
+### 4. Death no longer credits the fatal direction — SHIPPED (measurement-neutral)
+
+`observe` only credits the prior when `reward > 0.0`.
+
+Deliberately *not* claimed: that this pushes the prior away from the fatal
+direction. With a Laplace-smoothed prior, decaying the other three directions
+slightly *raises* an uncredited direction's relative share. The first draft of
+the test asserted the share must fall, and failed — which is how that subtlety
+surfaced. Actively penalising a death belongs to a death-memory, not to a
+counter that only knows how to add. The guarantee here is narrow and real:
+dying never *earns* credit.
+
+### 5. Bomb threat is escapability, not imminence — SHIPPED
+
+`cell_threatened_by_bomb` asked "is it about to go off?" (`fuse <= frames_ahead+1`,
+sole caller passing 3, so it reacted at `fuse <= 4`). Against a 26–85 frame fuse
+and an 11-move escape from a Chebyshev radius of 10, the blast zone was
+invisible for the entire window in which leaving it was still achievable, and
+visible only once escape was already impossible.
+
+Now: `moves_to_clear = r + 1 - chebyshev(cell, bomb)` versus
+`frames_left = fuse - frames_ahead`. Threatened iff the cell cannot be vacated
+in time. This grades with depth — the outer ring of a 3-frame blast is safe
+(one move to clear), the centre is not (eleven) — which the old boolean could
+not express.
+
 ## Consequences
 
 Fixing fundamentals is a prerequisite for the learning work, not a parallel
@@ -143,9 +169,25 @@ learning architecture changes.
 The `chaser` matchup is untouched by fix 1 and remains at ~8%. That is a
 distinct failure — head-on collision discipline — tracked separately.
 
+### What this milestone did NOT fix
+
+The `chaser` matchup is 7.0% → 8.0%, i.e. untouched. Games against it end in
+~280 frames with both cycles at length ~2, which is a head-on collision
+problem, not a survival or economy one. `close_ring` never runs, the escape
+floor never binds, and no bomb is ever planted. None of the five fixes could
+have moved it, and none is claimed to. Head-on discipline is separate work.
+
+Four of the five fixes are measurement-neutral on the current benchmark. That
+is a property of the benchmark, not evidence the fixes are inert: games end
+around frame 610, so sudden death (frame 3,000) never fires, constrained space
+is never reached, and the scripted opponents never fire a power-up. Each is
+instead pinned by a test that reaches the state directly. Extending the
+harness to produce long games and power-up traffic is the honest next step for
+this milestone's evidence.
+
 ## Verification
 
-`cargo test` — 77 tests pass after each change. Win-rate deltas are measured on
+`cargo test` — 86 tests pass (from 77), 9 added by this milestone. Win-rate deltas are measured on
 fixed seeds; per an independent replication, baseline variance across nominally
 identical unseeded runs can reach tens of points, so only seeded comparisons are
 reported here and deltas under ~10pp are not claimed.

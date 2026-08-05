@@ -1648,17 +1648,28 @@ fn cell_threatened_by_bomb(game: &WormGame, x: u16, y: u16, frames_ahead: u8) ->
         if b.owner == 1 {
             continue;
         }
-        // Bomb detonates when fuse reaches 0. Each frame fuse decreases by 1,
-        // so a bomb at fuse=1 goes off during THIS frame's tick — a cell the
-        // CPU steps onto now is threatened at frames_ahead=0. Count the
-        // current frame's tick by comparing against frames_ahead + 1.
-        let frames_to_detonate = b.fuse;
-        if frames_to_detonate <= frames_ahead as u32 + 1 {
-            let dx = (x as i32 - b.x as i32).abs();
-            let dy = (y as i32 - b.y as i32).abs();
-            if dx <= r && dy <= r {
-                return true;
-            }
+        let dx = (x as i32 - b.x as i32).abs();
+        let dy = (y as i32 - b.y as i32).abs();
+        let cheb = dx.max(dy);
+        if cheb > r {
+            continue; // outside the blast entirely
+        }
+        // ESCAPABILITY, not imminence.
+        //
+        // This used to ask "is it about to go off?" — `fuse <= frames_ahead+1`,
+        // with the only caller passing 3, so the CPU reacted at fuse<=4. The
+        // fuse is 26-85 frames (BOMB_FUSE_MS / frame_delay) and clearing a
+        // Chebyshev radius of 10 takes 11 moves, so by the time the old check
+        // fired, escape was already impossible. The blast zone was invisible
+        // for the entire window in which leaving it was still achievable.
+        //
+        // The answerable question is whether the cell can be vacated before
+        // detonation: leaving costs `r + 1 - cheb` moves, and there are `fuse`
+        // frames left (less the lead time we are evaluating at).
+        let moves_to_clear = (r + 1 - cheb) as u32;
+        let frames_left = b.fuse.saturating_sub(frames_ahead as u32);
+        if moves_to_clear > frames_left {
+            return true;
         }
     }
     false
@@ -2728,6 +2739,66 @@ pub fn record_player_episode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A blast is dangerous while escape is still possible, and the CPU has to
+    /// react during that window — not after it closes. The old check fired at
+    /// `fuse <= 4` against a 26-85 frame fuse and an 11-move escape, so it only
+    /// ever reported blasts that were already unsurvivable.
+    #[test]
+    fn bomb_threat_is_escapability_not_imminence() {
+        let mut game = WormGame::with_size(120, 38);
+        let r = crate::game::BOMB_RADIUS_CELLS as u16;
+
+        // Deep inside the blast with a fuse far too short to walk out of.
+        game.bombs.push(crate::game::Bomb {
+            x: 60,
+            y: 20,
+            fuse: 2,
+            owner: 0,
+        });
+        assert!(
+            cell_threatened_by_bomb(&game, 60, 20, 0),
+            "standing on a bomb that fires in 2 frames is not survivable"
+        );
+
+        // Same cell, same bomb, but a long fuse: leaving is achievable, so the
+        // cell must not be treated as lethal or the CPU freezes.
+        game.bombs[0].fuse = 200;
+        assert!(
+            !cell_threatened_by_bomb(&game, 60, 20, 0),
+            "a long fuse leaves time to clear the radius"
+        );
+
+        // Just outside the radius is never threatened, whatever the fuse.
+        game.bombs[0].fuse = 1;
+        assert!(
+            !cell_threatened_by_bomb(&game, 60 + r + 1, 20, 0),
+            "outside the blast is outside the blast"
+        );
+    }
+
+    /// The edge of the blast is escapable in one move; the centre is not.
+    /// Encodes the gradient the old imminence check could not express.
+    #[test]
+    fn bomb_threat_grades_with_depth_into_the_blast() {
+        let mut game = WormGame::with_size(120, 38);
+        let r = crate::game::BOMB_RADIUS_CELLS as u16;
+        game.bombs.push(crate::game::Bomb {
+            x: 60,
+            y: 20,
+            fuse: 3,
+            owner: 0,
+        });
+
+        assert!(
+            !cell_threatened_by_bomb(&game, 60 + r, 20, 0),
+            "the outermost ring needs one move to clear and has three frames"
+        );
+        assert!(
+            cell_threatened_by_bomb(&game, 60, 20, 0),
+            "the centre needs eleven moves and has three frames"
+        );
+    }
 
     /// Dying must never make the fatal direction *more* attractive. The k-NN
     /// vote already zero-weights crash episodes; the direction prior did not,
