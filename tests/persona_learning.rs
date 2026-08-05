@@ -52,15 +52,16 @@ fn right_of(d: Direction) -> Direction {
     }
 }
 
+/// Can the player step this way?
+///
+/// MUST use the game's own legality rule, not a hand-rolled `passable()`
+/// check. The game additionally permits stepping onto a tail tip that is about
+/// to vacate; a persona that does not model that will turn where the game
+/// would have let it continue, and then the CPU — correctly predicting
+/// "straight is still available" — looks wrong for being right. That
+/// disagreement cost 35 of 94 habit frames before it was caught.
 fn can_step(game: &WormGame, d: Direction) -> bool {
-    let (hx, hy) = game.cycles[0].head;
-    let (dx, dy) = d.as_delta();
-    let (nx, ny) = (hx as i16 + dx, hy as i16 + dy);
-    nx >= 0
-        && ny >= 0
-        && nx < game.width as i16
-        && ny < game.height as i16
-        && game.passable(nx as u16, ny as u16)
+    worm::legal_options_from(game, 0, game.cycles[0].direction).contains(&d)
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -145,6 +146,14 @@ struct Result {
     habit_hits: u32,
     /// Uniform chance summed over the habit frames actually seen.
     expected: f32,
+    /// Diagnostics: what the persona did, and what the CPU predicted, at
+    /// habit frames only — as TURNS relative to the persona's heading.
+    persona_turn: [u32; 3],
+    cpu_turn: [u32; 3],
+    /// The learned relative-turn prior at the end of the run.
+    turn_prior: [f32; 3],
+    /// Habit frames where the CPU issued no forecast at all.
+    no_forecast: u32,
 }
 
 impl Result {
@@ -171,7 +180,15 @@ impl Result {
 fn play(persona: Persona, games: u32, seed: u64) -> Result {
     let mut game = WormGame::with_size_seed(120, 38, seed);
     let mut rng = Rng(seed ^ 0x9E37_79B9);
-    let mut out = Result { habit_frames: 0, habit_hits: 0, expected: 0.0 };
+    let mut out = Result {
+        habit_frames: 0,
+        habit_hits: 0,
+        expected: 0.0,
+        persona_turn: [0; 3],
+        cpu_turn: [0; 3],
+        turn_prior: [0.0; 3],
+        no_forecast: 0,
+    };
 
     for g in 0..games {
         if g > 0 {
@@ -183,22 +200,40 @@ fn play(persona: Persona, games: u32, seed: u64) -> Result {
             // How many ways the persona could have gone — the honest
             // denominator for "could it have guessed?".
             let options = worm::option_count(&game, 0).max(1);
+            let heading_before = game.cycles[0].direction;
 
             game.change_direction(mv.dir);
             game.update();
             frames += 1;
 
             if mv.habit_frame {
-                if let Some(scored) = game.cpu_telemetry.scored {
-                    out.habit_frames += 1;
-                    out.expected += 1.0 / options as f32;
-                    if scored.hit {
-                        out.habit_hits += 1;
+                let ti = |t: worm::Turn| match t {
+                    worm::Turn::Straight => 0,
+                    worm::Turn::Left => 1,
+                    worm::Turn::Right => 2,
+                };
+                if let Some(t) = worm::Turn::from_dirs(heading_before, mv.dir) {
+                    out.persona_turn[ti(t)] += 1;
+                }
+                match game.cpu_telemetry.scored {
+                    Some(scored) => {
+                        out.habit_frames += 1;
+                        out.expected += 1.0 / options as f32;
+                        if scored.hit {
+                            out.habit_hits += 1;
+                        }
+                        if let Some(p) = scored.forecast.predicted {
+                            if let Some(t) = worm::Turn::from_dirs(heading_before, p) {
+                                out.cpu_turn[ti(t)] += 1;
+                            }
+                        }
                     }
+                    None => out.no_forecast += 1,
                 }
             }
         }
     }
+    out.turn_prior = game.cpu_brain.opp_brain.turn_prior();
     out
 }
 
@@ -209,6 +244,15 @@ fn report(name: &str, r: &Result) {
         r.rate() * 100.0,
         r.chance() * 100.0,
         r.z()
+    );
+    println!(
+        "    persona turns at habit frames  S{} L{} R{}   |  cpu predicted  S{} L{} R{}   |  no-forecast {}",
+        r.persona_turn[0], r.persona_turn[1], r.persona_turn[2],
+        r.cpu_turn[0], r.cpu_turn[1], r.cpu_turn[2], r.no_forecast
+    );
+    println!(
+        "    learned turn prior  straight {:.3}  left {:.3}  right {:.3}",
+        r.turn_prior[0], r.turn_prior[1], r.turn_prior[2]
     );
 }
 
@@ -232,6 +276,15 @@ fn positive_control_an_absolute_habit_is_learned() {
         r.rate() * 100.0,
         r.chance() * 100.0,
         r.z()
+    );
+    println!(
+        "    persona turns at habit frames  S{} L{} R{}   |  cpu predicted  S{} L{} R{}   |  no-forecast {}",
+        r.persona_turn[0], r.persona_turn[1], r.persona_turn[2],
+        r.cpu_turn[0], r.cpu_turn[1], r.cpu_turn[2], r.no_forecast
+    );
+    println!(
+        "    learned turn prior  straight {:.3}  left {:.3}  right {:.3}",
+        r.turn_prior[0], r.turn_prior[1], r.turn_prior[2]
     );
 }
 
@@ -259,25 +312,33 @@ fn null_control_an_opponent_with_no_habit_is_not_learned() {
         r.chance() * 100.0,
         r.z()
     );
+    println!(
+        "    persona turns at habit frames  S{} L{} R{}   |  cpu predicted  S{} L{} R{}   |  no-forecast {}",
+        r.persona_turn[0], r.persona_turn[1], r.persona_turn[2],
+        r.cpu_turn[0], r.cpu_turn[1], r.cpu_turn[2], r.no_forecast
+    );
+    println!(
+        "    learned turn prior  straight {:.3}  left {:.3}  right {:.3}",
+        r.turn_prior[0], r.turn_prior[1], r.turn_prior[2]
+    );
 }
 
-/// THE ACCEPTANCE TEST FOR THE PRODUCT GOAL — currently failing, deliberately.
+/// THE ACCEPTANCE TEST FOR THE PRODUCT GOAL.
 ///
 /// "Breaks left when cornered" is a habit relative to the player's own
-/// heading. The model predicts ABSOLUTE directions, so a relative habit smears
-/// across all four of them and is unlearnable however much data it sees.
-/// Measured: lefty reads at ~38% against a 50% baseline — not merely unlearned
-/// but systematically WRONG, because the forecast defaults to the current
-/// heading and a turn frame is exactly where that is guaranteed to miss.
+/// heading. It was unlearnable while the model predicted absolute directions:
+/// left-of-Up and left-of-Right are different compass directions, so one habit
+/// smeared across four and cancelled. Measured then at ~38% against a 50%
+/// baseline — not merely unlearned but systematically WRONG, because the
+/// forecast defaulted to the current heading and a forced turn is exactly
+/// where that is guaranteed to miss.
 ///
-/// Un-ignore this when the opponent model is retargeted to relative turns.
-/// It is the definition of that work being done.
+/// With a relative turn prior consulted at forced turns it reads ~79% against
+/// the same 50% baseline. This test is the definition of that work being done,
+/// and it stays here to catch it regressing.
 #[test]
-#[ignore = "known failure: the model predicts absolute directions, so a \
-            heading-relative habit is unlearnable. Acceptance test for the \
-            Turn retarget."]
 fn acceptance_a_relative_turn_habit_is_learned() {
-    let r = play(Persona::Lefty, 40, 20260805);
+    let r = play(Persona::Lefty, 60, 20260805);
     report("lefty (ACCEPTANCE)", &r);
 
     assert!(
@@ -291,5 +352,14 @@ fn acceptance_a_relative_turn_habit_is_learned() {
         r.rate() * 100.0,
         r.chance() * 100.0,
         r.z()
+    );
+    println!(
+        "    persona turns at habit frames  S{} L{} R{}   |  cpu predicted  S{} L{} R{}   |  no-forecast {}",
+        r.persona_turn[0], r.persona_turn[1], r.persona_turn[2],
+        r.cpu_turn[0], r.cpu_turn[1], r.cpu_turn[2], r.no_forecast
+    );
+    println!(
+        "    learned turn prior  straight {:.3}  left {:.3}  right {:.3}",
+        r.turn_prior[0], r.turn_prior[1], r.turn_prior[2]
     );
 }
