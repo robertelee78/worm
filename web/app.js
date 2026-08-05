@@ -7,6 +7,9 @@ import { computeBoardLayout } from './layout.js';
 
 let CELL = 14; // recomputed by boardDims() to fit the viewport
 const MATCH_TARGET = 3;
+const STATE_SCHEMA_VERSION = 1;
+const ROUND_SCHEMA_VERSION = 1;
+const MAX_ROUND_HISTORY = 200;
 const MODEL_NAMES = ['rep', 'pat', 'frq', 'due', 'wlR', 'wlL', 'knn'];
 const DIR_GLYPH = ['▲', '▼', '◀', '▶'];
 const CELL_EMPTY = 0, CELL_WALL = 1, CELL_PLAYER = 2, CELL_CPU = 3, CELL_FOOD = 4, CELL_HOLE = 5, CELL_POWERUP = 6;
@@ -20,8 +23,15 @@ if (!deviceId) {
 }
 
 const dbPromise = new Promise((resolve, reject) => {
-  const rq = indexedDB.open('worm_brain_db', 1);
-  rq.onupgradeneeded = () => rq.result.createObjectStore('brains');
+  const rq = indexedDB.open('worm_brain_db', 2);
+  rq.onupgradeneeded = () => {
+    const db = rq.result;
+    if (!db.objectStoreNames.contains('brains')) db.createObjectStore('brains');
+    if (!db.objectStoreNames.contains('rounds')) {
+      const rounds = db.createObjectStore('rounds', { keyPath: 'id' });
+      rounds.createIndex('deviceEnded', ['deviceId', 'endedAt']);
+    }
+  };
   rq.onsuccess = () => resolve(rq.result);
   rq.onerror = () => reject(rq.error);
 });
@@ -44,6 +54,48 @@ async function brainWrite(bytes) {
   } catch { /* persistence is best-effort */ }
 }
 
+function validRound(record) {
+  return record && record.schemaVersion === ROUND_SCHEMA_VERSION &&
+    record.deviceId === deviceId && typeof record.id === 'string' &&
+    Number.isFinite(record.endedAt) && Number.isInteger(record.frames) &&
+    Array.isArray(record.foodEaten) && record.foodEaten.length === 2 &&
+    record.accuracy && Number.isInteger(record.accuracy.samples) &&
+    Array.isArray(record.models) && record.models.length === MODEL_NAMES.length;
+}
+
+async function roundsRead() {
+  try {
+    const db = await dbPromise;
+    const records = await new Promise((resolve) => {
+      const rq = db.transaction('rounds', 'readonly').objectStore('rounds').getAll();
+      rq.onsuccess = () => resolve(rq.result || []);
+      rq.onerror = () => resolve([]);
+    });
+    return records
+      .filter(validRound)
+      .sort((a, b) => b.endedAt - a.endedAt)
+      .slice(0, MAX_ROUND_HISTORY);
+  } catch { return []; }
+}
+
+async function roundWrite(record) {
+  if (!validRound(record)) return;
+  try {
+    const db = await dbPromise;
+    const tx = db.transaction('rounds', 'readwrite');
+    const store = tx.objectStore('rounds');
+    store.put(record);
+    const rq = store.getAll();
+    rq.onsuccess = () => {
+      rq.result
+        .filter((candidate) => candidate.deviceId === deviceId)
+        .sort((a, b) => b.endedAt - a.endedAt)
+        .slice(MAX_ROUND_HISTORY)
+        .forEach((candidate) => store.delete(candidate.id));
+    };
+  } catch { /* persistence is best-effort */ }
+}
+
 /* ---------------- boot ---------------- */
 
 const sfx = new Sfx();
@@ -57,28 +109,31 @@ let cols = 0, rows = 0;
 let state = null;
 let overHandled = false;
 let roundMemoryStart = null;
+let roundHistory = [];
 const bombMaxFuse = new Map(); // "x,y" → max fuse seen (fuse arc countdown)
 
-function boardDims() {
-  // Reserve the brain column when it sits beside the arena. The resulting
-  // logical board stays fixed for this game; CSS owns live browser resizing so
-  // an orientation/viewport change never destroys the active round.
+function measureBoardLayout() {
   const viewport = window.visualViewport || window;
-  const layout = computeBoardLayout(viewport.width || window.innerWidth, viewport.height || window.innerHeight);
+  return computeBoardLayout(viewport.width || window.innerWidth, viewport.height || window.innerHeight);
+}
+
+function applyBoardLayout(layout) {
   ({ cols, rows, cell: CELL } = layout);
-  return layout;
+  canvas.width = off.width = cols * CELL;
+  canvas.height = off.height = rows * CELL;
+  canvas.dataset.cols = String(cols);
+  canvas.dataset.rows = String(rows);
+  canvas.dataset.cell = String(CELL);
+  document.getElementById('screen').style.aspectRatio = `${cols} / ${rows}`;
+  bombMaxFuse.clear();
 }
 
 async function boot() {
   await init();
-  const layout = boardDims();
+  const layout = measureBoardLayout();
+  applyBoardLayout(layout);
   const seed = BigInt((Date.now() ^ (Math.random() * 0xffffffff)) >>> 0);
   game = new WasmGame(cols, rows, seed);
-  canvas.width = off.width = cols * CELL;
-  canvas.height = off.height = rows * CELL;
-  // The screen, canvas, CRT layers, and overlays share one responsive box.
-  // CSS scales this aspect-ratio box continuously without touching WasmGame.
-  document.getElementById('screen').style.aspectRatio = `${layout.cols} / ${layout.rows}`;
 
   const saved = await brainRead();
   if (saved && game.brain_load(saved)) {
@@ -86,6 +141,8 @@ async function boot() {
   } else {
     setBrainStatus('fresh brain — teach it by playing');
   }
+  roundHistory = await roundsRead();
+  renderHistory();
 
   sfx.insertCoin(); // no-op pre-gesture; tryCoin() replays it after unlock
   roundStartAudio();
@@ -142,9 +199,10 @@ document.getElementById('next-round-btn').addEventListener('click', () => {
   if (game && game.is_over() && !championVisible()) nextRound();
 });
 document.getElementById('new-match-btn').addEventListener('click', () => {
-  game.reset_match();
+  const layout = measureBoardLayout();
+  game.reset_match_with_size(layout.cols, layout.rows);
+  applyBoardLayout(layout);
   document.getElementById('champion-overlay').classList.add('hidden');
-  document.getElementById('history-body').innerHTML = '';
   overHandled = false;
   roundMemoryStart = null;
   roundStartAudio();
@@ -155,7 +213,9 @@ function championVisible() {
 }
 
 function nextRound() {
-  game.restart();
+  const layout = measureBoardLayout();
+  game.restart_with_size(layout.cols, layout.rows);
+  applyBoardLayout(layout);
   overHandled = false;
   roundMemoryStart = null;
   document.getElementById('over-overlay').classList.add('hidden');
@@ -163,6 +223,17 @@ function nextRound() {
 }
 
 /* ---------------- game loop ---------------- */
+
+function readState() {
+  const parsed = JSON.parse(game.state_json());
+  const models = parsed?.brain?.models;
+  if (parsed?.schemaVersion !== STATE_SCHEMA_VERSION || !Array.isArray(models) ||
+      models.length !== MODEL_NAMES.length ||
+      models.some((model, index) => model.key !== MODEL_NAMES[index])) {
+    throw new Error(`Unsupported Worm state schema: ${parsed?.schemaVersion ?? 'missing'}`);
+  }
+  return parsed;
+}
 
 let last = performance.now();
 let acc = 0;
@@ -188,7 +259,7 @@ function loop(now) {
     delay = Number(game.frame_delay_ms());
     if (game.is_over() && !overHandled) onGameOver();
   }
-  state = JSON.parse(game.state_json());
+  state = readState();
   updateHum(state);
   render(state);
   hud(state);
@@ -279,9 +350,13 @@ function onGameOver() {
   overHandled = true;
   sfx.engineHum(false); // covers both the round-over and champion overlays
   humOn = false;
-  state = JSON.parse(game.state_json());
+  state = readState();
   brainWrite(game.brain_save());
-  pushHistory(state);
+  const record = roundRecord(state);
+  roundHistory.unshift(record);
+  roundHistory = roundHistory.slice(0, MAX_ROUND_HISTORY);
+  renderHistory();
+  roundWrite(record);
 
   const youWon = state.winner === 0;
   const cpuWon = state.winner === 1;
@@ -291,8 +366,8 @@ function onGameOver() {
     `FOOD P1=${state.foodEaten[0]} P2=${state.foodEaten[1]} · ${state.frame} frames` +
     (state.cause ? ` — ${state.cause}` : '');
   document.getElementById('over-brain').textContent =
-    `BRAIN this round ${(state.brain.roundAcc * 100).toFixed(0)}%/${state.brain.samples[0]} · ` +
-    `${MODEL_INFO[state.brain.active].name} · ${state.brain.action}`;
+    `BRAIN this round ${(state.brain.accuracy.round.rate * 100).toFixed(0)}%/${state.brain.accuracy.round.samples} · ` +
+    `${state.brain.lastDecision?.forecast?.sourceName || 'no forecast'} · ${state.brain.lastDecision?.reason || 'no CPU decision'}`;
 
   if (state.wins[0] >= MATCH_TARGET || state.wins[1] >= MATCH_TARGET) {
     document.getElementById('champ-text').textContent =
@@ -366,68 +441,81 @@ function hud(s) {
 
   if (!modelRows) buildBrainPanel();
   const b = s.brain;
+  const next = b.nextForecast;
+  const decision = b.decision;
 
-  // Prediction in plain language.
-  document.getElementById('bp-pred').textContent = b.pred === null ? '·' : DIR_GLYPH[b.pred];
-  document.getElementById('bp-conf').style.width = `${(b.conf * 100).toFixed(0)}%`;
+  // The forward-looking forecast is explicitly separate from the action that
+  // already happened on this frame.
+  document.getElementById('bp-pred').textContent = next?.predicted == null ? '·' : DIR_GLYPH[next.predicted];
+  document.getElementById('bp-conf').style.width = `${((next?.confidence || 0) * 100).toFixed(0)}%`;
   document.getElementById('bp-confnum').textContent =
-    `${(b.conf * 100).toFixed(0)}% · n=${b.total[b.active]}`;
+    `${((next?.confidence || 0) * 100).toFixed(0)}% · n=${next ? b.models[next.sourceIndex].samples : 0}`;
 
-  const last = b.last || { pred: null, actual: null, hit: null };
+  const last = b.scored;
   const lastEl = document.getElementById('bp-last');
-  if (last.hit === null) {
+  if (!last) {
     lastEl.textContent = 'No prediction scored yet';
     lastEl.className = 'bp-last';
   } else {
     lastEl.textContent =
-      `${last.hit ? '✓' : '✗'} predicted ${DIR_GLYPH[last.pred]} · you went ${DIR_GLYPH[last.actual]}`;
+      `${last.hit ? '✓' : '✗'} ${last.sourceName} predicted ${DIR_GLYPH[last.predicted]} · you went ${DIR_GLYPH[last.actual]}`;
     lastEl.className = `bp-last ${last.hit ? 'hit' : 'miss'}`;
   }
 
   // Prediction source — the final movement reason is shown separately below.
   const driverEl = document.getElementById('bp-driver');
-  driverEl.textContent = MODEL_INFO[b.active].name;
-  if (b.active !== lastDriver && lastDriver !== -1) {
+  driverEl.textContent = next?.sourceName || '—';
+  const nextDriver = next?.sourceIndex ?? -1;
+  if (nextDriver !== lastDriver && lastDriver !== -1) {
     const wrap = document.getElementById('bp-driver-wrap');
     wrap.classList.remove('flash');
     void wrap.offsetWidth; // retrigger the CSS animation
     wrap.classList.add('flash');
   }
-  lastDriver = b.active;
-  document.getElementById('bp-action').textContent = b.action;
+  lastDriver = nextDriver;
+  const displayedDecision = decision || b.lastDecision;
+  const decisionEvidence = displayedDecision?.forecast?.sourceName
+    ? ` · used ${displayedDecision.forecast.sourceName}`
+    : '';
+  const decisionAge = !decision && displayedDecision ? `last frame ${displayedDecision.frame} · ` : '';
+  document.getElementById('bp-action').textContent = displayedDecision
+    ? `${decisionAge}${displayedDecision.reason} ${DIR_GLYPH[displayedDecision.heading]}${decisionEvidence}`
+    : 'no CPU decision this frame';
 
   // Per-model forecast, effective selection score, and current-round hit rate.
   for (let i = 0; i < modelRows.length; i++) {
     const { row, mark, hit, pred, score: scoreEl } = modelRows[i];
-    const rawScore = b.scores[i]; // -1..+1
-    const rankScore = b.rank[i];  // includes Deep Memory's warm bonus
+    const model = b.models[i];
+    const rawScore = model.rawScore;
+    const rankScore = model.effectiveScore;
     mark.style.left = `${((rawScore + 1) / 2 * 100).toFixed(0)}%`;
     mark.className = `bp-mmark ${rawScore >= 0 ? 'pos' : 'neg'}`;
-    hit.textContent = b.total[i] > 0 ? `${((b.hits[i] / b.total[i]) * 100).toFixed(0)}% · ${b.total[i]}` : '—';
-    pred.textContent = b.preds[i] === null ? '·' : DIR_GLYPH[b.preds[i]];
+    hit.textContent = model.samples > 0 ? `${((model.hits / model.samples) * 100).toFixed(0)}% · ${model.samples}` : '—';
+    pred.textContent = model.predicted === null ? '·' : DIR_GLYPH[model.predicted];
     scoreEl.textContent = `${rankScore >= 0 ? '+' : ''}${rankScore.toFixed(2)}`;
     scoreEl.title = i === 6 && rankScore !== rawScore
       ? `raw ${rawScore.toFixed(2)} + warm-memory bonus`
       : 'quadratic recent score';
-    row.className = `bp-model${i === b.active ? ' active' : ''}`;
+    row.className = `bp-model${i === nextDriver ? ' active' : ''}`;
   }
 
-  const [warmNow, warmAt] = b.warm;
-  document.getElementById('bp-warm').textContent = warmNow >= warmAt
+  const warmNow = b.memory.warmSamples;
+  const warmAt = b.memory.warmAt;
+  document.getElementById('bp-warm').textContent = b.memory.ready
     ? 'Deep memory READY'
     : `Deep memory warming — ${warmNow}/${warmAt} situations`;
   document.getElementById('bp-mem').textContent =
-    `Lifetime moves observed: ${b.observed[1]} · retained: ${b.mem[1]}/${b.cap}`;
+    `Lifetime moves observed: ${b.memory.opponentObserved} · retained: ${b.memory.opponentRetained}/${b.memory.capacity}`;
   const habitIdx = b.habits.indexOf(Math.max(...b.habits));
   document.getElementById('bp-habit').textContent =
     `Your strongest direction habit: ${DIR_GLYPH[habitIdx]} ${(b.habits[habitIdx] * 100).toFixed(0)}%`;
   document.getElementById('bp-accnum').textContent =
-    `${(b.roundAcc * 100).toFixed(0)}% · n=${b.samples[0]}`;
-  document.getElementById('bp-acc').style.width = `${(b.roundAcc * 100).toFixed(0)}%`;
+    `${(b.accuracy.round.rate * 100).toFixed(0)}% · n=${b.accuracy.round.samples}`;
+  document.getElementById('bp-acc').style.width = `${(b.accuracy.round.rate * 100).toFixed(0)}%`;
   document.getElementById('bp-lifetime').textContent =
-    `Lifetime ${(b.lifetimeAcc * 100).toFixed(0)}% · n=${b.samples[1]} · chance 25%`;
+    `Lifetime ${(b.accuracy.lifetime.rate * 100).toFixed(0)}% · n=${b.accuracy.lifetime.samples} · chance 25%`;
 
-  if (roundMemoryStart === null) roundMemoryStart = b.observed[1];
+  if (roundMemoryStart === null) roundMemoryStart = b.memory.opponentObserved;
 
   // Held power-up: without this the browser player fires blind while the
   // terminal HUD shows PWR continuously (native render parity).
@@ -441,25 +529,80 @@ function hud(s) {
     `FOOD you ${s.foodEaten[0]} : cpu ${s.foodEaten[1]} │ frame ${s.frame} │ speed ${s.speed}%${heldTxt}`;
 }
 
-function pushHistory(s) {
+function roundRecord(s) {
+  const endedAt = Date.now();
+  const decision = s.brain.lastDecision;
+  return {
+    schemaVersion: ROUND_SCHEMA_VERSION,
+    id: `${deviceId}:${endedAt}:${crypto.randomUUID ? crypto.randomUUID() : Math.random()}`,
+    deviceId,
+    endedAt,
+    winner: s.winner,
+    cause: s.cause,
+    frames: s.frame,
+    foodEaten: [...s.foodEaten],
+    accuracy: { ...s.brain.accuracy.round },
+    decisionSourceKey: decision?.forecast?.sourceKey || null,
+    decisionSourceName: decision?.forecast?.sourceName || null,
+    decisionReason: decision?.reason || null,
+    decisionHeading: decision?.heading ?? null,
+    memoryDelta: Math.max(0, s.brain.memory.opponentObserved -
+      (roundMemoryStart ?? s.brain.memory.opponentObserved)),
+    models: s.brain.models.map((model) => ({
+      key: model.key,
+      name: model.name,
+      rawScore: model.rawScore,
+      effectiveScore: model.effectiveScore,
+      hits: model.hits,
+      samples: model.samples,
+    })),
+  };
+}
+
+function appendCell(row, value, className = '') {
+  const cell = document.createElement('td');
+  cell.textContent = String(value);
+  if (className) cell.className = className;
+  row.appendChild(cell);
+}
+
+function renderHistory() {
   const tbody = document.getElementById('history-body');
-  const tr = document.createElement('tr');
-  const winner = s.winner === 0 ? 'You' : s.winner === 1 ? 'CPU' : 'Draw';
-  const cls = s.winner === 0 ? 'you' : 'cpu';
-  const memoryDelta = Math.max(0, s.brain.observed[1] - (roundMemoryStart ?? s.brain.observed[1]));
-  tr.innerHTML =
-    `<td>${tbody.children.length + 1}</td>` +
-    `<td class="${cls}">${winner}</td>` +
-    `<td>${s.cause || '—'}</td>` +
-    `<td>${s.frame}</td>` +
-    `<td>${s.foodEaten[0]}</td>` +
-    `<td>${s.foodEaten[1]}</td>` +
-    `<td>${(s.brain.roundAcc * 100).toFixed(0)}% · n=${s.brain.samples[0]}</td>` +
-    `<td>${MODEL_INFO[s.brain.active].name}</td>` +
-    `<td>${s.brain.action}</td>` +
-    `<td>+${memoryDelta}</td>`;
-  tbody.prepend(tr);
-  while (tbody.children.length > 20) tbody.removeChild(tbody.lastChild);
+  while (tbody.children.length) tbody.removeChild(tbody.lastChild);
+  roundHistory.slice(0, 20).forEach((record, index) => {
+    const row = document.createElement('tr');
+    const winner = record.winner === 0 ? 'You' : record.winner === 1 ? 'CPU' : 'Draw';
+    appendCell(row, roundHistory.length - index);
+    appendCell(row, winner, record.winner === 0 ? 'you' : 'cpu');
+    appendCell(row, record.cause || '—');
+    appendCell(row, record.frames);
+    appendCell(row, record.foodEaten[0]);
+    appendCell(row, record.foodEaten[1]);
+    appendCell(row, `${(record.accuracy.rate * 100).toFixed(0)}% · n=${record.accuracy.samples}`);
+    appendCell(row, record.decisionSourceName || '—');
+    appendCell(row, record.decisionReason || 'no decision');
+    appendCell(row, `+${record.memoryDelta}`);
+    tbody.appendChild(row);
+  });
+
+  const aggregateHits = roundHistory.reduce((sum, record) => sum + record.accuracy.hits, 0);
+  const aggregateSamples = roundHistory.reduce((sum, record) => sum + record.accuracy.samples, 0);
+  const cpuWins = roundHistory.filter((record) => record.winner === 1).length;
+  const modelTotals = MODEL_NAMES.map((key, index) => roundHistory.reduce(
+    (total, record) => {
+      const model = record.models[index];
+      return { key, name: model.name, hits: total.hits + model.hits, samples: total.samples + model.samples };
+    },
+    { hits: 0, samples: 0 },
+  ));
+  const strongest = modelTotals
+    .filter((model) => model.samples > 0)
+    .sort((a, b) => (b.hits / b.samples) - (a.hits / a.samples))[0];
+  document.getElementById('history-summary').textContent = roundHistory.length
+    ? `${roundHistory.length} saved rounds · CPU wins ${((cpuWins / roundHistory.length) * 100).toFixed(0)}% · ` +
+      `prediction ${aggregateSamples ? ((aggregateHits / aggregateSamples) * 100).toFixed(0) : 0}%/${aggregateSamples} · ` +
+      `strongest ${strongest ? `${strongest.name} ${((strongest.hits / strongest.samples) * 100).toFixed(0)}%/${strongest.samples}` : '—'}`
+    : 'No saved rounds yet — your longitudinal evidence will appear here.';
 }
 
 function setBrainStatus(msg) {
@@ -469,7 +612,7 @@ function setBrainStatus(msg) {
 setInterval(() => {
   if (game && !game.is_over()) {
     brainWrite(game.brain_save());
-    if (state) setBrainStatus(`saved • observed ${state.brain.observed[1]} • lifetime ${(state.brain.lifetimeAcc * 100).toFixed(0)}%/${state.brain.samples[1]}`);
+    if (state) setBrainStatus(`saved • observed ${state.brain.memory.opponentObserved} • lifetime ${(state.brain.accuracy.lifetime.rate * 100).toFixed(0)}%/${state.brain.accuracy.lifetime.samples}`);
   }
 }, 10000);
 window.addEventListener('pagehide', () => { if (game) brainWrite(game.brain_save()); });
@@ -599,10 +742,11 @@ function render(s) {
     if (!s.bombs.some(([bx, by]) => `${bx},${by}` === key)) bombMaxFuse.delete(key);
   }
 
-  // The same five-frame path the CPU hunt layers consume. Cyan ghost cells
-  // make the live prediction visible and falsifiable on the arena itself.
-  for (let i = 0; i < s.brain.path.length; i++) {
-    const [x, y] = s.brain.path[i];
+  // The path is owned by this frame's decision, never by the separately
+  // computed next-frame forecast.
+  const decisionPath = s.brain.decision?.projection?.path || [];
+  for (let i = 0; i < decisionPath.length; i++) {
+    const [x, y] = decisionPath[i];
     const alpha = Math.max(0.1, 0.34 - i * 0.045);
     offCtx.fillStyle = `rgba(0, 255, 255, ${alpha})`;
     offCtx.fillRect(x * CELL + CELL * 0.28, y * CELL + CELL * 0.28, CELL * 0.44, CELL * 0.44);

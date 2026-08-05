@@ -1,50 +1,55 @@
-// Responsive arena sizing. Logical cells are chosen once when WasmGame is
-// constructed; CSS scales that stable board continuously as its grid column
-// changes, so browser resizes never reset an active round.
+// Responsive arena sizing. CSS scales the stable active board continuously;
+// the same calculation is applied to logical dimensions only at boot or a
+// round/new-match boundary, so a live resize never destroys an active round.
 
 export const BRAIN_PANEL_WIDTH = 310;
 export const LAYOUT_GAP = 18;
-export const SIDE_BY_SIDE_MIN = 980;
+export const SIDE_BY_SIDE_MIN = 1240;
 
 const PAGE_INLINE_GUTTER = 20;
-const BEZEL_INLINE_PADDING = 36;
-const MAX_ARENA_WIDTH = 1800;
-const MIN_CELL = 8;
-const MAX_CELL = 16;
-const MIN_COLS = 70;
-const MAX_COLS = 170;
-const MIN_ROWS = 28;
-const MAX_ROWS = 58;
+const WIDE_BEZEL_INLINE_PADDING = 36;
+const MIN_CELL = 10;
+const MAX_CELL = 32;
+const TARGET_COLS = 54;
+const TARGET_ROWS = 34;
+const MIN_COLS = 30;
+const MAX_COLS = 180;
+const MIN_ROWS = 24;
+const MAX_ROWS = 90;
 
 function clamp(value, min, max) {
   return Math.max(min, Math.min(max, value));
 }
 
 /**
- * Choose the logical board for a newly-created game.
+ * Choose the logical board for a newly-created game or round boundary.
  *
- * The returned `availableWidth` is the physical content width left for the
- * arena after page gutters, bezel padding, and (on wide screens) the CPU Brain
- * column. `displayScale` documents when CSS must shrink the minimum logical
- * board on a narrow phone; it never changes game state.
+ * The returned dimensions fill the physical arena budget while keeping a cell
+ * near a readable size. Wide displays gain board area instead of stopping at a
+ * fixed page cap; narrow displays reduce the logical grid before shrinking the
+ * cycles into near-invisible pixels.
  */
 export function computeBoardLayout(viewportWidth, viewportHeight) {
   const width = Math.max(320, Number(viewportWidth) || 0);
   const height = Math.max(480, Number(viewportHeight) || 0);
   const sideBySide = width >= SIDE_BY_SIDE_MIN;
   const panelReserve = sideBySide ? BRAIN_PANEL_WIDTH + LAYOUT_GAP : 0;
+  const bezelInlinePadding = sideBySide
+    ? WIDE_BEZEL_INLINE_PADDING
+    : clamp(width * 0.05, 16, WIDE_BEZEL_INLINE_PADDING);
   const availableWidth = Math.max(
-    280,
-    Math.min(width - PAGE_INLINE_GUTTER - BEZEL_INLINE_PADDING - panelReserve, MAX_ARENA_WIDTH),
+    270,
+    width - PAGE_INLINE_GUTTER - bezelInlinePadding - panelReserve,
   );
   const availableHeight = Math.max(height - 240, 320);
   const cell = clamp(
-    Math.floor(Math.min(availableWidth / 110, availableHeight / 44)),
+    Math.round(Math.min(availableWidth / TARGET_COLS, availableHeight / TARGET_ROWS)),
     MIN_CELL,
     MAX_CELL,
   );
   const cols = clamp(Math.floor(availableWidth / cell), MIN_COLS, MAX_COLS);
-  const rows = clamp(Math.floor(availableHeight / cell), MIN_ROWS, MAX_ROWS);
+  const physicalCell = availableWidth / cols;
+  const rows = clamp(Math.floor(availableHeight / physicalCell), MIN_ROWS, MAX_ROWS);
   const naturalWidth = cols * cell;
   const naturalHeight = rows * cell;
 
@@ -55,8 +60,9 @@ export function computeBoardLayout(viewportWidth, viewportHeight) {
     sideBySide,
     availableWidth,
     availableHeight,
+    physicalCell,
     naturalWidth,
     naturalHeight,
-    displayScale: Math.min(1, availableWidth / naturalWidth),
+    displayScale: Math.min(1, availableWidth / naturalWidth, availableHeight / naturalHeight),
   };
 }

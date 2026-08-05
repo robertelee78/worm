@@ -2,9 +2,12 @@ pub mod cpu_ai;
 pub mod game;
 #[cfg(feature = "wasm")]
 pub mod wasm_api;
+pub mod web_state;
 pub use cpu_ai::{
     count_open_space, cpu_decide, encode_player_context, encode_situation, legal_directions,
     predict_player_move, record_episode, record_player_episode, should_fire, wall_follow_decide,
-    CpuAggregate, CpuBrain, CpuEpisode, PlayerAggregate, PlayerBrain, PlayerEpisode, Recalled,
+    CpuAggregate, CpuBrain, CpuDecisionReason, CpuDecisionTrace, CpuEpisode, CpuFrameTelemetry,
+    ForecastTrace, PlayerAggregate, PlayerBrain, PlayerEpisode, PlayerProjection, Recalled,
+    ScoredForecast,
 };
 pub use game::{CellType, Direction, LightCycle, Particle, WormGame, FRAME_DELAY_MS};

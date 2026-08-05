@@ -27,9 +27,17 @@ export class WasmGame {
      */
     reset_match(): void;
     /**
+     * New match using the browser space available at this boundary.
+     */
+    reset_match_with_size(width: number, height: number): void;
+    /**
      * Next game in the match (banks the session scoreboard, keeps the brain).
      */
     restart(): void;
+    /**
+     * Next game using the browser space available at this round boundary.
+     */
+    restart_with_size(width: number, height: number): void;
     /**
      * 0=Up 1=Down 2=Left 3=Right (180s rejected game-side).
      */
@@ -40,8 +48,7 @@ export class WasmGame {
      */
     sfx_json(): string;
     /**
-     * Per-frame entities + HUD + brain state as JSON (positions, food,
-     * power-ups, bolts, bombs, particles, scores, ensemble panel).
+     * Versioned per-frame entities, HUD, and frame-coherent brain telemetry.
      */
     state_json(): string;
     /**
@@ -63,7 +70,9 @@ export interface InitOutput {
     readonly wasmgame_is_over: (a: number) => number;
     readonly wasmgame_new: (a: number, b: number, c: bigint) => number;
     readonly wasmgame_reset_match: (a: number) => void;
+    readonly wasmgame_reset_match_with_size: (a: number, b: number, c: number) => void;
     readonly wasmgame_restart: (a: number) => void;
+    readonly wasmgame_restart_with_size: (a: number, b: number, c: number) => void;
     readonly wasmgame_set_direction: (a: number, b: number) => void;
     readonly wasmgame_sfx_json: (a: number) => [number, number];
     readonly wasmgame_state_json: (a: number) => [number, number];

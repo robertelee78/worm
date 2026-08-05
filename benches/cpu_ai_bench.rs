@@ -3,7 +3,7 @@
 //! The rps-ai kata is "cold start -> adaptive -> learn -> measure honestly".
 //! Measuring honestly here means: do NOT pit the CPU against a suicidal random
 //! player (both sides "win" 100% and the number is meaningless). Instead both
-//! opponents are real players and we score **survival** (moves) and **food**,
+//! opponents are real players and we score **round frames** and **actual food**,
 //! the two quantities the reward function is actually optimizing.
 
 use worm::{CellType, Direction, WormGame};
@@ -12,10 +12,10 @@ mod ai {
     use super::*;
 
     /// Naive right-hand wall follower (baseline opponent / non-adaptive CPU).
-    pub fn wall_follow(game: &WormGame) -> Direction {
-        let cpu = &game.cycles[1];
-        let head = cpu.head;
-        let current_dir = cpu.direction;
+    pub fn wall_follow(game: &WormGame, who: usize) -> Direction {
+        let cycle = &game.cycles[who];
+        let head = cycle.head;
+        let current_dir = cycle.direction;
 
         let right_map = [
             (Direction::Up, Direction::Right),
@@ -131,12 +131,19 @@ mod ai {
 
 #[derive(Clone, Copy)]
 struct GameStats {
-    /// Frames survived before the game ended.
-    moves: u32,
-    /// Food the CPU ate.
+    /// Total round frames before an outcome or the deterministic cap.
+    frames: u32,
+    /// Actual food value eaten by the CPU (never its survival-weighted score).
     cpu_food: u32,
-    /// Whether the CPU was alive when the game ended.
-    cpu_survived: bool,
+    outcome: Outcome,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Outcome {
+    CpuWin,
+    PlayerWin,
+    Draw,
+    Capped,
 }
 
 /// Result of a benchmark game: stats plus the final brain state for adaptive runs.
@@ -187,29 +194,38 @@ fn run_single_game(
     }
     // Naive rows: scripted steer only — update() must not run the AI.
     game.cpu_autopilot = cpu_adaptive;
-    let max_moves = 4000;
-    for _ in 0..max_moves {
+    const MAX_FRAMES: u32 = 4000;
+    for _ in 0..MAX_FRAMES {
         if game.game_over {
             break;
         }
         // CPU cycle drives itself inside update() when adaptive; the naive
         // opponent needs an explicit steer each frame.
         if !cpu_adaptive {
-            let dir = ai::wall_follow(&game);
+            let dir = ai::wall_follow(&game, 1);
             game.cycles[1].change_direction(dir);
         }
         // Player: use the specified opponent algorithm.
         let dir = match opponent {
-            Opponent::WallFollow => ai::wall_follow(&game),
+            Opponent::WallFollow => ai::wall_follow(&game, 0),
             Opponent::Chaser => ai::chaser(&game, 0),
         };
         game.change_direction(dir);
         game.update();
     }
+    let outcome = if !game.game_over {
+        Outcome::Capped
+    } else {
+        match game.winner {
+            Some(1) => Outcome::CpuWin,
+            Some(0) => Outcome::PlayerWin,
+            _ => Outcome::Draw,
+        }
+    };
     let stats = GameStats {
-        moves: game.time,
-        cpu_food: game.cycles[1].score,
-        cpu_survived: game.cycles[1].alive,
+        frames: game.time,
+        cpu_food: game.food_eaten_by[1],
+        outcome,
     };
     let brain = if cpu_adaptive {
         Some(game.cpu_brain.clone())
@@ -226,6 +242,50 @@ fn mean(v: &[f32]) -> f32 {
     v.iter().sum::<f32>() / v.len() as f32
 }
 
+#[derive(Clone, Copy)]
+struct Summary {
+    mean_frames: f32,
+    mean_food: f32,
+    cpu_wins: usize,
+    player_wins: usize,
+    draws: usize,
+    capped: usize,
+}
+
+fn summarize(rows: &[GameStats]) -> Summary {
+    let frames: Vec<f32> = rows.iter().map(|s| s.frames as f32).collect();
+    let food: Vec<f32> = rows.iter().map(|s| s.cpu_food as f32).collect();
+    let summary = Summary {
+        mean_frames: mean(&frames),
+        mean_food: mean(&food),
+        cpu_wins: rows.iter().filter(|s| s.outcome == Outcome::CpuWin).count(),
+        player_wins: rows
+            .iter()
+            .filter(|s| s.outcome == Outcome::PlayerWin)
+            .count(),
+        draws: rows.iter().filter(|s| s.outcome == Outcome::Draw).count(),
+        capped: rows.iter().filter(|s| s.outcome == Outcome::Capped).count(),
+    };
+    assert_eq!(
+        summary.cpu_wins + summary.player_wins + summary.draws + summary.capped,
+        rows.len(),
+        "every game must have exactly one explicit outcome"
+    );
+    summary
+}
+
+fn print_summary(label: &str, summary: Summary) {
+    println!(
+        "  {label:<9} frames={:>6.1} actual-food={:>4.1} outcomes cpu/player/draw/cap={}/{}/{}/{}",
+        summary.mean_frames,
+        summary.mean_food,
+        summary.cpu_wins,
+        summary.player_wins,
+        summary.draws,
+        summary.capped,
+    );
+}
+
 fn main() {
     println!("TRON Light Cycle CPU AI Benchmark — honest survival + food");
     println!("===========================================================\n");
@@ -240,12 +300,13 @@ fn main() {
     let mut shared_brain = worm::CpuBrain::new();
 
     for i in 0..GAMES {
-        let n_result = run_single_game(false, Opponent::WallFollow, None, Some(SEED + i as u64));
+        let pair_seed = SEED + i as u64;
+        let n_result = run_single_game(false, Opponent::WallFollow, None, Some(pair_seed));
         let a_result = run_single_game(
             true,
             Opponent::WallFollow,
             Some(shared_brain),
-            Some(SEED + 1000 + i as u64),
+            Some(pair_seed),
         );
         shared_brain = a_result
             .brain
@@ -255,53 +316,25 @@ fn main() {
         adaptive.push(a_result.stats);
         if i < 4 || i % 25 == 0 {
             println!(
-                "  Game {:2}: naive moves={:4} food={:2} | adaptive moves={:4} food={:2}",
+                "  Game {:3}: naive frames={:4} food={:2} | adaptive frames={:4} food={:2}",
                 i + 1,
-                n_result.stats.moves,
+                n_result.stats.frames,
                 n_result.stats.cpu_food,
-                a_result.stats.moves,
+                a_result.stats.frames,
                 a_result.stats.cpu_food
             );
         }
     }
 
-    let naive_moves: Vec<f32> = naive.iter().map(|s| s.moves as f32).collect();
-    let adaptive_moves: Vec<f32> = adaptive.iter().map(|s| s.moves as f32).collect();
-    let naive_food: Vec<f32> = naive.iter().map(|s| s.cpu_food as f32).collect();
-    let adaptive_food: Vec<f32> = adaptive.iter().map(|s| s.cpu_food as f32).collect();
-    let naive_survived = naive.iter().filter(|s| s.cpu_survived).count();
-    let adaptive_survived = adaptive.iter().filter(|s| s.cpu_survived).count();
-
+    let naive_summary = summarize(&naive);
+    let adaptive_summary = summarize(&adaptive);
+    print_summary("Naive", naive_summary);
+    print_summary("Adaptive", adaptive_summary);
     println!(
-        "  Naive:    survival={:>4} food={:5.1} alive={}/{}",
-        mean(&naive_moves) as u32,
-        mean(&naive_food),
-        naive_survived,
-        GAMES
+        "  Delta:     {:+.1} round-frames, {:+.1} actual-food\n",
+        adaptive_summary.mean_frames - naive_summary.mean_frames,
+        adaptive_summary.mean_food - naive_summary.mean_food,
     );
-    println!(
-        "  Adaptive: survival={:>4} food={:5.1} alive={}/{}",
-        mean(&adaptive_moves) as u32,
-        mean(&adaptive_food),
-        adaptive_survived,
-        GAMES
-    );
-    let dm = mean(&adaptive_moves) - mean(&naive_moves);
-    let df = mean(&adaptive_food) - mean(&naive_food);
-    // Win rate: alive at end AND game ended before max_moves (opponent crashed).
-    let naive_wins = naive
-        .iter()
-        .filter(|s| s.cpu_survived && s.moves < 4000)
-        .count();
-    let adaptive_wins = adaptive
-        .iter()
-        .filter(|s| s.cpu_survived && s.moves < 4000)
-        .count();
-    println!(
-        "  Wins:     naive={}/{} adaptive={}/{}",
-        naive_wins, GAMES, adaptive_wins, GAMES
-    );
-    println!("  Delta:    {:+.1} moves, {:+.1} food\n", dm, df);
 
     // --- HELD-OUT: chaser (decides what ships) ---
     println!("--- Held-out: chaser ---");
@@ -310,13 +343,10 @@ fn main() {
     let mut shared_brain2 = worm::CpuBrain::new();
 
     for i in 0..GAMES {
-        let n_result = run_single_game(false, Opponent::Chaser, None, Some(SEED + i as u64));
-        let a_result = run_single_game(
-            true,
-            Opponent::Chaser,
-            Some(shared_brain2),
-            Some(SEED + 1000 + i as u64),
-        );
+        let pair_seed = SEED + i as u64;
+        let n_result = run_single_game(false, Opponent::Chaser, None, Some(pair_seed));
+        let a_result =
+            run_single_game(true, Opponent::Chaser, Some(shared_brain2), Some(pair_seed));
         shared_brain2 = a_result
             .brain
             .expect("adaptive game should return its brain");
@@ -325,72 +355,42 @@ fn main() {
         adaptive2.push(a_result.stats);
         if i < 4 || i % 25 == 0 {
             println!(
-                "  Game {:2}: naive moves={:4} food={:2} | adaptive moves={:4} food={:2}",
+                "  Game {:3}: naive frames={:4} food={:2} | adaptive frames={:4} food={:2}",
                 i + 1,
-                n_result.stats.moves,
+                n_result.stats.frames,
                 n_result.stats.cpu_food,
-                a_result.stats.moves,
+                a_result.stats.frames,
                 a_result.stats.cpu_food
             );
         }
     }
 
-    let naive2_moves: Vec<f32> = naive2.iter().map(|s| s.moves as f32).collect();
-    let adaptive2_moves: Vec<f32> = adaptive2.iter().map(|s| s.moves as f32).collect();
-    let naive2_food: Vec<f32> = naive2.iter().map(|s| s.cpu_food as f32).collect();
-    let adaptive2_food: Vec<f32> = adaptive2.iter().map(|s| s.cpu_food as f32).collect();
-    let naive2_survived = naive2.iter().filter(|s| s.cpu_survived).count();
-    let adaptive2_survived = adaptive2.iter().filter(|s| s.cpu_survived).count();
-
+    let naive2_summary = summarize(&naive2);
+    let adaptive2_summary = summarize(&adaptive2);
+    print_summary("Naive", naive2_summary);
+    print_summary("Adaptive", adaptive2_summary);
+    let frame_delta = adaptive2_summary.mean_frames - naive2_summary.mean_frames;
+    let food_delta = adaptive2_summary.mean_food - naive2_summary.mean_food;
     println!(
-        "  Naive:    survival={:>4} food={:5.1} alive={}/{}",
-        mean(&naive2_moves) as u32,
-        mean(&naive2_food),
-        naive2_survived,
-        GAMES
+        "  Delta:     {:+.1} round-frames, {:+.1} actual-food\n",
+        frame_delta, food_delta,
     );
-    println!(
-        "  Adaptive: survival={:>4} food={:5.1} alive={}/{}",
-        mean(&adaptive2_moves) as u32,
-        mean(&adaptive2_food),
-        adaptive2_survived,
-        GAMES
-    );
-    let dm2 = mean(&adaptive2_moves) - mean(&naive2_moves);
-    let df2 = mean(&adaptive2_food) - mean(&naive2_food);
-    // Win rate: alive at end AND game ended before max_moves (opponent crashed).
-    let naive2_wins = naive2
-        .iter()
-        .filter(|s| s.cpu_survived && s.moves < 4000)
-        .count();
-    let adaptive2_wins = adaptive2
-        .iter()
-        .filter(|s| s.cpu_survived && s.moves < 4000)
-        .count();
-    println!(
-        "  Wins:     naive={}/{} adaptive={}/{}",
-        naive2_wins, GAMES, adaptive2_wins, GAMES
-    );
-    println!("  Delta:    {:+.1} moves, {:+.1} food\n", dm2, df2);
 
     // --- Verdict (held-out decides) ---
     println!("--- Verdict (held-out decides) ---");
-    let naive_win_rate = naive2_wins as f32 / GAMES as f32;
-    let adaptive_win_rate = adaptive2_wins as f32 / GAMES as f32;
-    if adaptive_win_rate > naive_win_rate {
-        println!(
-            "Adaptive CPU WINS: {:.0}% vs naive's {:.0}% win rate vs chaser ({:+.1} moves, {:+.1} food)",
-            adaptive_win_rate * 100.0, naive_win_rate * 100.0, dm2, df2
-        );
-    } else if dm2 > 0.0 || df2 > 0.0 {
-        println!(
-            "Adaptive CPU IMPROVEMENT vs chaser: {:+.1} moves, {:+.1} food (naive {:.0}% vs adaptive {:.0}% wins)",
-            dm2, df2, naive_win_rate * 100.0, adaptive_win_rate * 100.0
-        );
-    } else {
-        println!(
-            "Adaptive CPU is flat/behind vs chaser ({:+.1} moves, {:+.1} food, naive {:.0}% vs adaptive {:.0}% wins) — needs reformulation",
-            dm2, df2, naive_win_rate * 100.0, adaptive_win_rate * 100.0
-        );
-    }
+    let naive_win_rate = naive2_summary.cpu_wins as f32 / GAMES as f32;
+    let adaptive_win_rate = adaptive2_summary.cpu_wins as f32 / GAMES as f32;
+    println!(
+        "Adaptive CPU held-out wins: {:.0}% vs naive {:.0}% ({:+.1} round-frames, {:+.1} actual-food)",
+        adaptive_win_rate * 100.0,
+        naive_win_rate * 100.0,
+        frame_delta,
+        food_delta,
+    );
+    assert!(
+        adaptive2_summary.cpu_wins > naive2_summary.cpu_wins,
+        "HELD-OUT GATE FAILED: adaptive CPU wins {} must beat naive wins {}",
+        adaptive2_summary.cpu_wins,
+        naive2_summary.cpu_wins,
+    );
 }

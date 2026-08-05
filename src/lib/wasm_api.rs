@@ -6,17 +6,7 @@
 
 use wasm_bindgen::prelude::*;
 
-use crate::game::PowerUpKind;
 use crate::{CpuBrain, Direction, WormGame};
-
-fn dir_u8(d: Direction) -> u8 {
-    match d {
-        Direction::Up => 0,
-        Direction::Down => 1,
-        Direction::Left => 2,
-        Direction::Right => 3,
-    }
-}
 
 fn dir_from_u8(v: u8) -> Option<Direction> {
     Some(match v {
@@ -26,15 +16,6 @@ fn dir_from_u8(v: u8) -> Option<Direction> {
         3 => Direction::Right,
         _ => return None,
     })
-}
-
-fn powerup_u8(k: PowerUpKind) -> u8 {
-    match k {
-        PowerUpKind::Laser => 0,
-        PowerUpKind::TriShot => 1,
-        PowerUpKind::Bomb => 2,
-        PowerUpKind::WallPunch => 3,
-    }
 }
 
 #[wasm_bindgen]
@@ -76,6 +57,11 @@ impl WasmGame {
         self.game.restart();
     }
 
+    /// Next game using the browser space available at this round boundary.
+    pub fn restart_with_size(&mut self, width: u16, height: u16) {
+        self.game.restart_with_size(width, height);
+    }
+
     /// New match: wipe the scoreboard too (the brain still persists — rps-ai
     /// keeps its corpus across everything). The current winner is cleared
     /// first so restart() doesn't bank the finished game into the fresh match.
@@ -83,6 +69,13 @@ impl WasmGame {
         self.game.winner = None;
         self.game.session_wins = [0, 0];
         self.game.restart();
+    }
+
+    /// New match using the browser space available at this boundary.
+    pub fn reset_match_with_size(&mut self, width: u16, height: u16) {
+        self.game.winner = None;
+        self.game.session_wins = [0, 0];
+        self.game.restart_with_size(width, height);
     }
 
     pub fn is_over(&self) -> bool {
@@ -100,183 +93,9 @@ impl WasmGame {
         out
     }
 
-    /// Per-frame entities + HUD + brain state as JSON (positions, food,
-    /// power-ups, bolts, bombs, particles, scores, ensemble panel).
+    /// Versioned per-frame entities, HUD, and frame-coherent brain telemetry.
     pub fn state_json(&self) -> String {
-        let g = &self.game;
-        let mut s = String::with_capacity(4096);
-        s.push_str(&format!(
-            "{{\"w\":{},\"h\":{},\"frame\":{},\"time\":{},\"over\":{},\"winner\":{},\"score\":{},\"scores\":[{},{}],\"foodEaten\":[{},{}],\"wins\":[{},{}],\"speed\":{},",
-            g.width,
-            g.height,
-            g.frame_count,
-            g.time,
-            g.game_over,
-            match g.winner {
-                Some(w) => w.to_string(),
-                None => "null".to_string(),
-            },
-            g.score,
-            g.cycles[0].score,
-            g.cycles[1].score,
-            g.food_eaten_by[0],
-            g.food_eaten_by[1],
-            g.displayed_wins()[0],
-            g.displayed_wins()[1],
-            g.speed_pct(),
-        ));
-        s.push_str("\"cycles\":[");
-        for (i, c) in g.cycles.iter().enumerate() {
-            if i > 0 {
-                s.push(',');
-            }
-            s.push_str(&format!(
-                "{{\"head\":[{},{}],\"dir\":{},\"alive\":{},\"held\":{},\"color\":[{},{},{}],\"pos\":[",
-                c.head.0,
-                c.head.1,
-                dir_u8(c.direction),
-                c.alive,
-                match c.held_powerup {
-                    Some(k) => powerup_u8(k).to_string(),
-                    None => "null".to_string(),
-                },
-                c.color.0,
-                c.color.1,
-                c.color.2,
-            ));
-            for (j, p) in c.positions.iter().enumerate() {
-                if j > 0 {
-                    s.push(',');
-                }
-                s.push_str(&format!("[{},{}]", p.0, p.1));
-            }
-            s.push_str("]}");
-        }
-        s.push_str("],\"food\":[");
-        for (i, f) in g.food_items.iter().enumerate() {
-            if i > 0 {
-                s.push(',');
-            }
-            s.push_str(&format!("[{},{},{}]", f.0, f.1, f.2));
-        }
-        s.push_str("],\"powerups\":[");
-        for (i, p) in g.powerups.iter().enumerate() {
-            if i > 0 {
-                s.push(',');
-            }
-            s.push_str(&format!("[{},{},{}]", p.0, p.1, powerup_u8(p.2)));
-        }
-        s.push_str("],\"bolts\":[");
-        for (i, p) in g.projectiles.iter().enumerate() {
-            if i > 0 {
-                s.push(',');
-            }
-            s.push_str(&format!("[{},{},{},{}]", p.x, p.y, p.dx, p.dy));
-        }
-        s.push_str("],\"bombs\":[");
-        for (i, b) in g.bombs.iter().enumerate() {
-            if i > 0 {
-                s.push(',');
-            }
-            s.push_str(&format!("[{},{},{}]", b.x, b.y, b.fuse));
-        }
-        s.push_str("],\"particles\":[");
-        for (i, p) in g.particles.iter().take(300).enumerate() {
-            if i > 0 {
-                s.push(',');
-            }
-            s.push_str(&format!(
-                "[{:.1},{:.1},{},{},{},{}]",
-                p.x, p.y, p.color.0, p.color.1, p.color.2, p.lifetime
-            ));
-        }
-        // Brain panel: explicitly-scoped accuracy, prediction source, final CPU
-        // action, counterfactual forecasts, warm-up, memory, and player habits.
-        let b = &g.cpu_brain;
-        let e = &b.ensemble;
-        let dir_json = |d: Option<Direction>| match d {
-            Some(value) => dir_u8(value).to_string(),
-            None => "null".to_string(),
-        };
-        let bool_json = |value: Option<bool>| match value {
-            Some(value) => value.to_string(),
-            None => "null".to_string(),
-        };
-        let habits = b.opp_brain.prior_distribution();
-        s.push_str(&format!(
-            "],\"cause\":{},\"brain\":{{",
-            match g.death_cause {
-                Some(c) => format!("\"{}\"", c.as_str()),
-                None => "null".to_string(),
-            },
-        ));
-        s.push_str(&format!(
-            "\"mem\":[{},{}],\"observed\":[{},{}],\"cap\":{},\"acc\":{:.3},\"lifetimeAcc\":{:.3},\"roundAcc\":{:.3},\"samples\":[{},{}],\"conf\":{:.3},\"active\":{},\"driver\":\"{}\",\"action\":\"{}\",\"pred\":{},\"last\":{{\"pred\":{},\"actual\":{},\"hit\":{}}},\"warm\":[{},{}],\"habits\":[{:.4},{:.4},{:.4},{:.4}],\"path\":[",
-            b.episodes.len(),
-            b.opp_brain.episodes.len(),
-            b.cpu_seq,
-            b.opp_brain.seq,
-            crate::cpu_ai::MAX_EPISODES,
-            b.opp_pred_accuracy(),
-            b.opp_pred_accuracy(),
-            g.round_pred_accuracy(),
-            g.round_pred_total,
-            b.opp_pred_total,
-            e.confidence,
-            e.active,
-            crate::cpu_ai::MODEL_NAMES[e.active],
-            g.cpu_decision_reason.as_str(),
-            dir_json(e.predicted_dir),
-            dir_json(g.last_scored_prediction),
-            dir_json(g.last_player_actual),
-            bool_json(g.last_prediction_hit),
-            b.opp_brain.episodes.len().min(crate::cpu_ai::COLD_START_EPISODES),
-            crate::cpu_ai::COLD_START_EPISODES,
-            habits[0], habits[1], habits[2], habits[3],
-        ));
-        for (i, (x, y)) in g.cpu_predicted_path.iter().enumerate() {
-            if i > 0 {
-                s.push(',');
-            }
-            s.push_str(&format!("[{},{}]", x, y));
-        }
-        s.push_str("],\"scores\":[");
-        for i in 0..crate::cpu_ai::ENSEMBLE_MODELS {
-            if i > 0 {
-                s.push(',');
-            }
-            s.push_str(&format!("{:.3}", e.score(i)));
-        }
-        s.push_str("],\"rank\":[");
-        for i in 0..crate::cpu_ai::ENSEMBLE_MODELS {
-            if i > 0 {
-                s.push(',');
-            }
-            s.push_str(&format!("{:.3}", crate::cpu_ai::ensemble_rank_score(b, i)));
-        }
-        s.push_str("],\"preds\":[");
-        for i in 0..crate::cpu_ai::ENSEMBLE_MODELS {
-            if i > 0 {
-                s.push(',');
-            }
-            s.push_str(&dir_json(e.pending[i]));
-        }
-        s.push_str("],\"hits\":[");
-        for i in 0..crate::cpu_ai::ENSEMBLE_MODELS {
-            if i > 0 {
-                s.push(',');
-            }
-            s.push_str(&format!("{}", e.hits[i]));
-        }
-        s.push_str("],\"total\":[");
-        for i in 0..crate::cpu_ai::ENSEMBLE_MODELS {
-            if i > 0 {
-                s.push(',');
-            }
-            s.push_str(&format!("{}", e.total[i]));
-        }
-        s.push_str("]}}");
-        s
+        crate::web_state::to_json(&self.game)
     }
 
     /// Drain queued sound events as JSON [[kind, freq_hz, duration_ms, delay_ms], ...].
@@ -293,8 +112,14 @@ impl WasmGame {
     /// Restore a previously exported brain (deviceId-keyed corpus).
     pub fn brain_load(&mut self, bytes: &[u8]) -> bool {
         match CpuBrain::from_bytes(bytes) {
-            Some(b) => {
+            Some(mut b) => {
+                // A persisted corpus is longitudinal memory, not an unfinished
+                // round. Never score its pending forecast against a new board.
+                b.ensemble.reset_scores();
+                b.last_opp_prediction = None;
                 self.game.cpu_brain = b;
+                self.game.cpu_telemetry = crate::CpuFrameTelemetry::default();
+                self.game.round_last_cpu_decision = None;
                 true
             }
             None => false,

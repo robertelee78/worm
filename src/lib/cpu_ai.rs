@@ -92,6 +92,60 @@ impl CpuDecisionReason {
     }
 }
 
+/// A model forecast with an explicit target frame. Keeping the target beside
+/// the prediction prevents the HUD from presenting a newly-computed forecast
+/// as the evidence behind an action that already happened.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct ForecastTrace {
+    pub target_frame: u32,
+    pub source: usize,
+    pub predicted: Option<Direction>,
+    pub confidence: f32,
+}
+
+/// The previous forecast scored against the player's move on this frame.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub struct ScoredForecast {
+    pub forecast: ForecastTrace,
+    pub actual: Direction,
+    pub hit: bool,
+}
+
+/// Counterfactual player path consulted by the decision layers.
+#[derive(Clone, PartialEq, Debug)]
+pub struct PlayerProjection {
+    pub direction: Direction,
+    pub path: Vec<(u16, u16)>,
+}
+
+/// What the CPU actually chose this frame and the evidence it consulted.
+#[derive(Clone, PartialEq, Debug)]
+pub struct CpuDecisionTrace {
+    pub frame: u32,
+    pub heading: Direction,
+    pub reason: CpuDecisionReason,
+    pub forecast: Option<ForecastTrace>,
+    pub projection: Option<PlayerProjection>,
+}
+
+/// One coherent telemetry transaction for a game frame.
+#[derive(Clone, PartialEq, Debug, Default)]
+pub struct CpuFrameTelemetry {
+    pub frame: u32,
+    pub scored: Option<ScoredForecast>,
+    pub decision: Option<CpuDecisionTrace>,
+    pub next_forecast: Option<ForecastTrace>,
+}
+
+impl CpuFrameTelemetry {
+    pub fn for_frame(frame: u32) -> Self {
+        Self {
+            frame,
+            ..Self::default()
+        }
+    }
+}
+
 pub const CPU_FEATURE_DIM: usize = 25;
 /// Dimensionality of the opponent-centric context vector. Slots 0..13 are
 /// coded; 13..29 encode a 4×4 player direction-transition matrix
@@ -221,9 +275,10 @@ pub struct CpuBrain {
     /// Opponent model: predicts the player's next move. Optional but always
     /// initialised so game restart/reset logic is unchanged.
     pub opp_brain: PlayerBrain,
-    /// The direction the opponent model predicted for the CURRENT frame (set
-    /// at frame end by the ensemble refresh; scored against the actual move
-    /// next frame).
+    /// Legacy persistence slot for the active prediction. Runtime scoring uses
+    /// `WormGame::cpu_telemetry.next_forecast`, which also retains its source,
+    /// confidence, and target frame. Kept in the serialized brain so existing
+    /// WRM1 corpora remain readable; cleared whenever a brain is restored.
     pub last_opp_prediction: Option<Direction>,
     /// Prediction hit/miss bookkeeping — accuracy = hits / total.
     pub opp_pred_hits: u32,
@@ -1626,11 +1681,20 @@ fn beam_cells(game: &WormGame, hx: u16, hy: u16, dx: i16, dy: i16) -> Vec<(u16, 
 /// deterministic argmax (the 5% explore lives only in the close-evasion
 /// branch).
 pub fn cpu_decide(game: &mut WormGame) -> Direction {
-    game.cpu_predicted_path.clear();
+    let mut decision_forecast = None;
+    let mut decision_projection = None;
     macro_rules! choose {
         ($direction:expr, $reason:expr) => {{
             let chosen = $direction;
-            game.cpu_decision_reason = $reason;
+            let trace = CpuDecisionTrace {
+                frame: game.frame_count,
+                heading: chosen,
+                reason: $reason,
+                forecast: decision_forecast,
+                projection: decision_projection.clone(),
+            };
+            game.cpu_telemetry.decision = Some(trace.clone());
+            game.round_last_cpu_decision = Some(trace);
             return chosen;
         }};
     }
@@ -1661,18 +1725,24 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
     // opponent prediction (refreshed at frame end) drives the hunt layers.
 
     // --- Opponent Model Prediction (the rps-ai ensemble, refreshed at frame end) ---
-    let player_pred_dir = game
-        .cpu_brain
-        .ensemble
-        .predicted_dir
+    decision_forecast = game.cpu_telemetry.scored.map(|scored| scored.forecast);
+    let player_pred_dir = decision_forecast
+        .and_then(|forecast| forecast.predicted)
         .unwrap_or(game.cycles[0].direction);
-    let player_pred_conf = game.cpu_brain.ensemble.confidence;
+    let player_pred_conf = decision_forecast
+        .map(|forecast| forecast.confidence)
+        .unwrap_or(0.0);
     let cpu = &game.cycles[1];
     let (cx, cy) = cpu.head;
 
     // Iterative multi-frame prediction: predicts direction changes at corners.
     let predicted_positions = predict_player_positions_iterative(game, player_pred_dir, 5);
-    game.cpu_predicted_path = predicted_positions.clone();
+    if decision_forecast.is_some() {
+        decision_projection = Some(PlayerProjection {
+            direction: player_pred_dir,
+            path: predicted_positions.clone(),
+        });
+    }
 
     // --- THREAT AVOIDANCE: dodge projectiles and bombs ---
     // Check each legal direction for threats. If the wall-follow direction is
@@ -2039,8 +2109,7 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
         }
     }
 
-    game.cpu_decision_reason = CpuDecisionReason::WallFollow;
-    wall_dir
+    choose!(wall_dir, CpuDecisionReason::WallFollow);
 }
 
 /// Predict which corner a cycle will reach next given their current direction.

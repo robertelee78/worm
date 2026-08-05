@@ -586,13 +586,15 @@ fn test_cpu_autopilot_false_keeps_scripted_heading() {
 fn test_cpu_decision_reason_reports_actual_layer() {
     let mut game = WormGame::with_size(120, 38);
     let _ = worm::cpu_decide(&mut game);
-    assert_eq!(
-        game.cpu_decision_reason,
-        worm::cpu_ai::CpuDecisionReason::WarmingUp
+    let decision = game.cpu_telemetry.decision.as_ref().unwrap();
+    assert_eq!(decision.reason, worm::cpu_ai::CpuDecisionReason::WarmingUp);
+    assert!(
+        decision.projection.is_none(),
+        "cold models do not project a path"
     );
     assert!(
-        game.cpu_predicted_path.is_empty(),
-        "cold models do not project a path"
+        decision.forecast.is_none(),
+        "cold decisions claim no forecast"
     );
 }
 
@@ -626,9 +628,18 @@ fn test_opp_prediction_accuracy_tracking() {
     assert_eq!(b.last_opp_prediction, Some(worm::Direction::Right));
     assert_eq!(game.round_pred_total, 5, "round evidence has its own scope");
     assert_eq!(game.round_pred_hits, b.opp_pred_hits);
-    assert_eq!(game.last_scored_prediction, Some(worm::Direction::Right));
-    assert_eq!(game.last_player_actual, Some(worm::Direction::Right));
-    assert_eq!(game.last_prediction_hit, Some(true));
+    let scored = game.cpu_telemetry.scored.unwrap();
+    assert_eq!(scored.forecast.target_frame, game.frame_count);
+    assert_eq!(scored.forecast.predicted, Some(worm::Direction::Right));
+    assert_eq!(scored.actual, worm::Direction::Right);
+    assert!(scored.hit);
+    let decision = game.cpu_telemetry.decision.as_ref().unwrap();
+    assert_eq!(decision.forecast, Some(scored.forecast));
+    assert_eq!(decision.frame, game.frame_count);
+    assert_eq!(
+        game.cpu_telemetry.next_forecast.unwrap().target_frame,
+        game.frame_count + 1
+    );
 }
 
 /// The ensemble: a player holding one direction must be caught by the cheap
@@ -691,19 +702,13 @@ fn test_ensemble_scores_reset_on_restart() {
     assert_eq!(e.predicted_dir, None);
     assert_eq!(game.round_pred_total, 0, "round evidence resets");
     assert_eq!(game.round_pred_hits, 0, "round evidence resets");
-    assert_eq!(game.last_scored_prediction, None);
-    assert_eq!(game.last_player_actual, None);
-    assert_eq!(game.last_prediction_hit, None);
+    assert_eq!(game.cpu_telemetry, worm::CpuFrameTelemetry::default());
+    assert!(game.round_last_cpu_decision.is_none());
     assert_eq!(game.food_eaten_by, [0, 0]);
     assert_eq!(
         game.cpu_brain.opp_pred_total, lifetime_predictions_before,
         "lifetime prediction evidence persists"
     );
-    assert_eq!(
-        game.cpu_decision_reason,
-        worm::cpu_ai::CpuDecisionReason::Opening
-    );
-    assert!(game.cpu_predicted_path.is_empty());
     assert_eq!(
         game.cpu_brain.opp_brain.episodes.len(),
         opp_before,
@@ -713,6 +718,30 @@ fn test_ensemble_scores_reset_on_restart() {
         game.session_wins[1], 1,
         "finished game banked to scoreboard"
     );
+}
+
+#[test]
+fn test_round_boundary_resize_preserves_brain_and_banks_winner_once() {
+    let mut game = WormGame::with_size_seed(120, 38, 42);
+    let mut observation = [0.0f32; worm::cpu_ai::CPU_FEATURE_DIM];
+    observation[0] = 1.0;
+    game.cpu_brain
+        .remember(observation, worm::Direction::Up, 3.0);
+    game.winner = Some(1);
+
+    game.restart_with_size(88, 44);
+
+    assert_eq!((game.width, game.height), (88, 44));
+    assert_eq!(game.fixed_dims, Some((88, 44)));
+    assert_eq!(game.session_wins, [0, 1]);
+    assert_eq!(
+        game.cpu_brain.episodes.len(),
+        1,
+        "brain corpus survives resize"
+    );
+    assert_eq!(game.frame_count, 0);
+    assert_eq!(game.cpu_telemetry, worm::CpuFrameTelemetry::default());
+    assert!(game.round_last_cpu_decision.is_none());
 }
 
 /// The sophisticated model abstains while cold and joins once warm —
@@ -1041,7 +1070,10 @@ fn test_bomb_blast_trims_positions_with_grid() {
         owner: 1,
     });
     game.tick_bombs();
-    assert!(!game.game_over, "no head dies: player out of range, CPU is the owner");
+    assert!(
+        !game.game_over,
+        "no head dies: player out of range, CPU is the owner"
+    );
     for x in 25..=42u16 {
         if x == 35 {
             continue; // the owner's living head cell
@@ -1160,8 +1192,14 @@ fn test_laser_triggered_bomb_kills_its_owner() {
     assert!(game.fire_powerup(0));
     assert!(game.game_over);
     assert_eq!(game.winner, Some(0), "the triggering firer gets the kill");
-    assert!(!game.cycles[1].alive, "the planter is not immune to a triggered blast");
-    assert!(game.cycles[0].alive, "the firer is immune to the blast it triggered");
+    assert!(
+        !game.cycles[1].alive,
+        "the planter is not immune to a triggered blast"
+    );
+    assert!(
+        game.cycles[0].alive,
+        "the firer is immune to the blast it triggered"
+    );
 }
 
 #[test]
@@ -1181,8 +1219,7 @@ fn test_growth_matches_food_value_when_chain_eating() {
     game.grid[head.1 as usize][(head.0 + 1) as usize] = worm::CellType::Food;
     game.update();
     assert_eq!(
-        game.cycles[0].pending_growth,
-        4,
+        game.cycles[0].pending_growth, 4,
         "pending = 2 owed + 3 eaten - 1 paid by the kept tail"
     );
 }
@@ -1228,7 +1265,11 @@ fn test_sudden_death_kills_head_on_closing_ring() {
     game.time = worm::game::SUDDEN_DEATH_START + worm::game::SUDDEN_DEATH_INTERVAL - 1;
     game.update();
     assert!(game.game_over);
-    assert_eq!(game.winner, Some(1), "the head caught on the closing ring dies");
+    assert_eq!(
+        game.winner,
+        Some(1),
+        "the head caught on the closing ring dies"
+    );
     assert!(!game.cycles[0].alive);
 }
 
@@ -1255,13 +1296,19 @@ fn test_cpu_laser_charges_before_firing() {
     game.grid[20][50] = worm::CellType::Player;
     for _ in 0..(worm::game::LASER_TELEGRAPH_FRAMES - 1) {
         game.update();
-        assert!(!game.game_over, "the laser must not fire while still charging");
+        assert!(
+            !game.game_over,
+            "the laser must not fire while still charging"
+        );
         assert_eq!(
             game.cycles[1].held_powerup,
             Some(worm::game::PowerUpKind::Laser)
         );
     }
     game.update();
-    assert!(game.game_over, "the charged laser fires on the telegraph deadline");
+    assert!(
+        game.game_over,
+        "the charged laser fires on the telegraph deadline"
+    );
     assert_eq!(game.winner, Some(1));
 }

@@ -1,0 +1,398 @@
+//! Versioned browser wire state. This module is deliberately independent of
+//! wasm-bindgen so native tests can prove the exact JSON contract shipped to
+//! the browser.
+
+use serde::Serialize;
+
+use crate::cpu_ai::{
+    ensemble_rank_score, CpuDecisionTrace, ForecastTrace, PlayerProjection, ScoredForecast,
+    COLD_START_EPISODES, ENSEMBLE_MODELS, MAX_EPISODES, MODEL_NAMES,
+};
+use crate::game::PowerUpKind;
+use crate::{Direction, WormGame};
+
+pub const STATE_SCHEMA_VERSION: u8 = 1;
+
+const MODEL_DISPLAY_NAMES: [&str; ENSEMBLE_MODELS] = [
+    "Streak reader",
+    "Pattern hunter",
+    "Habit tracker",
+    "Rotation guesser",
+    "Wall reader · R",
+    "Wall reader · L",
+    "Deep memory",
+];
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GameState {
+    schema_version: u8,
+    w: u16,
+    h: u16,
+    frame: u32,
+    time: u32,
+    over: bool,
+    winner: Option<usize>,
+    score: u32,
+    scores: [u32; 2],
+    food_eaten: [u32; 2],
+    wins: [u32; 2],
+    speed: u32,
+    cycles: Vec<CycleState>,
+    food: Vec<(u16, u16, u8)>,
+    powerups: Vec<(u16, u16, u8)>,
+    bolts: Vec<(u16, u16, i16, i16)>,
+    bombs: Vec<(u16, u16, u32)>,
+    particles: Vec<(f32, f32, u8, u8, u8, u32)>,
+    cause: Option<String>,
+    brain: BrainState,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CycleState {
+    head: [u16; 2],
+    dir: u8,
+    alive: bool,
+    held: Option<u8>,
+    color: [u8; 3],
+    pos: Vec<[u16; 2]>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BrainState {
+    frame: u32,
+    scored: Option<ScoredState>,
+    decision: Option<DecisionState>,
+    last_decision: Option<DecisionState>,
+    next_forecast: Option<ForecastState>,
+    accuracy: AccuracyScopes,
+    memory: MemoryState,
+    habits: [f32; 4],
+    models: Vec<ModelState>,
+}
+
+#[derive(Serialize)]
+struct AccuracyScopes {
+    round: AccuracyState,
+    lifetime: AccuracyState,
+}
+
+#[derive(Serialize)]
+struct AccuracyState {
+    hits: u32,
+    samples: u32,
+    rate: f32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MemoryState {
+    survival_retained: usize,
+    opponent_retained: usize,
+    survival_observed: u32,
+    opponent_observed: u32,
+    capacity: usize,
+    warm_samples: usize,
+    warm_at: usize,
+    ready: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ForecastState {
+    target_frame: u32,
+    source_key: &'static str,
+    source_name: &'static str,
+    source_index: usize,
+    predicted: Option<u8>,
+    confidence: f32,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ScoredState {
+    target_frame: u32,
+    source_key: &'static str,
+    source_name: &'static str,
+    source_index: usize,
+    predicted: u8,
+    actual: u8,
+    hit: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DecisionState {
+    frame: u32,
+    heading: u8,
+    reason: &'static str,
+    forecast: Option<ForecastState>,
+    projection: Option<ProjectionState>,
+}
+
+#[derive(Serialize)]
+struct ProjectionState {
+    direction: u8,
+    path: Vec<[u16; 2]>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelState {
+    key: &'static str,
+    name: &'static str,
+    predicted: Option<u8>,
+    raw_score: f32,
+    effective_score: f32,
+    hits: u32,
+    samples: u32,
+}
+
+fn dir_u8(direction: Direction) -> u8 {
+    match direction {
+        Direction::Up => 0,
+        Direction::Down => 1,
+        Direction::Left => 2,
+        Direction::Right => 3,
+    }
+}
+
+fn powerup_u8(kind: PowerUpKind) -> u8 {
+    match kind {
+        PowerUpKind::Laser => 0,
+        PowerUpKind::TriShot => 1,
+        PowerUpKind::Bomb => 2,
+        PowerUpKind::WallPunch => 3,
+    }
+}
+
+impl From<ForecastTrace> for ForecastState {
+    fn from(trace: ForecastTrace) -> Self {
+        Self {
+            target_frame: trace.target_frame,
+            source_key: MODEL_NAMES[trace.source],
+            source_name: MODEL_DISPLAY_NAMES[trace.source],
+            source_index: trace.source,
+            predicted: trace.predicted.map(dir_u8),
+            confidence: trace.confidence,
+        }
+    }
+}
+
+impl From<ScoredForecast> for ScoredState {
+    fn from(scored: ScoredForecast) -> Self {
+        let source = scored.forecast.source;
+        Self {
+            target_frame: scored.forecast.target_frame,
+            source_key: MODEL_NAMES[source],
+            source_name: MODEL_DISPLAY_NAMES[source],
+            source_index: source,
+            predicted: dir_u8(scored.forecast.predicted.expect("scored forecast predicts")),
+            actual: dir_u8(scored.actual),
+            hit: scored.hit,
+        }
+    }
+}
+
+impl From<PlayerProjection> for ProjectionState {
+    fn from(projection: PlayerProjection) -> Self {
+        Self {
+            direction: dir_u8(projection.direction),
+            path: projection.path.into_iter().map(|(x, y)| [x, y]).collect(),
+        }
+    }
+}
+
+impl From<CpuDecisionTrace> for DecisionState {
+    fn from(trace: CpuDecisionTrace) -> Self {
+        Self {
+            frame: trace.frame,
+            heading: dir_u8(trace.heading),
+            reason: trace.reason.as_str(),
+            forecast: trace.forecast.map(Into::into),
+            projection: trace.projection.map(Into::into),
+        }
+    }
+}
+
+impl GameState {
+    fn from_game(game: &WormGame) -> Self {
+        let brain = &game.cpu_brain;
+        let ensemble = &brain.ensemble;
+        let habits = brain.opp_brain.prior_distribution();
+        let warm_samples = brain.opp_brain.episodes.len().min(COLD_START_EPISODES);
+        let models = (0..ENSEMBLE_MODELS)
+            .map(|index| ModelState {
+                key: MODEL_NAMES[index],
+                name: MODEL_DISPLAY_NAMES[index],
+                // Pending predictions are forecasts for the next frame only.
+                // When no next forecast was produced (for example after a
+                // lethal early return), retain scores but expose no forecast.
+                predicted: game
+                    .cpu_telemetry
+                    .next_forecast
+                    .and_then(|_| ensemble.pending[index])
+                    .map(dir_u8),
+                raw_score: ensemble.score(index),
+                effective_score: ensemble_rank_score(brain, index),
+                hits: ensemble.hits[index],
+                samples: ensemble.total[index],
+            })
+            .collect();
+
+        Self {
+            schema_version: STATE_SCHEMA_VERSION,
+            w: game.width,
+            h: game.height,
+            frame: game.frame_count,
+            time: game.time,
+            over: game.game_over,
+            winner: game.winner,
+            score: game.score,
+            scores: [game.cycles[0].score, game.cycles[1].score],
+            food_eaten: game.food_eaten_by,
+            wins: game.displayed_wins(),
+            speed: game.speed_pct(),
+            cycles: game
+                .cycles
+                .iter()
+                .map(|cycle| CycleState {
+                    head: [cycle.head.0, cycle.head.1],
+                    dir: dir_u8(cycle.direction),
+                    alive: cycle.alive,
+                    held: cycle.held_powerup.map(powerup_u8),
+                    color: [cycle.color.0, cycle.color.1, cycle.color.2],
+                    pos: cycle.positions.iter().map(|&(x, y)| [x, y]).collect(),
+                })
+                .collect(),
+            food: game.food_items.clone(),
+            powerups: game
+                .powerups
+                .iter()
+                .map(|&(x, y, kind)| (x, y, powerup_u8(kind)))
+                .collect(),
+            bolts: game
+                .projectiles
+                .iter()
+                .map(|bolt| (bolt.x, bolt.y, bolt.dx, bolt.dy))
+                .collect(),
+            bombs: game
+                .bombs
+                .iter()
+                .map(|bomb| (bomb.x, bomb.y, bomb.fuse))
+                .collect(),
+            particles: game
+                .particles
+                .iter()
+                .take(300)
+                .map(|particle| {
+                    (
+                        particle.x,
+                        particle.y,
+                        particle.color.0,
+                        particle.color.1,
+                        particle.color.2,
+                        particle.lifetime,
+                    )
+                })
+                .collect(),
+            cause: game.death_cause.map(|cause| cause.as_str().to_owned()),
+            brain: BrainState {
+                frame: game.cpu_telemetry.frame,
+                scored: game.cpu_telemetry.scored.map(Into::into),
+                decision: game.cpu_telemetry.decision.clone().map(Into::into),
+                last_decision: game.round_last_cpu_decision.clone().map(Into::into),
+                next_forecast: game.cpu_telemetry.next_forecast.map(Into::into),
+                accuracy: AccuracyScopes {
+                    round: AccuracyState {
+                        hits: game.round_pred_hits,
+                        samples: game.round_pred_total,
+                        rate: game.round_pred_accuracy(),
+                    },
+                    lifetime: AccuracyState {
+                        hits: brain.opp_pred_hits,
+                        samples: brain.opp_pred_total,
+                        rate: brain.opp_pred_accuracy(),
+                    },
+                },
+                memory: MemoryState {
+                    survival_retained: brain.episodes.len(),
+                    opponent_retained: brain.opp_brain.episodes.len(),
+                    survival_observed: brain.cpu_seq,
+                    opponent_observed: brain.opp_brain.seq,
+                    capacity: MAX_EPISODES,
+                    warm_samples,
+                    warm_at: COLD_START_EPISODES,
+                    ready: warm_samples >= COLD_START_EPISODES,
+                },
+                habits,
+                models,
+            },
+        }
+    }
+}
+
+pub fn to_json(game: &WormGame) -> String {
+    serde_json::to_string(&GameState::from_game(game)).expect("browser game state serializes")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use super::*;
+    use crate::{CpuDecisionReason, CpuDecisionTrace, CpuFrameTelemetry, ForecastTrace};
+
+    #[test]
+    fn schema_is_versioned_unambiguous_and_has_seven_models() {
+        let game = WormGame::with_size_seed(120, 38, 7);
+        let value: serde_json::Value = serde_json::from_str(&to_json(&game)).unwrap();
+        assert_eq!(value["schemaVersion"], STATE_SCHEMA_VERSION);
+        assert!(value["brain"].get("active").is_none());
+        assert!(value["brain"].get("pred").is_none());
+        assert!(value["brain"].get("path").is_none());
+
+        let models = value["brain"]["models"].as_array().unwrap();
+        assert_eq!(models.len(), ENSEMBLE_MODELS);
+        let keys: HashSet<_> = models
+            .iter()
+            .map(|model| model["key"].as_str().unwrap())
+            .collect();
+        assert_eq!(keys.len(), ENSEMBLE_MODELS);
+    }
+
+    #[test]
+    fn decision_and_next_forecast_keep_their_own_sources() {
+        let mut game = WormGame::with_size_seed(120, 38, 9);
+        game.cpu_telemetry = CpuFrameTelemetry {
+            frame: 12,
+            scored: None,
+            decision: Some(CpuDecisionTrace {
+                frame: 12,
+                heading: Direction::Up,
+                reason: CpuDecisionReason::DirectIntercept,
+                forecast: Some(ForecastTrace {
+                    target_frame: 12,
+                    source: 1,
+                    predicted: Some(Direction::Right),
+                    confidence: 0.75,
+                }),
+                projection: None,
+            }),
+            next_forecast: Some(ForecastTrace {
+                target_frame: 13,
+                source: 2,
+                predicted: Some(Direction::Down),
+                confidence: 0.5,
+            }),
+        };
+
+        let value: serde_json::Value = serde_json::from_str(&to_json(&game)).unwrap();
+        assert_eq!(value["brain"]["decision"]["forecast"]["sourceKey"], "pat");
+        assert_eq!(value["brain"]["decision"]["forecast"]["targetFrame"], 12);
+        assert_eq!(value["brain"]["nextForecast"]["sourceKey"], "frq");
+        assert_eq!(value["brain"]["nextForecast"]["targetFrame"], 13);
+    }
+}

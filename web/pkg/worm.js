@@ -83,10 +83,26 @@ export class WasmGame {
         wasm.wasmgame_reset_match(this.__wbg_ptr);
     }
     /**
+     * New match using the browser space available at this boundary.
+     * @param {number} width
+     * @param {number} height
+     */
+    reset_match_with_size(width, height) {
+        wasm.wasmgame_reset_match_with_size(this.__wbg_ptr, width, height);
+    }
+    /**
      * Next game in the match (banks the session scoreboard, keeps the brain).
      */
     restart() {
         wasm.wasmgame_restart(this.__wbg_ptr);
+    }
+    /**
+     * Next game using the browser space available at this round boundary.
+     * @param {number} width
+     * @param {number} height
+     */
+    restart_with_size(width, height) {
+        wasm.wasmgame_restart_with_size(this.__wbg_ptr, width, height);
     }
     /**
      * 0=Up 1=Down 2=Left 3=Right (180s rejected game-side).
@@ -113,8 +129,7 @@ export class WasmGame {
         }
     }
     /**
-     * Per-frame entities + HUD + brain state as JSON (positions, food,
-     * power-ups, bolts, bombs, particles, scores, ensemble panel).
+     * Versioned per-frame entities, HUD, and frame-coherent brain telemetry.
      * @returns {string}
      */
     state_json() {

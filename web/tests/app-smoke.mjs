@@ -24,22 +24,36 @@ globalThis.localStorage = {
   removeItem: (k) => store.delete(k),
 };
 
+const idbStores = new Map();
+function idbRequest(result) {
+  const rq = { onsuccess: null, onerror: null, result };
+  queueMicrotask(() => rq.onsuccess && rq.onsuccess());
+  return rq;
+}
+function idbStore(name, options = {}) {
+  if (!idbStores.has(name)) idbStores.set(name, { values: new Map(), keyPath: options.keyPath });
+  const data = idbStores.get(name);
+  return {
+    createIndex() {},
+    get: (key) => idbRequest(data.values.get(key)),
+    getAll: () => idbRequest([...data.values.values()]),
+    put(value, key) {
+      data.values.set(key ?? value[data.keyPath], value);
+      return idbRequest(undefined);
+    },
+    delete: (key) => { data.values.delete(key); return idbRequest(undefined); },
+  };
+}
 globalThis.indexedDB = {
   open() {
     const rq = { onupgradeneeded: null, onsuccess: null, onerror: null, result: null, error: null };
     queueMicrotask(() => {
       const db = {
-        createObjectStore() { return {}; },
+        objectStoreNames: { contains: (name) => idbStores.has(name) },
+        createObjectStore(name, options) { return idbStore(name, options); },
         transaction() {
           return {
-            objectStore() {
-              const once = (result) => {
-                const r = { onsuccess: null, onerror: null, result };
-                queueMicrotask(() => r.onsuccess && r.onsuccess());
-                return r;
-              };
-              return { get: () => once(null), put: () => once(undefined) };
-            },
+            objectStore(name) { return idbStore(name); },
           };
         },
       };
@@ -87,6 +101,11 @@ function makeEl(id) {
     prepend(child) {
       this.children.unshift(child);
       this.lastChild = this.children[this.children.length - 1] ?? null;
+    },
+    appendChild(child) {
+      this.children.push(child);
+      this.lastChild = child;
+      return child;
     },
     removeChild(child) {
       const i = this.children.indexOf(child);
@@ -186,7 +205,7 @@ assert(sfxCalls.engineHum.some((c) => c.args[0] === true), 'engineHum(true) requ
 
 frames(3);
 assert(stub.calls.update > 0, 'game.update() driven by rAF loop');
-assert(elements.get('bp-action').textContent === 'cutting off your next corner', 'brain panel separates final CPU action from prediction source');
+assert(elements.get('bp-action').textContent.includes('cutting off your next corner'), 'brain panel separates final CPU action from prediction source');
 assert(elements.get('bp-accnum').textContent.includes('n=10'), 'round prediction accuracy includes its sample size');
 assert(elements.get('bp-lifetime').textContent.includes('n=200'), 'lifetime accuracy is labeled with its separate sample size');
 
@@ -240,12 +259,18 @@ frames(1);
 assert(!elements.get('over-overlay').classList.contains('hidden'), 'over overlay shown');
 assert(sfxCalls.engineHum.some((c) => c.args[0] === false), 'engineHum(false) on game over');
 assert(elements.get('history-body').children.length === 1, 'history row appended');
-assert(elements.get('history-body').children[0].innerHTML.includes('n=10'), 'history preserves round prediction evidence');
-assert(elements.get('history-body').children[0].innerHTML.includes('cutting off your next corner'), 'history preserves the final CPU action');
+assert(elements.get('history-body').children[0].children[6].textContent.includes('n=10'), 'history preserves round prediction evidence');
+assert(elements.get('history-body').children[0].children[8].textContent.includes('cutting off your next corner'), 'history preserves the final CPU action');
+assert(elements.get('history-summary').textContent.includes('1 saved rounds'), 'longitudinal summary includes the saved round');
 
 console.log('— next round —');
 stub.state.over = false;
+window.innerWidth = 768;
+window.innerHeight = 1024;
+frames(1);
+assert(stub.calls.restart_with_size.length === 0, 'active viewport resize does not reset the round');
 winListeners.keydown({ code: 'Enter', preventDefault() {} });
+assert(stub.calls.restart_with_size.length === 1, 'next round applies the newly available logical size once');
 assert(sfxCalls.roundStart === 2, 'roundStart fired on nextRound');
 assert(elements.get('over-overlay').classList.contains('hidden'), 'over overlay hidden again');
 frames(2);
@@ -260,10 +285,10 @@ assert(elements.get('over-overlay').classList.contains('hidden'), 'plain over ov
 
 console.log('— new match reset —');
 elements.get('new-match-btn')._listeners.click();
-assert(stub.calls.reset_match === 1, 'new-match resets the match');
+assert(stub.calls.reset_match_with_size.length === 1, 'new match applies the current logical size once');
 assert(elements.get('champion-overlay').classList.contains('hidden'), 'champion overlay dismissed');
 assert(sfxCalls.roundStart === 3, 'roundStart fired on new match');
-assert(elements.get('history-body').innerHTML === '', 'history cleared');
+assert(elements.get('history-body').children.length === 2, 'new match retains longitudinal history');
 
 console.log('— fire button —');
 elements.get('fire-btn')._listeners.pointerdown({ preventDefault() {} });

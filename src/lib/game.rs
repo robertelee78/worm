@@ -213,13 +213,13 @@ pub struct WormGame {
     /// CpuBrain counters below it provide the lifetime/session scope.
     pub round_pred_hits: u32,
     pub round_pred_total: u32,
-    pub last_scored_prediction: Option<Direction>,
-    pub last_player_actual: Option<Direction>,
-    pub last_prediction_hit: Option<bool>,
-    /// Final movement reason, distinct from the ensemble prediction source.
-    pub cpu_decision_reason: crate::cpu_ai::CpuDecisionReason,
-    /// Five-frame player path projected by the active ensemble prediction.
-    pub cpu_predicted_path: Vec<(u16, u16)>,
+    /// Frame-owned CPU evidence: scored forecast, actual decision, and the
+    /// separately-labelled forecast for the next frame.
+    pub cpu_telemetry: crate::cpu_ai::CpuFrameTelemetry,
+    /// Most recent completed decision in this round. Game-over history uses
+    /// this explicitly-labelled fallback when the lethal frame ended before
+    /// the CPU received a turn; it never masquerades as the current frame.
+    pub round_last_cpu_decision: Option<crate::cpu_ai::CpuDecisionTrace>,
     /// What killed the losing cycle (first lethal event wins). Shown on the
     /// game-over screen so "how did I die?" is never a mystery.
     pub death_cause: Option<DeathCause>,
@@ -376,11 +376,8 @@ impl WormGame {
             food_eaten_by: [0, 0],
             round_pred_hits: 0,
             round_pred_total: 0,
-            last_scored_prediction: None,
-            last_player_actual: None,
-            last_prediction_hit: None,
-            cpu_decision_reason: crate::cpu_ai::CpuDecisionReason::Opening,
-            cpu_predicted_path: Vec::new(),
+            cpu_telemetry: crate::cpu_ai::CpuFrameTelemetry::default(),
+            round_last_cpu_decision: None,
             death_cause: None,
             cpu_laser_charge: 0,
             shrink_level: 0,
@@ -512,6 +509,13 @@ impl WormGame {
         self.frame_count += 1;
         self.time += 1;
 
+        // Consume last frame's forecast into a fresh transaction before any
+        // lethal early return. A frame can therefore expose a scored forecast
+        // without a CPU decision, or a decision without a next forecast, but
+        // never stale fields from a different frame.
+        let incoming_forecast = self.cpu_telemetry.next_forecast.take();
+        self.cpu_telemetry = crate::cpu_ai::CpuFrameTelemetry::for_frame(self.frame_count);
+
         // Update difficulty based on time
         self.difficulty = self.time / 300 + 1;
 
@@ -538,17 +542,21 @@ impl WormGame {
         // Last frame's forecasts targeted this input, even when this move is
         // lethal. Score them before collision early-returns can end the game.
         if self.cpu_autopilot {
-            if let Some(predicted) = self.cpu_brain.last_opp_prediction {
-                let hit = predicted == player_dir_this_frame;
-                self.cpu_brain.opp_pred_total += 1;
-                self.round_pred_total += 1;
-                if hit {
-                    self.cpu_brain.opp_pred_hits += 1;
-                    self.round_pred_hits += 1;
+            if let Some(forecast) = incoming_forecast {
+                if let Some(predicted) = forecast.predicted {
+                    let hit = predicted == player_dir_this_frame;
+                    self.cpu_brain.opp_pred_total += 1;
+                    self.round_pred_total += 1;
+                    if hit {
+                        self.cpu_brain.opp_pred_hits += 1;
+                        self.round_pred_hits += 1;
+                    }
+                    self.cpu_telemetry.scored = Some(crate::cpu_ai::ScoredForecast {
+                        forecast,
+                        actual: player_dir_this_frame,
+                        hit,
+                    });
                 }
-                self.last_scored_prediction = Some(predicted);
-                self.last_player_actual = Some(player_dir_this_frame);
-                self.last_prediction_hit = Some(hit);
             }
             self.cpu_brain
                 .ensemble
@@ -654,25 +662,26 @@ impl WormGame {
                         Direction::Left => Direction::Right,
                         Direction::Right => Direction::Left,
                     };
-                    ![Direction::Up, Direction::Down, Direction::Left, Direction::Right]
-                        .into_iter()
-                        .filter(|&d| d != back)
-                        .any(|d| {
-                            let (dx, dy) = d.as_delta();
-                            let nx = cy.head.0 as i16 + dx;
-                            let ny = cy.head.1 as i16 + dy;
-                            if nx < 0
-                                || ny < 0
-                                || nx >= self.width as i16
-                                || ny >= self.height as i16
-                            {
-                                return false;
-                            }
-                            let (nx, ny) = (nx as u16, ny as u16);
-                            self.passable(nx, ny)
-                                || (vacating == Some((nx, ny))
-                                    && !self.bombs.iter().any(|b| b.x == nx && b.y == ny))
-                        })
+                    ![
+                        Direction::Up,
+                        Direction::Down,
+                        Direction::Left,
+                        Direction::Right,
+                    ]
+                    .into_iter()
+                    .filter(|&d| d != back)
+                    .any(|d| {
+                        let (dx, dy) = d.as_delta();
+                        let nx = cy.head.0 as i16 + dx;
+                        let ny = cy.head.1 as i16 + dy;
+                        if nx < 0 || ny < 0 || nx >= self.width as i16 || ny >= self.height as i16 {
+                            return false;
+                        }
+                        let (nx, ny) = (nx as u16, ny as u16);
+                        self.passable(nx, ny)
+                            || (vacating == Some((nx, ny))
+                                && !self.bombs.iter().any(|b| b.x == nx && b.y == ny))
+                    })
                 } else {
                     let (dx, dy) = cy.direction.as_delta();
                     let nx = (cy.head.0 as i16 + dx).max(0).min((self.width - 1) as i16) as u16;
@@ -1006,6 +1015,12 @@ impl WormGame {
             e.confidence = confidence;
             e.predicted_dir = pending[active];
             self.cpu_brain.last_opp_prediction = e.predicted_dir;
+            self.cpu_telemetry.next_forecast = Some(crate::cpu_ai::ForecastTrace {
+                target_frame: self.frame_count + 1,
+                source: active,
+                predicted: e.predicted_dir,
+                confidence,
+            });
         }
 
         // Track each cycle's last-executed direction (documented per-frame
@@ -1026,8 +1041,7 @@ impl WormGame {
         // particles for its last 30 frames.
         if self.has_corridor() && self.time >= SUDDEN_DEATH_START {
             let elapsed = self.time - SUDDEN_DEATH_START;
-            let max_level = (self.width.min(self.height).saturating_sub(8) / 2)
-                .saturating_sub(2);
+            let max_level = (self.width.min(self.height).saturating_sub(8) / 2).saturating_sub(2);
             let target = ((elapsed / SUDDEN_DEATH_INTERVAL) as u16).min(max_level);
             while self.shrink_level < target && !self.game_over {
                 self.shrink_level += 1;
@@ -1038,7 +1052,7 @@ impl WormGame {
             }
             if self.shrink_level < max_level {
                 let next_in = SUDDEN_DEATH_INTERVAL - (elapsed % SUDDEN_DEATH_INTERVAL);
-                if next_in <= 30 && self.time % 3 == 0 {
+                if next_in <= 30 && self.time.is_multiple_of(3) {
                     self.ring_ember_particles(2 + self.shrink_level + 1);
                 }
             }
@@ -1065,8 +1079,9 @@ impl WormGame {
             return;
         }
         let (l, r, t, b) = (off, self.width - 1 - off, off, self.height - 1 - off);
-        let on_ring =
-            |x: u16, y: u16| (x == l || x == r || y == t || y == b) && (l..=r).contains(&x) && (t..=b).contains(&y);
+        let on_ring = |x: u16, y: u16| {
+            (x == l || x == r || y == t || y == b) && (l..=r).contains(&x) && (t..=b).contains(&y)
+        };
         let mut dead = [false; 2];
         for (c, d) in dead.iter_mut().enumerate() {
             let (hx, hy) = self.cycles[c].head;
@@ -1223,13 +1238,18 @@ impl WormGame {
         self.round_pred_total = 0;
         self.cpu_laser_charge = 0;
         self.shrink_level = 0;
-        self.last_scored_prediction = None;
-        self.last_player_actual = None;
-        self.last_prediction_hit = None;
-        self.cpu_decision_reason = crate::cpu_ai::CpuDecisionReason::Opening;
-        self.cpu_predicted_path.clear();
+        self.cpu_telemetry = crate::cpu_ai::CpuFrameTelemetry::default();
+        self.round_last_cpu_decision = None;
         self.death_cause = None;
         self.generate_food_items();
+    }
+
+    /// Apply a browser's newly-available logical arena size at a round
+    /// boundary. Active rounds never call this: live viewport changes remain
+    /// presentation-only until the user starts the next round.
+    pub fn restart_with_size(&mut self, width: u16, height: u16) {
+        self.fixed_dims = Some((width, height));
+        self.restart();
     }
 
     pub fn frame_delay(&self) -> Duration {
@@ -1447,9 +1467,8 @@ impl WormGame {
                 // odd-gap head-on approach exchanges cells with the bolt in a
                 // single frame — comparing post-move cells alone tunneled
                 // straight through. The head's pre-move cell is positions[1].
-                let swapped = cy.head == (ox, oy)
-                    && cy.positions.len() > 1
-                    && cy.positions[1] == (ux, uy);
+                let swapped =
+                    cy.head == (ox, oy) && cy.positions.len() > 1 && cy.positions[1] == (ux, uy);
                 cy.head == (ux, uy) || swapped
             });
             if let Some(c) = hit {
@@ -1535,14 +1554,12 @@ impl WormGame {
                         self.grid[uy as usize][ux as usize] = CellType::Empty;
                         self.powerups.retain(|&(px, py, _)| (px, py) != (ux, uy));
                     }
-                    CellType::Wall => {
+                    CellType::Wall if self.is_arena_wall(ux, uy) => {
                         // Design intent: a blast punches the ring-2 arena
                         // wall open (same Hole as WallPunch) so players can
                         // reach the outer corridor. The ring-0 frame is
                         // indestructible.
-                        if self.is_arena_wall(ux, uy) {
-                            self.grid[uy as usize][ux as usize] = CellType::Hole;
-                        }
+                        self.grid[uy as usize][ux as usize] = CellType::Hole;
                     }
                     _ => {}
                 }
@@ -1982,17 +1999,36 @@ impl WormGame {
                 let mark = if i == e.active { '*' } else { ' ' };
                 s.push_str(&format!("{}:{:+.2}{} ", name, e.score(i), mark));
             }
-            let arrow = e.predicted_dir.map(dir_glyph).unwrap_or('·');
+            let current_decision = self.cpu_telemetry.decision.as_ref();
+            let decision = current_decision.or(self.round_last_cpu_decision.as_ref());
+            let decision_label = if current_decision.is_some() {
+                "decision"
+            } else {
+                "last decision"
+            };
+            let arrow = decision
+                .and_then(|trace| trace.forecast)
+                .and_then(|forecast| forecast.predicted)
+                .map(dir_glyph)
+                .unwrap_or('·');
+            let source = decision
+                .and_then(|trace| trace.forecast)
+                .map(|forecast| crate::cpu_ai::MODEL_NAMES[forecast.source])
+                .unwrap_or("—");
+            let action = decision
+                .map(|trace| trace.reason.as_str())
+                .unwrap_or("no decision");
             format!(
-                "{}→ {}  round:{:.0}%/{} lifetime:{:.0}%/{} source:{} action:{}",
+                "{}{}→ {}  round:{:.0}%/{} lifetime:{:.0}%/{} source:{} action:{}",
                 s,
+                decision_label,
                 arrow,
                 self.round_pred_accuracy() * 100.0,
                 self.round_pred_total,
                 self.cpu_brain.opp_pred_accuracy() * 100.0,
                 self.cpu_brain.opp_pred_total,
-                crate::cpu_ai::MODEL_NAMES[e.active],
-                self.cpu_decision_reason.as_str(),
+                source,
+                action,
             )
         } else {
             "←→ ARROW KEYS or WASD: Move │ SPACE: Fire Power-up │ R: Restart │ Q: Quit │ EAT NUMBERS TO GROW • COLLIDE TO DIE".to_string()
@@ -2011,6 +2047,18 @@ impl WormGame {
         .unwrap();
 
         if self.game_over {
+            let decision = self
+                .cpu_telemetry
+                .decision
+                .as_ref()
+                .or(self.round_last_cpu_decision.as_ref());
+            let decision_source = decision
+                .and_then(|trace| trace.forecast)
+                .map(|forecast| crate::cpu_ai::MODEL_NAMES[forecast.source])
+                .unwrap_or("—");
+            let decision_action = decision
+                .map(|trace| trace.reason.as_str())
+                .unwrap_or("no decision");
             let winner_text = match self.winner {
                 Some(0) => "PLAYER WINS!".to_string(),
                 Some(1) => "CPU WINS!".to_string(),
@@ -2040,8 +2088,8 @@ impl WormGame {
                     self.round_pred_total,
                     self.cpu_brain.opp_pred_accuracy() * 100.0,
                     self.cpu_brain.opp_pred_total,
-                    crate::cpu_ai::MODEL_NAMES[self.cpu_brain.ensemble.active],
-                    self.cpu_decision_reason.as_str(),
+                    decision_source,
+                    decision_action,
                     dw[0],
                     dw[1],
                 )),
@@ -2196,6 +2244,13 @@ mod sfx_queue {
 #[cfg(target_arch = "wasm32")]
 pub fn drain_sfx_events() -> Vec<SfxEvent> {
     sfx_queue::drain()
+}
+
+/// Native feature builds exercise the browser API contract without a browser
+/// sound queue. Real WebAudio events remain wasm32-only.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn drain_sfx_events() -> Vec<SfxEvent> {
+    Vec::new()
 }
 
 /// Expand a kind-tagged jingle into queue entries with accumulating delays —

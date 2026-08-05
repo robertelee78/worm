@@ -21,10 +21,12 @@ Per-game scores reset on restart; the k-NN memory persists as the corpus.
 
 ```
 cargo build                          # debug build
-cargo test --lib --tests             # 45 unit/integration tests
+cargo test --lib --tests             # 70 unit/integration tests
 cargo bench --bench cpu_ai_bench     # THE behavioural gate (harness=false, runs main)
 cargo run --release                  # play it (terminal)
 ./web/build.sh                       # build the browser bundle (web/pkg)
+node web/tests/app-smoke.mjs         # browser driver/IndexedDB integration smoke
+./web/tests/browser-responsive.sh    # real Chrome responsive + persistence gate
 cd web && python3 -m http.server 8080  # serve the web version
 ```
 
@@ -48,8 +50,9 @@ games on wasm are always seeded).
 - **Per-player brain persistence**: `CpuBrain::to_bytes/from_bytes` (bincode
   + magic). Native: `worm_brain.bin` (env `WORM_BRAIN`). Browser: IndexedDB
   keyed by a long-lived `worm_device_id` localStorage nonce — the CPU learns
-  THAT player across sessions; no server needed. Aggregate layer (if ever):
-  server-side SQLite of per-game summaries is sufficient.
+  THAT player across sessions; no server needed. IndexedDB v2 also retains up
+  to 200 validated per-device round summaries and aggregates wins, prediction
+  accuracy, and strongest-model evidence across reloads and new matches.
 - **Speed model**: speed is earned by eating — `frame_delay = 115ms −
   min(80, food_eaten_total/2)` (floor 35ms), `speed_pct()` for HUD/music.
   Not time-based. Food renders as value-sized orbs/glyphs (no digits).
@@ -64,13 +67,17 @@ games on wasm are always seeded).
   '░' smoulder on terminal Empty cells at fuse ≤ 15; full 21×21 zone +
   fuse-arc countdown on canvas). Never leave the bomb as just a dot.
 - **Brain panel (web)**: plain-language CPU BRAIN side card — prediction
-  glyph + confidence/sample size, source model (flashes on change), actual
-  tactical action, last forecast result, projected five-cell path, 7 model
-  rows with human names/forecasts/effective scores/hit rates, warm-up and
+  glyph + confidence/sample size for the explicitly labeled next forecast;
+  the executed frame's tactical action, evidence source, scored result, and
+  projected five-cell path are a separate coherent snapshot. Seven compact
+  model rows show human names/forecasts/effective scores/hit rates, warm-up and
   retention state, direction habits, and separately scoped round/lifetime
-  accuracy against the 25% chance floor. The arena and side panel share the
-  browser viewport without overflow; below 980 px the panel stacks and the
-  arena keeps its logical aspect ratio. The terminal bottom bar keeps the
+  accuracy against the 25% chance floor. Game-over/history falls back to the
+  explicitly labeled last completed decision when the lethal frame ended
+  before the CPU's turn. The arena and side panel share the browser viewport
+  without overflow; below 1240 px the panel stacks. CSS scales an active round;
+  newly available logical dimensions apply on the next round boundary while
+  preserving the brain and match score. The terminal bottom bar keeps the
   compact `BRAIN rep:… knn:*` line on ≥100-col terminals.
 
 ## The benchmark rule (load-bearing, from /opt/rps-ai/CLAUDE.md)
@@ -84,10 +91,12 @@ The bench pits the adaptive CPU against scripted opponents and scores
    to familiar and spends it.
 4. A change ships only if the bench improves: adaptive must beat naive.
 
-Harness caveats (found 2026-08-04, read before trusting rows):
+Harness facts (corrected 2026-08-05, read before trusting rows):
 
-- The bench's `food` column is `cycles[1].score` = frames survived + food
-  value — dominated by survival. It is not "food eaten".
+- `frames` is `game.time`; `actual-food` is `food_eaten_by[1]`. Never relabel
+  `cycles[1].score` as food: it includes survival frames.
+- Naive and adaptive rows use paired seeds and explicit `winner` outcomes. The
+  held-out gate fails closed unless adaptive CPU wins exceed naive CPU wins.
 - Scripted opponents circle 2×2 blocks in open space (right turn every free
   frame) and suicide when food grows them mid-circle. Opponent death time is
   mostly seed luck.
@@ -98,13 +107,14 @@ Harness caveats (found 2026-08-04, read before trusting rows):
 - A fast kill lowers the adaptive row's `moves` — survival delta punishes
   winning quickly. Read wins first, deltas second.
 
-Current baseline (2026-08-04, ensemble + behavior build, board pinned at
+Current truthful baseline (2026-08-05, board pinned at
 120×38 via with_size_seed):
 
-- Familiar: adaptive **98/100 wins** (kills the wall-follower at ~183
-  frames; naive never dies on its own).
-- Held-out (chaser): adaptive **99/100 wins vs naive 0%**, survival +19.7,
-  food +19.8.
+- Familiar wall-follower (iteration only): naive caps 100/100; adaptive records
+  37 CPU wins, 57 player wins, and 6 caps, averaging 2082.9 round frames and
+  5.9 actual food.
+- Held-out chaser (shipping evidence): adaptive **99/100 CPU wins vs naive
+  0/100** (naive draws 100/100), with +19.4 round frames and +0.1 actual food.
 - Reward signal: episodes record frames survived *on the current heading*
   (resets on turn, 0 on crash) + 10× food — verified accumulating by test.
 - Opponent-model accuracy is tracked live: `cpu_brain.opp_pred_accuracy()`
