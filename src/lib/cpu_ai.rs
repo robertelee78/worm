@@ -1824,7 +1824,30 @@ pub fn free_step(game: &WormGame, hx: u16, hy: u16, dir: Direction) -> bool {
 /// Previously this capped at 2000 (~44% of a 120×38 board) and hard-clipped to
 /// the arena interior, so `norm_open` was systematically under-reported.
 pub fn count_open_space(game: &WormGame, start_x: u16, start_y: u16) -> f32 {
+    count_open_space_excluding(game, start_x, start_y, &[])
+}
+
+/// `count_open_space` with extra cells treated as walls — the player's
+/// PREDICTED next positions. The plain flood fill is honest about the board
+/// as it stands and completely blind to the board as it is about to be:
+/// a pocket whose mouth the player's advancing trail closes NEXT frame still
+/// measures thousands of cells this frame. Both traced warm-arm death modes
+/// (the corridor pin at the arena wall and the close-evasion pocket seal at
+/// length 60+) are exactly that blindness. Subtracting the few cells the
+/// player is projected to occupy is what lets a destination be scored
+/// against the board it will actually have to survive in.
+pub fn count_open_space_excluding(
+    game: &WormGame,
+    start_x: u16,
+    start_y: u16,
+    excluded: &[(u16, u16)],
+) -> f32 {
     let mut visited = vec![vec![false; game.width as usize]; game.height as usize];
+    for &(ex, ey) in excluded {
+        if ex < game.width && ey < game.height {
+            visited[ey as usize][ex as usize] = true;
+        }
+    }
     let mut queue: VecDeque<(u16, u16)> = VecDeque::new();
     queue.push_back((start_x, start_y));
     visited[start_y as usize][start_x as usize] = true;
@@ -3704,9 +3727,35 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
             min_dist = min_dist.min(dist);
         }
         if min_dist <= 2 {
+            // This was the ONLY deviation layer with no space term: it scored
+            // pure distance-from-player and could hug alongside them for ten
+            // straight frames while their advancing trail sealed the region —
+            // the traced length-61 OwnTrail death (open 3565 → 16 in one
+            // frame). Two changes, both strengthenings:
+            //   1. open space is measured with the player's predicted next
+            //      cells EXCLUDED, so "about to be sealed" is visible now;
+            //   2. candidates below the escape floor on that measure are
+            //      rejected whenever any candidate clears it (same discipline
+            //      as every other layer — never empties the choice).
+            let evasion_open = |d: Direction| -> f32 {
+                let (ddx, ddy) = d.as_delta();
+                let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
+                let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
+                count_open_space_excluding(game, nx, ny, &predicted_positions)
+            };
+            let clearing: Vec<Direction> = candidates
+                .iter()
+                .copied()
+                .filter(|&d| evasion_open(d) >= escape_cells)
+                .collect();
+            let pool: &[Direction] = if clearing.is_empty() {
+                candidates
+            } else {
+                &clearing
+            };
             let mut best_dir = wall_dir;
             let mut best_score = f32::NEG_INFINITY;
-            for &d in candidates {
+            for &d in pool {
                 let (ddx, ddy) = d.as_delta();
                 let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
                 let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
@@ -3716,19 +3765,25 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
                     dmin = dmin.min(dd);
                 }
                 let wall_bonus = if d == wall_dir { 3.0 } else { 0.0 };
-                let score = dmin as f32 + wall_bonus;
+                // When nothing clears the floor, survival outranks distance:
+                // take the roomiest pocket rather than the farthest corner of
+                // a sealed one.
+                let score = if clearing.is_empty() {
+                    evasion_open(d)
+                } else {
+                    dmin as f32 + wall_bonus
+                };
                 if score > best_score {
                     best_score = score;
                     best_dir = d;
                 }
             }
             if game.rng_f32(0.0, 1.0) < EXPLORE_RATE {
-                // Draw from the threat-filtered candidates, not raw legal —
-                // exploration must not step onto a bolt path or blast zone
-                // the dodge logic just steered around.
+                // Draw from the floor-clearing pool, not raw candidates —
+                // exploration must not dive into the pocket the dodge logic
+                // just steered around.
                 choose!(
-                    candidates[(game.rng_f32(0.0, candidates.len() as f32) as usize)
-                        .min(candidates.len() - 1)],
+                    pool[(game.rng_f32(0.0, pool.len() as f32) as usize).min(pool.len() - 1)],
                     CpuDecisionReason::CloseEvasion
                 );
             }
