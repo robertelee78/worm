@@ -2753,7 +2753,18 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
     // opponent prediction (refreshed at frame end) drives the hunt layers.
 
     // --- Opponent Model Prediction (the rps-ai ensemble, refreshed at frame end) ---
-    decision_forecast = game.cpu_telemetry.scored.map(|scored| scored.forecast);
+    // The forecast for the frame the player has NOT yet chosen.
+    //
+    // This used to read `cpu_telemetry.scored` — the forecast for the frame
+    // already in progress, whose answer is `cycles[0].direction` by the time
+    // this runs. Steering on it meant the "prediction" was a restatement of an
+    // observable, and no amount of improving the model could have changed a
+    // decision. `next_forecast` is now produced before this call (see the
+    // ordering note in `WormGame::update`) and genuinely targets t+1.
+    decision_forecast = game
+        .cpu_telemetry
+        .next_forecast
+        .or_else(|| game.cpu_telemetry.scored.map(|scored| scored.forecast));
     let player_pred_dir = decision_forecast
         .and_then(|forecast| forecast.predicted)
         .unwrap_or(game.cycles[0].direction);

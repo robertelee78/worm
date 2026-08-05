@@ -826,6 +826,68 @@ impl WormGame {
             }
         }
 
+        // --- Learn from the player's move, THEN forecast their next one ---
+        //
+        // This runs BEFORE the CPU decides, and that ordering is the whole
+        // point. It used to sit at the end of the frame, so `cpu_decide` had
+        // no fresh forecast to read and fell back to `cpu_telemetry.scored` —
+        // the forecast for the frame ALREADY IN PROGRESS, whose true answer is
+        // sitting in `cycles[0].direction` by then. The CPU was steering on a
+        // restatement of something it could already see, which is why the
+        // opponent model influenced almost nothing.
+        //
+        // Safe here: the player has already moved this frame (their head and
+        // trail are written above), and everything below consumes only
+        // `player_ctx_pre` / `player_dir_this_frame`, both captured at frame
+        // start. The forecast therefore targets t+1 from the board the player
+        // will actually choose on.
+        // --- Opponent Model Learning ---
+        // Store (pre-move player context → direction the player took), encoded
+        // at frame start before the tail saw this frame's move.
+        // (rps-ai learns from what the HUMAN played next, not what the AI did.)
+        crate::cpu_ai::record_player_episode(
+            &mut self.cpu_brain,
+            player_ctx_pre,
+            player_dir_this_frame,
+        );
+        // Player move history feeding the CPU tail (trailing-match bonus).
+        self.cpu_brain.record_player_move(player_dir_this_frame);
+
+        // --- The rps-ai ensemble: score last frame's predictions against the
+        // actual move, then refresh every model's prediction for next frame
+        // (counterfactual recording — rps-ai stores model0..5 every round).
+        if self.cpu_autopilot {
+            let (pending, active, confidence) =
+                crate::cpu_ai::compute_ensemble(self, &self.cpu_brain);
+            let e = &mut self.cpu_brain.ensemble;
+            e.pending = pending;
+            e.active = active;
+            e.confidence = confidence;
+            e.predicted_dir = pending[active];
+            // Constrain the forecast to what the player can actually do next.
+            // A prediction into a wall is an abstention dressed as an answer,
+            // and it abstains precisely on the forced-turn frames where a
+            // habit is the only thing left to read.
+            // The heading the player will be travelling when they choose next.
+            // `snapshot_direction` has not run yet, so this frame's move lives
+            // in `direction` — and the next frame's reversal ban is relative to
+            // it, not to `prev_direction`.
+            let heading = self.cycles[self.player].direction;
+            let legal_next = crate::cpu_ai::legal_options_from(self, self.player, heading);
+            let turn_prior = self.cpu_brain.opp_brain.turn_prior();
+            let e = &mut self.cpu_brain.ensemble;
+            e.predicted_dir =
+                crate::cpu_ai::mask_to_legal(e.predicted_dir, &legal_next, heading, &turn_prior);
+            self.cpu_brain.last_opp_prediction = e.predicted_dir;
+            self.cpu_telemetry.next_forecast = Some(crate::cpu_ai::ForecastTrace {
+                target_frame: self.frame_count + 1,
+                source: active,
+                predicted: e.predicted_dir,
+                confidence,
+            });
+        }
+
+
         // CPU AI — faithful k-NN memory opponent (rps-ai mechanism).
         // Only runs when the CPU drives itself: scripted bench opponents
         // (cpu_autopilot = false) keep their externally-steered heading and
@@ -1032,52 +1094,6 @@ impl WormGame {
                 self.frames_since_cpu_move,
                 cpu_food_val,
             );
-        }
-
-        // --- Opponent Model Learning ---
-        // Store (pre-move player context → direction the player took), encoded
-        // at frame start before the tail saw this frame's move.
-        // (rps-ai learns from what the HUMAN played next, not what the AI did.)
-        crate::cpu_ai::record_player_episode(
-            &mut self.cpu_brain,
-            player_ctx_pre,
-            player_dir_this_frame,
-        );
-        // Player move history feeding the CPU tail (trailing-match bonus).
-        self.cpu_brain.record_player_move(player_dir_this_frame);
-
-        // --- The rps-ai ensemble: score last frame's predictions against the
-        // actual move, then refresh every model's prediction for next frame
-        // (counterfactual recording — rps-ai stores model0..5 every round).
-        if self.cpu_autopilot {
-            let (pending, active, confidence) =
-                crate::cpu_ai::compute_ensemble(self, &self.cpu_brain);
-            let e = &mut self.cpu_brain.ensemble;
-            e.pending = pending;
-            e.active = active;
-            e.confidence = confidence;
-            e.predicted_dir = pending[active];
-            // Constrain the forecast to what the player can actually do next.
-            // A prediction into a wall is an abstention dressed as an answer,
-            // and it abstains precisely on the forced-turn frames where a
-            // habit is the only thing left to read.
-            // The heading the player will be travelling when they choose next.
-            // `snapshot_direction` has not run yet, so this frame's move lives
-            // in `direction` — and the next frame's reversal ban is relative to
-            // it, not to `prev_direction`.
-            let heading = self.cycles[self.player].direction;
-            let legal_next = crate::cpu_ai::legal_options_from(self, self.player, heading);
-            let turn_prior = self.cpu_brain.opp_brain.turn_prior();
-            let e = &mut self.cpu_brain.ensemble;
-            e.predicted_dir =
-                crate::cpu_ai::mask_to_legal(e.predicted_dir, &legal_next, heading, &turn_prior);
-            self.cpu_brain.last_opp_prediction = e.predicted_dir;
-            self.cpu_telemetry.next_forecast = Some(crate::cpu_ai::ForecastTrace {
-                target_frame: self.frame_count + 1,
-                source: active,
-                predicted: e.predicted_dir,
-                confidence,
-            });
         }
 
         // Track each cycle's last-executed direction (documented per-frame
