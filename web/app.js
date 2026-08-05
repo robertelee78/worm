@@ -325,7 +325,7 @@ const KEYMAP = {
 };
 
 // PowerUpKind wire values from wasm state_json cycles[i].held (null = none).
-const PU_NAMES = ['LASER', 'TRI-SHOT', 'BOMB', 'WALL-PUNCH'];
+const PU_NAMES = ['LASER', 'TRI-SHOT', 'BOMB'];
 
 window.addEventListener('keydown', (e) => {
   sfx.unlock();
@@ -440,7 +440,7 @@ function loop(now) {
 // Typed sfx protocol (game.rs): [kind, freq_hz, dur_ms, delay_ms] quads.
 // kind 0=Food (TWO events per pickup: 880+v*40 then 1320+v*40 — route only
 // the first of each pair, recovering the value from its freq), 1=PowerUp,
-// 2=Laser, 3=TriShot, 4=BombPlant, 5=Detonate, 6=WallPunch, 7=DeathRiff
+// 2=Laser, 3=TriShot, 4=BombPlant, 5=Detonate, 6=Breach, 7=DeathRiff
 // (ONE event — audio.js sequences the riff itself). Kind-less legacy triples
 // and unknown kinds fall back to the raw square voice.
 function playSfx() {
@@ -881,7 +881,8 @@ function render(s) {
         offCtx.fill();
       }
     } else if (kind === 2) {
-      // BOMB: dark sphere + spark
+      // BOMB: dark sphere + spark. Explicit `kind === 2`, not a bare `else`:
+      // a bare else silently draws a bomb for any future power-up kind.
       offCtx.fillStyle = '#333';
       offCtx.beginPath(); offCtx.arc(cx, cy + 1, R * 0.75, 0, Math.PI * 2); offCtx.fill();
       offCtx.strokeStyle = '#888'; offCtx.beginPath();
@@ -889,17 +890,6 @@ function render(s) {
       offCtx.stroke();
       offCtx.fillStyle = `hsl(${(performance.now() / 8) % 60}, 100%, 60%)`;
       offCtx.beginPath(); offCtx.arc(cx + R * 0.9, cy - R * 0.9, 2, 0, Math.PI * 2); offCtx.fill();
-    } else {
-      // WALLPUNCH: cracked brick
-      offCtx.fillStyle = '#a0522d';
-      offCtx.fillRect(cx - R * 0.8, cy - R * 0.55, R * 1.6, R * 1.1);
-      offCtx.strokeStyle = '#ffd24d';
-      offCtx.beginPath();
-      offCtx.moveTo(cx - R * 0.3, cy - R * 0.55);
-      offCtx.lineTo(cx - R * 0.05, cy - R * 0.1);
-      offCtx.lineTo(cx - R * 0.25, cy + R * 0.15);
-      offCtx.lineTo(cx + R * 0.15, cy + R * 0.55);
-      offCtx.stroke();
     }
     // pickup halo so the tile reads from across the arena
     offCtx.strokeStyle = 'rgba(255, 230, 80, 0.5)';

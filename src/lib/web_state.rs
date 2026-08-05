@@ -164,7 +164,6 @@ fn powerup_u8(kind: PowerUpKind) -> u8 {
         PowerUpKind::Laser => 0,
         PowerUpKind::TriShot => 1,
         PowerUpKind::Bomb => 2,
-        PowerUpKind::WallPunch => 3,
     }
 }
 

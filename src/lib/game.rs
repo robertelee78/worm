@@ -55,13 +55,14 @@ pub enum PowerUpKind {
     /// opponents hiding in corridors, detonates bombs in its path, passes
     /// through trails and holes; stops at the outer frame.
     Laser,
-    /// Three bolts (straight + two diagonals), TRI_SHOT_RANGE cells each, die on walls.
+    /// Three bolts (straight + two forward diagonals). They fly until they hit
+    /// a wall — they never break one — so range is a property of the board
+    /// rather than a magic number that meant something different on every
+    /// board size.
     TriShot,
     /// Planted at the current cell; detonates after ~3s. Chebyshev radius
     /// BOMB_RADIUS_CELLS kills heads and clears trails; chains into other bombs.
     Bomb,
-    /// Flies to the arena wall and punches a permanent Hole through it.
-    WallPunch,
 }
 
 /// A live tri-shot bolt. `from` is the cycle that fired it — bolts can never
@@ -124,7 +125,10 @@ impl<'a> IntoIterator for &'a BeamPath {
 pub const SUDDEN_DEATH_START: u32 = 3000;
 /// Sudden death: one wall ring closes every this many frames.
 pub const SUDDEN_DEATH_INTERVAL: u32 = 150;
-pub const TRI_SHOT_RANGE: u8 = 7;
+/// Bolt lifetime cap. Not a range limit — bolts die on walls, and the arena is
+/// always enclosed, so this only exists as defence-in-depth against a future
+/// change to the ring-0 frame invariant.
+pub const TRI_SHOT_MAX_STEPS: u8 = u8::MAX;
 pub const MAX_POWERUPS_ON_BOARD: usize = 3;
 
 #[derive(Clone, Debug)]
@@ -1593,7 +1597,7 @@ impl WormGame {
                 if let Some((bx, by)) = beam.breach {
                     self.grid[by as usize][bx as usize] = CellType::Hole;
                     self.add_impact_particles(bx, by, (120, 255, 120));
-                    play_beep(SfxKind::WallPunch, 660, 60);
+                    play_beep(SfxKind::Breach, 660, 60);
                 }
 
                 // Beam flash particles along the whole path. Lifetime in the
@@ -1620,7 +1624,7 @@ impl WormGame {
                         y: hy,
                         dx: ddx,
                         dy: ddy,
-                        steps_left: TRI_SHOT_RANGE,
+                        steps_left: TRI_SHOT_MAX_STEPS,
                         from: who as u8,
                     });
                 }
@@ -1640,27 +1644,6 @@ impl WormGame {
                 self.add_impact_particles(hx, hy, (255, 120, 40));
                 // Two-beat "thud" — audible countdown cue without blocking.
                 play_beep_sequence(SfxKind::BombPlant, &[220, 160], &[90, 90]);
-            }
-            PowerUpKind::WallPunch => {
-                // Fly to the first wall cell; if it is the punchable arena wall, open a hole.
-                let mut x = hx as i16;
-                let mut y = hy as i16;
-                loop {
-                    x += dx;
-                    y += dy;
-                    if x < 0 || y < 0 || x >= self.width as i16 || y >= self.height as i16 {
-                        break;
-                    }
-                    let (ux, uy) = (x as u16, y as u16);
-                    if self.grid[uy as usize][ux as usize] == CellType::Wall {
-                        if self.is_arena_wall(ux, uy) {
-                            self.grid[uy as usize][ux as usize] = CellType::Hole;
-                            self.add_impact_particles(ux, uy, (120, 255, 120));
-                            play_beep(SfxKind::WallPunch, 660, 60);
-                        }
-                        break;
-                    }
-                }
             }
         }
         if self.game_over {
@@ -1851,7 +1834,7 @@ impl WormGame {
                     }
                     CellType::Wall if self.is_arena_wall(ux, uy) => {
                         // Design intent: a blast punches the ring-2 arena
-                        // wall open (same Hole as WallPunch) so players can
+                        // wall open (a Hole, same as a laser breach) so players can
                         // reach the outer corridor. The ring-0 frame is
                         // indestructible.
                         self.grid[uy as usize][ux as usize] = CellType::Hole;
@@ -1934,13 +1917,14 @@ impl WormGame {
             if self.grid[y as usize][x as usize] == CellType::Empty
                 && !self.bombs.iter().any(|b| (b.x, b.y) == (x, y))
             {
-                // Weighted kinds: WallPunch is situational (only useful when
-                // facing the ring-2 wall), so a flat 25% over-served it.
+                // Even thirds. The 0..10 draw shape is kept deliberately: it
+                // is ONE call on the seeded RNG stream, and changing the call
+                // shape would shift every later draw, not just this one.
                 let kind = match self.rng_range(0..10) {
                     0..=2 => PowerUpKind::Laser,
                     3..=5 => PowerUpKind::TriShot,
                     6..=8 => PowerUpKind::Bomb,
-                    _ => PowerUpKind::WallPunch,
+                    _ => PowerUpKind::Bomb,
                 };
                 self.powerups.push((x, y, kind));
                 self.grid[y as usize][x as usize] = CellType::PowerUp;
@@ -1955,7 +1939,6 @@ impl WormGame {
             Some(PowerUpKind::Laser) => "LASER",
             Some(PowerUpKind::TriShot) => "TRI-SHOT",
             Some(PowerUpKind::Bomb) => "BOMB",
-            Some(PowerUpKind::WallPunch) => "PUNCH",
             None => "-",
         }
     }
@@ -2127,7 +2110,6 @@ impl WormGame {
                             // it on that row.
                             PowerUpKind::TriShot => '🔱',
                             PowerUpKind::Bomb => '💣',
-                            PowerUpKind::WallPunch => '🔨',
                         };
                         (200, 200, 0, ch, false)
                     }
@@ -2212,7 +2194,7 @@ impl WormGame {
         }
 
         // Draw particles (over trails, walls and holes too — the beam flash
-        // travels through trails and the WallPunch flash lands on a Hole cell).
+        // travels through trails and the breach flash lands on a Hole cell).
         for p in &self.particles {
             let x = p.x as u16;
             let y = p.y as u16;
@@ -2507,7 +2489,11 @@ pub enum SfxKind {
     TriShot = 3,
     BombPlant = 4,
     Detonate = 5,
-    WallPunch = 6,
+    /// Breach — a laser beam or bomb blast punching through the arena wall.
+    /// KEEPS discriminant 6 (formerly WallPunch): the SfxKind number is the
+    /// wire contract the browser switches on, so renumbering would silently
+    /// remap every later sound.
+    Breach = 6,
     DeathRiff = 7,
 }
 

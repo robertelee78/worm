@@ -2639,9 +2639,8 @@ pub fn ensemble_rank_score(brain: &CpuBrain, model: usize) -> f32 {
 /// Heuristic for when the CPU should fire a held power-up.
 /// Fires when the player is in range for a kill:
 ///   - Laser: player is in line of fire (same row/col, no walls between)
-///   - TriShot: player is within TRI_SHOT_RANGE cells
+///   - TriShot: player sits on one of the three bolt rays
 ///   - Bomb: player is within BOMB_RADIUS_CELLS of current cell
-///   - WallPunch: CPU is trapped (only 1 legal direction) — escape route
 pub fn should_fire(game: &mut WormGame, who: usize) -> bool {
     let kind = match game.cycles[who].held_powerup {
         Some(k) => k,
@@ -2664,15 +2663,20 @@ pub fn should_fire(game: &mut WormGame, who: usize) -> bool {
             beam.contains(&(ox, oy))
         }
         crate::game::PowerUpKind::TriShot => {
-            // Player within TRI_SHOT_RANGE cells AND in the forward arc:
-            // bolts travel straight + the two forward diagonals, so a target
-            // behind the head can never be hit — firing there wasted the
-            // power-up every time.
+            // Bolts occupy exactly three rays — straight ahead and the two
+            // forward diagonals — so alignment, not distance, decides whether
+            // a shot can land.
+            //
+            // The old test was `manhattan <= TRI_SHOT_RANGE && forward`, an
+            // ARC. Most of the arc is unhittable, and now that bolts fly until
+            // a wall a distance gate would also refuse exactly the long
+            // straight shots that make the unbounded bolt worth having.
             let (dx, dy) = game.cycles[who].direction.as_delta();
             let fdx = ox as i16 - hx as i16;
             let fdy = oy as i16 - hy as i16;
-            let dist = fdx.abs() + fdy.abs();
-            dist <= crate::game::TRI_SHOT_RANGE as i16 && dx * fdx + dy * fdy > 0
+            let forward = dx * fdx + dy * fdy > 0;
+            let on_ray = fdx == 0 || fdy == 0 || fdx.abs() == fdy.abs();
+            forward && on_ray
         }
         crate::game::PowerUpKind::Bomb => {
             // Player within bomb blast radius.
@@ -2680,11 +2684,6 @@ pub fn should_fire(game: &mut WormGame, who: usize) -> bool {
                 .abs()
                 .max((hy as i32 - oy as i32).abs())) as i16;
             dist <= crate::game::BOMB_RADIUS_CELLS
-        }
-        crate::game::PowerUpKind::WallPunch => {
-            // Fire when trapped — only 1 legal direction (likely blocked in).
-            let legal = legal_directions(game, &game.cycles[who]);
-            legal.len() <= 1
         }
     }
 }

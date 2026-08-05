@@ -188,14 +188,30 @@ fn test_tri_shot_does_not_self_kill() {
     assert!(game.fire_powerup(0));
     assert_eq!(game.projectiles.len(), 3, "tri-shot spawns three bolts");
 
-    for _ in 0..8 {
+    // Bolts now fly until they hit a wall rather than expiring at a fixed
+    // range, so run until they are spent. The firer drives on unattended and
+    // will eventually hit a wall itself — that is not what this test is about,
+    // so the invariant is checked on the CAUSE of death, not on game_over.
+    for _ in 0..200 {
         game.update();
-        assert!(game.cycles[0].alive, "player must survive its own bolts");
-        assert!(!game.game_over, "tri-shot must not self-kill the firer");
+        assert_ne!(
+            game.death_cause,
+            Some(worm::game::DeathCause::TriShotBolt),
+            "a tri-shot must never kill its own firer"
+        );
+        if game.projectiles.is_empty() || game.game_over {
+            break;
+        }
     }
     assert!(
         game.projectiles.is_empty(),
-        "bolts expire at TRI_SHOT_RANGE without touching the firer"
+        "bolts must die on the arena wall, not fly forever"
+    );
+    // The arena is enclosed, so nothing can escape the board — the wall
+    // terminates every bolt and no bolt may breach one.
+    assert!(
+        game.grid.iter().flatten().all(|c| *c != worm::CellType::Hole),
+        "tri-shot bolts must never break a wall"
     );
 }
 
@@ -965,7 +981,7 @@ fn test_sfx_protocol_wire_format() {
     assert_eq!(SfxKind::TriShot as u8, 3);
     assert_eq!(SfxKind::BombPlant as u8, 4);
     assert_eq!(SfxKind::Detonate as u8, 5);
-    assert_eq!(SfxKind::WallPunch as u8, 6);
+    assert_eq!(SfxKind::Breach as u8, 6);
     assert_eq!(SfxKind::DeathRiff as u8, 7);
     // A typed quad serializes with the kind first; an empty drain is "[]".
     let events = [(SfxKind::DeathRiff as u8, 440, 100, 0)];
