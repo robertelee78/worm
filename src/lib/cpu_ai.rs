@@ -486,8 +486,32 @@ pub fn mask_to_legal(
     }
 }
 
-/// Minimum scored decisions before a read rate is reported at all.
-pub const READ_RATE_MIN_SAMPLES: u32 = 30;
+/// Minimum frames on which the CPU and the trivial baseline DISAGREED before
+/// a read rate is reported. Not a frame count — see `ReadRate::is_ready`.
+pub const READ_RATE_MIN_DISCORDANT: u32 = 20;
+
+/// Complementary error function, Abramowitz & Stegun 7.1.26. Only used on the
+/// far tail where the exact McNemar sum is out of range.
+fn erfc_approx(x: f64) -> f64 {
+    let z = x.abs();
+    let t = 1.0 / (1.0 + 0.5 * z);
+    let y = t
+        * (-z * z - 1.26551223
+            + t * (1.00002368
+                + t * (0.37409196
+                    + t * (0.09678418
+                        + t * (-0.18628806
+                            + t * (0.27886807
+                                + t * (-1.13520398
+                                    + t * (1.48851587
+                                        + t * (-0.82215223 + t * 0.17087277)))))))))
+        .exp();
+    if x >= 0.0 {
+        y
+    } else {
+        2.0 - y
+    }
+}
 
 /// How well the CPU actually reads this player.
 ///
@@ -513,21 +537,64 @@ pub struct ReadRate {
     pub hits: u32,
     /// Decisions scored.
     pub samples: u32,
-    /// Turns actually taken, indexed by `turn_index` — the base rate.
+    /// Turns actually taken, indexed by `turn_index`. Doubles as the running
+    /// state of the baseline predictor.
     pub taken: [u32; TURNS],
     /// Scored decisions bucketed by how many legal options the player had.
     /// Only [2] and [3] can be non-zero (a reversal is never legal), which is
     /// why uniform chance here is ~1/3 and never 1/4.
     pub opts: [u32; 4],
+    /// Correct calls by the ONLINE baseline — "predict the commonest turn seen
+    /// so far". Counted at the same instants as `hits`, under the same
+    /// information constraint.
+    pub mode_hits: u32,
+    /// McNemar discordant pairs. `cpu_only` = CPU right where the baseline was
+    /// wrong; `mode_only` = the reverse. Frames where both agreed carry no
+    /// evidence about which predictor is better and are deliberately not
+    /// counted anywhere.
+    pub cpu_only: u32,
+    pub mode_only: u32,
 }
 
 impl ReadRate {
+    /// The commonest turn seen SO FAR. Ties break to the lowest index, so the
+    /// baseline is deterministic and a run is replayable. `None` before any
+    /// evidence — a predictor with no data has no call, and that counts as a
+    /// miss rather than a free pass.
+    fn modal_turn(&self) -> Option<Turn> {
+        let max = *self.taken.iter().max()?;
+        if max == 0 {
+            return None;
+        }
+        (0..TURNS)
+            .find(|&i| self.taken[i] == max)
+            .map(|i| match i {
+                0 => Turn::Straight,
+                1 => Turn::Left,
+                _ => Turn::Right,
+            })
+    }
+
     pub fn record(&mut self, options: u8, actual: Turn, hit: bool) {
+        // Score the baseline BEFORE folding this frame in, so it never peeks
+        // at the outcome it is being judged on — the same information the CPU
+        // had, at the same instant.
+        let mode_hit = self.modal_turn() == Some(actual);
+
         self.samples += 1;
         self.taken[turn_index(actual)] += 1;
         self.opts[(options as usize).min(3)] += 1;
         if hit {
             self.hits += 1;
+        }
+        if mode_hit {
+            self.mode_hits += 1;
+        }
+        // Only disagreements carry evidence about which predictor is better.
+        match (hit, mode_hit) {
+            (true, false) => self.cpu_only += 1,
+            (false, true) => self.mode_only += 1,
+            _ => {}
         }
     }
 
@@ -540,14 +607,78 @@ impl ReadRate {
         }
     }
 
-    /// What "always predict the commonest turn" would have scored — the
-    /// trivial predictor the model has to beat to have earned anything.
+    /// What "always predict the commonest turn seen so far" actually scored —
+    /// the trivial rival the model has to beat to have earned anything.
+    ///
+    /// Realized, not hindsight. Scoring `max(taken)/samples` would apply the
+    /// FINAL mode retroactively to every frame including the ones where it was
+    /// not yet knowable — an oracle no one could have run, and one that
+    /// produces no per-trial outcomes to pair the CPU against.
     pub fn base_rate(&self) -> f32 {
         if self.samples == 0 {
             0.0
         } else {
-            *self.taken.iter().max().unwrap_or(&0) as f32 / self.samples as f32
+            self.mode_hits as f32 / self.samples as f32
         }
+    }
+
+    /// Frames on which the CPU and the trivial baseline disagreed. This — not
+    /// the frame count — is the real sample size of the claim "it beat your
+    /// habits". Against a very predictable player the two agree almost always,
+    /// and thousands of frames can carry a dozen frames of actual evidence.
+    pub fn discordant(&self) -> u32 {
+        self.cpu_only + self.mode_only
+    }
+
+    /// One-sided exact McNemar p-value: the probability of the CPU leading the
+    /// baseline by this much among the frames where they disagreed, if the two
+    /// were really equally good.
+    ///
+    /// Exact rather than a normal approximation, because `discordant()` is
+    /// routinely small and "your normal approximation is invalid at n = 8" is
+    /// the first thing a reader will say. Under the null each discordant frame
+    /// is a coin flip, so this is the upper tail of Binomial(n, 0.5).
+    pub fn p_value(&self) -> f32 {
+        let n = self.discordant();
+        if n == 0 {
+            return 1.0;
+        }
+        if n > 1000 {
+            // Beyond the exact range, fall back to a continuity-corrected
+            // normal. At this n the answer is astronomically small anyway.
+            let b = self.cpu_only as f64;
+            let c = self.mode_only as f64;
+            let z = ((b - c).abs() - 1.0).max(0.0) / (n as f64).sqrt();
+            return if b > c {
+                (0.5 * erfc_approx(z / std::f64::consts::SQRT_2)) as f32
+            } else {
+                1.0
+            };
+        }
+        // Iterate the PMF multiplicatively; C(n,k) directly would overflow.
+        let n_u = n as u64;
+        let mut pmf = 0.5f64.powi(n as i32); // k = 0
+        let mut tail = 0.0f64;
+        for k in 0..=n_u {
+            if k >= self.cpu_only as u64 {
+                tail += pmf;
+            }
+            if k < n_u {
+                pmf = pmf * (n_u - k) as f64 / (k + 1) as f64;
+            }
+        }
+        tail.clamp(0.0, 1.0) as f32
+    }
+
+    /// Continuity-corrected z, for anyone who wants it on the wire.
+    pub fn z(&self) -> f32 {
+        let n = self.discordant();
+        if n == 0 {
+            return 0.0;
+        }
+        let b = self.cpu_only as f32;
+        let c = self.mode_only as f32;
+        ((b - c).abs() - 1.0).max(0.0) * (b - c).signum() / (n as f32).sqrt()
     }
 
     /// Uniform-choice chance, exact rather than assumed: the mean of 1/k over
@@ -577,20 +708,17 @@ impl ReadRate {
         ((self.rate() - base) / (1.0 - base)).clamp(0.0, 1.0)
     }
 
+    /// Enough DISAGREEMENTS to say anything. Gating on frame count would be
+    /// measuring the wrong thing: against a player whose habits the baseline
+    /// already captures, the two predictors agree on nearly every frame, and
+    /// no number of agreements is evidence about which is better.
     pub fn is_ready(&self) -> bool {
-        self.samples >= READ_RATE_MIN_SAMPLES
+        self.discordant() >= READ_RATE_MIN_DISCORDANT
     }
 
-    /// Beating the trivial predictor by a margin unlikely to be luck.
-    /// Normal approximation to a binomial around the base rate.
+    /// The CPU is beating the player's own habits, not just repeating them.
     pub fn is_significant(&self) -> bool {
-        if !self.is_ready() {
-            return false;
-        }
-        let n = self.samples as f32;
-        let base = self.base_rate().min(0.999);
-        let sd = (base * (1.0 - base) / n).sqrt();
-        sd > 0.0 && (self.rate() - base) / sd >= 2.0
+        self.is_ready() && self.cpu_only > self.mode_only && self.p_value() <= 0.025
     }
 
     /// One phrase, worded identically in the browser panel and the terminal
@@ -599,7 +727,7 @@ impl ReadRate {
         if self.samples == 0 {
             "read —/no decisions".to_string()
         } else if !self.is_ready() {
-            format!("read —/{} of {}", self.samples, READ_RATE_MIN_SAMPLES)
+            format!("read —/{} of {}", self.samples, READ_RATE_MIN_DISCORDANT)
         } else {
             format!(
                 "read {:.0}% vs usual {:.0}% · lift {:.0}%{}",
@@ -3182,41 +3310,93 @@ mod tests {
     /// commonest turn must score ZERO lift, however high its raw hit rate.
     /// Measured against a real opponent this is not hypothetical — the CPU
     /// scores 98.3% and so does "always straight", so its true lift is 0.
+    /// A CPU that only ever predicts the player's usual move must be
+    /// indistinguishable from the trivial baseline, however high its raw hit
+    /// rate. It agrees with the baseline on essentially every frame, so there
+    /// is no evidence either way — and the metric must say so rather than
+    /// print a 98% and call it a read.
     #[test]
-    fn predicting_the_usual_thing_earns_no_lift() {
+    fn predicting_the_usual_thing_proves_nothing() {
         let mut r = ReadRate::default();
-        // 98 straights, all called; 2 turns, both missed — the trivial model.
-        for _ in 0..98 {
+        // Player goes straight 80% of the time. CPU always guesses straight —
+        // exactly what the baseline does, so they hit and miss together.
+        for _ in 0..80 {
             r.record(3, Turn::Straight, true);
         }
-        for _ in 0..2 {
+        for _ in 0..20 {
             r.record(3, Turn::Left, false);
         }
 
-        assert!((r.rate() - 0.98).abs() < 1e-6, "raw rate looks excellent");
-        assert!((r.base_rate() - 0.98).abs() < 1e-6, "so does the trivial predictor");
-        assert_eq!(r.lift(), 0.0, "and the lift correctly reports nothing learned");
+        assert!(r.rate() > 0.79, "raw rate looks respectable: {}", r.rate());
+        assert!(
+            r.discordant() <= 1,
+            "a copy of the baseline disagrees with it essentially never"
+        );
+        assert!(!r.is_ready(), "and therefore never accumulates evidence");
         assert!(!r.is_significant());
     }
 
-    /// The complement: catching the turns is what earns lift.
+    /// Catching the turns the baseline misses is the only thing that counts —
+    /// and it is exactly what shows up as discordant pairs.
     #[test]
-    fn calling_the_turns_earns_lift() {
-        let mut trivial = ReadRate::default();
-        let mut reader = ReadRate::default();
+    fn calling_the_turns_is_what_earns_significance() {
+        let mut r = ReadRate::default();
         for _ in 0..80 {
-            trivial.record(3, Turn::Straight, true);
-            reader.record(3, Turn::Straight, true);
+            r.record(3, Turn::Straight, true); // both right, no evidence
         }
         for _ in 0..20 {
-            trivial.record(3, Turn::Left, false); // always guesses straight
-            reader.record(3, Turn::Left, true); // actually read the turn
+            r.record(3, Turn::Left, true); // CPU right, baseline wrong
         }
 
-        assert_eq!(trivial.lift(), 0.0);
-        assert!(reader.lift() > 0.9, "calling every turn is near-total lift");
-        assert!(reader.is_significant());
-        assert!(!trivial.is_significant());
+        // 20 turns, plus the very first frame where the baseline had no data
+        // yet and therefore no call.
+        assert_eq!(r.cpu_only, 21, "every turn called is a point of evidence");
+        assert_eq!(r.mode_only, 0);
+        assert!(r.is_ready());
+        assert!(r.is_significant(), "p = {}", r.p_value());
+        assert!(r.p_value() < 0.001);
+    }
+
+    /// The falsifiability check: a CPU no better than the baseline must NOT
+    /// come out significant, however many frames it is given. A metric that
+    /// cannot report failure is not evidence of anything.
+    #[test]
+    fn a_coin_flipping_cpu_is_never_significant() {
+        let mut r = ReadRate::default();
+        // Disagreements split evenly — the CPU wins some, the baseline wins
+        // just as many. That is what "no better" looks like.
+        for i in 0..200 {
+            let turn = if i % 3 == 0 { Turn::Left } else { Turn::Straight };
+            r.record(3, turn, i % 2 == 0);
+        }
+        assert!(r.is_ready(), "plenty of disagreements to judge on");
+        assert!(
+            !r.is_significant(),
+            "even split must not read as a read: b={} c={} p={}",
+            r.cpu_only,
+            r.mode_only,
+            r.p_value()
+        );
+    }
+
+    /// The exact McNemar tail must match hand-computed values, or every claim
+    /// downstream of it is decoration.
+    #[test]
+    fn mcnemar_p_value_is_exact() {
+        // 20 disagreements, all won by the CPU: p = 0.5^20.
+        let mut all = ReadRate::default();
+        all.cpu_only = 20;
+        all.mode_only = 0;
+        assert!((all.p_value() - 0.5f32.powi(20)).abs() < 1e-9);
+
+        // A dead-even split is the least significant result possible.
+        let mut even = ReadRate::default();
+        even.cpu_only = 10;
+        even.mode_only = 10;
+        assert!(even.p_value() > 0.4, "p = {}", even.p_value());
+
+        // No disagreements at all: nothing to conclude.
+        assert_eq!(ReadRate::default().p_value(), 1.0);
     }
 
     /// Uniform chance is reported honestly per decision — never the 1/4 the

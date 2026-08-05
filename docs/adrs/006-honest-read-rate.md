@@ -172,3 +172,44 @@ better but does not yet *act* on it, because the confidence gates that would
 consume the prediction are still calibrated against the old all-frame number.
 That is the next milestone, and it is now a tuning problem against a working
 signal rather than a search for one.
+
+## Correction — the 69% figure measured the wrong thing
+
+The addendum above claimed masking took lift from 0% to 69%. That number is
+real but it is not evidence of learning, and the claim is withdrawn.
+
+`lift` pools every scored frame. Most frames are the player continuing
+straight, and a large minority are frames where only ONE move was legal — the
+board decides, and any board-aware predictor scores 100%. Masking fixed
+exactly that second category: measured on single-option frames, the forecast
+went from **63–80% to 97–99.5%**. Free accuracy on geometry, correctly
+collected, and it dominated the pooled number.
+
+Isolating the frames where a scripted persona actually exercised its habit
+tells the real story:
+
+| persona | habit frames | read% | chance% | z |
+|---|---|---|---|---|
+| compass — absolute habit (POSITIVE) | 5,991 | 96.6 | 34.0 | **+102.2** |
+| staircase — absolute habit (POSITIVE) | 7,576 | 95.0 | 46.1 | **+85.3** |
+| coinflip — no habit (NULL) | 28,366 | 33.5 | 34.4 | −3.1 |
+| chaos — no habit (NULL) | 53,064 | 32.7 | 34.7 | −9.3 |
+| **lefty — relative habit** | 94 | **31.9** | 43.8 | **−2.3** |
+| **corner_cutter — relative habit** | 919 | **41.8** | 50.0 | **−5.0** |
+| **alternator — relative habit** | 99 | **48.5** | 50.0 | −0.3 |
+
+The dividing line is not "turns are hard" — staircase turns on 84% of frames
+and is read at 95%. The line is **absolute versus relative**. Every habit
+expressible as a preference over compass directions is learned; every habit
+relative to the player's own heading is not, and is read *below* chance
+because the forecast defaults to the current heading, which a turn frame
+guarantees is wrong.
+
+The ground truth confirms the category error directly: lefty's measured
+relative-left share is 0.884, and the model responds by building a confident
+*absolute* prior of Left 0.640. It observed the habit and encoded it in a
+space that cannot hold it.
+
+So masking was a genuine fix to a genuine bug, and the learning defect is
+untouched. Retargeting the model to relative turns remains the open work, and
+`tests/persona_learning.rs` now holds its acceptance criterion.
