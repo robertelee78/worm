@@ -138,6 +138,15 @@ export class WasmGame {
         wasm.wasmgame_restart_with_size(this.__wbg_ptr, width, height);
     }
     /**
+     * All-time rounds this brain has played against its human — persisted
+     * with the portfolio, so it survives every session and schema change.
+     * @returns {number}
+     */
+    rounds_remembered() {
+        const ret = wasm.wasmgame_rounds_remembered(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
      * 0=Up 1=Down 2=Left 3=Right (180s rejected game-side).
      * @param {number} dir
      */

@@ -146,7 +146,19 @@ fn play(games: u32, seed: u64, warm: bool) -> (Record, f32) {
         }
         match game.winner {
             Some(1) => rec.cpu += 1,
-            Some(0) => rec.player += 1,
+            Some(0) => {
+                rec.player += 1;
+                println!(
+                    "    [cpu death] game {} frame {} cause {:?} reason {:?} len {} read {:.2} style x{:.1}",
+                    g,
+                    game.frame_count,
+                    game.death_cause,
+                    game.round_last_cpu_decision.as_ref().map(|d| d.reason),
+                    game.cycles[1].positions.len(),
+                    game.read_rate,
+                    worm::cpu_ai::PORTFOLIO_STYLES[game.cpu_brain.portfolio.active],
+                );
+            }
             _ => rec.draw += 1,
         }
         lift = game.cpu_brain.lifetime_read.lift();

@@ -152,4 +152,10 @@ impl WasmGame {
     pub fn brain_restore_was_partial(&self) -> bool {
         self.brain_restore.map(|r| r.is_partial()).unwrap_or(false)
     }
+
+    /// All-time rounds this brain has played against its human — persisted
+    /// with the portfolio, so it survives every session and schema change.
+    pub fn rounds_remembered(&self) -> u32 {
+        self.game.cpu_brain.portfolio.rounds
+    }
 }

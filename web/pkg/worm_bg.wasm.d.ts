@@ -15,6 +15,7 @@ export const wasmgame_reset_match: (a: number) => void;
 export const wasmgame_reset_match_with_size: (a: number, b: number, c: number) => void;
 export const wasmgame_restart: (a: number) => void;
 export const wasmgame_restart_with_size: (a: number, b: number, c: number) => void;
+export const wasmgame_rounds_remembered: (a: number) => number;
 export const wasmgame_set_direction: (a: number, b: number) => void;
 export const wasmgame_sfx_json: (a: number) => [number, number];
 export const wasmgame_state_json: (a: number) => [number, number];

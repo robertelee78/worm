@@ -56,6 +56,11 @@ export class WasmGame {
      */
     restart_with_size(width: number, height: number): void;
     /**
+     * All-time rounds this brain has played against its human — persisted
+     * with the portfolio, so it survives every session and schema change.
+     */
+    rounds_remembered(): number;
+    /**
      * 0=Up 1=Down 2=Left 3=Right (180s rejected game-side).
      */
     set_direction(dir: number): void;
@@ -92,6 +97,7 @@ export interface InitOutput {
     readonly wasmgame_reset_match_with_size: (a: number, b: number, c: number) => void;
     readonly wasmgame_restart: (a: number) => void;
     readonly wasmgame_restart_with_size: (a: number, b: number, c: number) => void;
+    readonly wasmgame_rounds_remembered: (a: number) => number;
     readonly wasmgame_set_direction: (a: number, b: number) => void;
     readonly wasmgame_sfx_json: (a: number) => [number, number];
     readonly wasmgame_state_json: (a: number) => [number, number];

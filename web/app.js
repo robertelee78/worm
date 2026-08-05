@@ -10,7 +10,7 @@ const MATCH_TARGET = 3;
 const STATE_SCHEMA_VERSION = 2;
 const ROUND_SCHEMA_VERSION = 1;
 const MAX_ROUND_HISTORY = 200;
-const MODEL_NAMES = ['rep', 'pat', 'frq', 'due', 'wlR', 'wlL', 'knn'];
+const MODEL_NAMES = ['rep', 'pat', 'frq', 'due', 'wlR', 'wlL', 'knn', 'eat', 'hunt', 'arm'];
 const DIR_GLYPH = ['▲', '▼', '◀', '▶'];
 const CELL_EMPTY = 0, CELL_WALL = 1, CELL_PLAYER = 2, CELL_CPU = 3, CELL_FOOD = 4, CELL_HOLE = 5, CELL_POWERUP = 6;
 
@@ -106,7 +106,7 @@ function validRound(record) {
     Number.isFinite(record.endedAt) && Number.isInteger(record.frames) &&
     Array.isArray(record.foodEaten) && record.foodEaten.length === 2 &&
     record.accuracy && Number.isInteger(record.accuracy.samples) &&
-    Array.isArray(record.models) && record.models.length === MODEL_NAMES.length;
+    Array.isArray(record.models) && record.models.length >= 7;
 }
 
 async function roundsRead() {
@@ -302,7 +302,17 @@ async function boot() {
     // A brain saved by an older build is migrated, not discarded — the
     // summary says what carried forward so a returning player is never
     // silently handed a blank opponent.
-    setBrainStatus(game.brain_restore_summary() || 'brain restored from this device');
+    // Say the quiet part out loud: the memory is THIS BROWSER'S, and it
+    // accumulates. A returning player must know they are facing everything
+    // they have ever taught it — that IS the product, and a status line that
+    // buries it reads as if every session starts cold.
+    const remembered = game.rounds_remembered();
+    setBrainStatus(
+      remembered > 0
+        ? `it remembers you — round ${remembered + 1} in this browser · ` +
+          (game.brain_restore_summary() || 'memory restored')
+        : (game.brain_restore_summary() || 'brain restored from this device'),
+    );
   } else {
     setBrainStatus('fresh brain — teach it by playing');
   }

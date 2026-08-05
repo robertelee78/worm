@@ -21,6 +21,9 @@ const MODEL_DISPLAY_NAMES: [&str; ENSEMBLE_MODELS] = [
     "Wall reader · R",
     "Wall reader · L",
     "Deep memory",
+    "Food-seeker",
+    "Hunter",
+    "Arming-up",
 ];
 
 #[derive(Serialize)]

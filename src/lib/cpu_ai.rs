@@ -96,7 +96,12 @@ fn evacuate_ring(
 /// How much of its escape margin a HUNT may spend at a perfect read. At
 /// `read_rate` 0 the floor is untouched (today's behaviour exactly); at 1.0 the
 /// CPU commits to an intercept on ~45% of the room it normally insists on.
-const HUNT_MARGIN_SPEND: f32 = 0.55;
+/// Retuned 0.55 -> 0.35 when the food economy landed: 0.55 was calibrated for
+/// a CPU that orbited walls between hunts, and once it lived mid-arena
+/// chasing food the same spend meant hunting from exposure instead of from
+/// cover — the warm arm died MORE than the cold one (87% vs 90%), the exact
+/// inversion ADR-009 exists to forbid.
+const HUNT_MARGIN_SPEND: f32 = 0.35;
 /// Superlinear, so a strong read bites noticeably harder than a middling one
 /// rather than the whole range feeling the same.
 const HUNT_MARGIN_CURVE: f32 = 0.7;
@@ -1844,6 +1849,139 @@ pub fn count_open_space(game: &WormGame, start_x: u16, start_y: u16) -> f32 {
 /// BFS from (sx,sy) to the nearest collectible (food or power-up). Returns
 /// (direction_to_take, open_space_at_item). Only considers legal directions
 /// from the start, and checks that the item cell is reachable.
+/// BFS distance field from (sx, sy): (dist, first-step) per cell. `legal`
+/// seeds the frontier; empty seeds all four neighbours (the opponent field —
+/// their reversal rule is not ours to enforce).
+fn bfs_field(
+    game: &WormGame,
+    sx: u16,
+    sy: u16,
+    legal: &[Direction],
+) -> Vec<(i32, Option<Direction>)> {
+    let w = game.width as usize;
+    let mut f = vec![(-1i32, None); w * game.height as usize];
+    let mut q: VecDeque<(u16, u16)> = VecDeque::new();
+    let seeds: &[Direction] = if legal.is_empty() {
+        &[
+            Direction::Up,
+            Direction::Down,
+            Direction::Left,
+            Direction::Right,
+        ]
+    } else {
+        legal
+    };
+    for &d in seeds {
+        let (dx, dy) = d.as_delta();
+        let nx = sx as i16 + dx;
+        let ny = sy as i16 + dy;
+        if nx < 0 || ny < 0 || nx >= game.width as i16 || ny >= game.height as i16 {
+            continue;
+        }
+        let (nx, ny) = (nx as u16, ny as u16);
+        let idx = ny as usize * w + nx as usize;
+        if f[idx].0 < 0 && game.passable(nx, ny) {
+            f[idx] = (1, Some(d));
+            q.push_back((nx, ny));
+        }
+    }
+    while let Some((x, y)) = q.pop_front() {
+        let (base, sd) = f[y as usize * w + x as usize];
+        for (dx, dy) in [(0i16, -1i16), (0, 1), (-1, 0), (1, 0)] {
+            let nx = x as i16 + dx;
+            let ny = y as i16 + dy;
+            if nx < 0 || ny < 0 || nx >= game.width as i16 || ny >= game.height as i16 {
+                continue;
+            }
+            let (nx, ny) = (nx as u16, ny as u16);
+            let idx = ny as usize * w + nx as usize;
+            if f[idx].0 < 0
+                && matches!(
+                    game.grid[ny as usize][nx as usize],
+                    CellType::Empty | CellType::Food | CellType::Hole | CellType::PowerUp
+                )
+            {
+                f[idx] = (base + 1, sd);
+                q.push_back((nx, ny));
+            }
+        }
+    }
+    f
+}
+
+/// The item worth chasing: best VALUE-PER-STEP among items the CPU reaches
+/// STRICTLY before the player, that still leave an escape after the post-eat
+/// growth. Returns the first step to take and reachable space at the target.
+///
+/// This replaces nearest-item BFS, which was measured losing 86% of the food
+/// races it was strictly closer to and ending matches with ~6% of the
+/// economy. Three rules, each load-bearing:
+///   RACE — the player's head resolves BEFORE the CPU's inside update(), so a
+///   tie goes to them: chase only what we win OUTRIGHT, stop donating detours.
+///   VALUE — a 9-morsel two steps further beats a 1-morsel; nearest-first
+///   could not tell them apart.
+///   ESCAPE — eating value v freezes tail retraction for v frames, so the
+///   body to outrun afterwards is len + v; nearest-first checked the board as
+///   if eating were free.
+/// Losing every race is also why the CPU used to disengage and orbit corners:
+/// with no winnable item on its list, the survival layers were all that
+/// remained. A winnable target is what pulls it into the arena.
+fn best_food_target(
+    game: &WormGame,
+    cx: u16,
+    cy: u16,
+    legal: &[Direction],
+) -> Option<(Direction, f32)> {
+    if game.food_items.is_empty() && game.powerups.is_empty() {
+        return None;
+    }
+    let w = game.width as usize;
+    let mine = bfs_field(game, cx, cy, legal);
+    let (px, py) = game.cycles[0].head;
+    let theirs = bfs_field(game, px, py, &[]);
+    let own_len =
+        game.cycles[1].positions.len() as f32 + game.cycles[1].pending_growth as f32;
+
+    let mut best: Option<(f32, Direction, f32)> = None;
+    let mut consider = |fx: u16, fy: u16, value: f32| {
+        let idx = fy as usize * w + fx as usize;
+        let (md, sd) = mine[idx];
+        let Some(sd) = sd else { return };
+        if md <= 0 {
+            return;
+        }
+        let td = theirs[idx].0;
+        // Win by a MARGIN, not by a nose. Bisected: with `td <= md` alone the
+        // CPU sprinted for every photo-finish item and its deaths tripled
+        // (player wins 0-1 -> 4-6) — a race won by one step leaves it head to
+        // head with the opponent at the prize. Two steps of daylight keeps
+        // the engagement and returns the survival.
+        if td >= 0 && td <= md + 2 {
+            return;
+        }
+        // And never cross the whole arena for lunch: a long chase is a long
+        // exposure, and the item will usually be gone.
+        if md > 24 {
+            return;
+        }
+        let open = count_open_space(game, fx, fy);
+        if open < own_len + value + 6.0 {
+            return; // post-eat trap
+        }
+        let score = value / (md as f32 + 2.0);
+        if best.map_or(true, |(b, _, _)| score > b) {
+            best = Some((score, sd, open));
+        }
+    };
+    for &(fx, fy, fv) in &game.food_items {
+        consider(fx, fy, fv as f32);
+    }
+    for &(pxx, pyy, _) in &game.powerups {
+        consider(pxx, pyy, 5.0); // a power-up is worth a mid-size morsel
+    }
+    best.map(|(_, d, open)| (d, open))
+}
+
 fn bfs_nearest_food_dir(
     game: &WormGame,
     sx: u16,
@@ -2851,9 +2989,14 @@ fn left_turn(dir: Direction) -> Direction {
  * rps-ai's per-game record); the k-NN memory beneath persists as the corpus.
  */
 
-pub const ENSEMBLE_MODELS: usize = 7;
+pub const ENSEMBLE_MODELS: usize = 10;
+/// Index of the k-NN model — the warm-corpus score bonus attaches here, not
+/// to "the last model", which stopped being the k-NN when the intent models
+/// joined.
+pub const KNN_MODEL: usize = 6;
 /// Short names for the HUD brain panel, in model order.
-pub const MODEL_NAMES: [&str; ENSEMBLE_MODELS] = ["rep", "pat", "frq", "due", "wlR", "wlL", "knn"];
+pub const MODEL_NAMES: [&str; ENSEMBLE_MODELS] =
+    ["rep", "pat", "frq", "due", "wlR", "wlL", "knn", "eat", "hunt", "arm"];
 /// Score bonus for the sophisticated model once warm (rps-ai's +0.15).
 const KNN_SCORE_BONUS: f32 = 0.15;
 
@@ -3104,6 +3247,81 @@ fn m_knn(game: &WormGame, brain: &CpuBrain) -> Option<Direction> {
 /// quadratic score (knn gets its sophistication bonus once warm), and report
 /// the driver's rolling hit-rate as the ensemble confidence.
 /// (rps-ai `computer_choice`.)
+/// The player's legal, non-reversing steps right now.
+fn player_steps(game: &WormGame) -> Vec<Direction> {
+    legal_options_from(game, 0, game.cycles[0].direction)
+}
+
+/// M7 `eat`: the player is HEADED FOR FOOD. Predicts the step that most
+/// shortens the way to their nearest apparent morsel — where "apparent"
+/// includes the CPU's own disguised mines, because to the player those ARE
+/// food. When this model is driving, the panel is literally saying "I think
+/// you're going for that food" — and if the food is bait, so much the better.
+///
+/// This is the model the habit family cannot be: a goal hypothesis. A human
+/// crossing an open arena in a straight line is not expressing a turning
+/// habit, they are executing an errand — and predicting the errand is what
+/// makes the read feel like being understood rather than being tallied.
+fn m_goal(game: &WormGame) -> Option<Direction> {
+    let (px, py) = game.cycles[0].head;
+    let target = game
+        .food_items
+        .iter()
+        .map(|&(x, y, _)| (x, y))
+        .chain(
+            game.bombs
+                .iter()
+                .filter(|b| b.owner == 1)
+                .map(|b| (b.x, b.y)),
+        )
+        .min_by_key(|&(x, y)| {
+            (x as i32 - px as i32).abs() + (y as i32 - py as i32).abs()
+        })?;
+    player_steps(game).into_iter().min_by_key(|d| {
+        let (dx, dy) = d.as_delta();
+        let nx = px as i32 + dx as i32;
+        let ny = py as i32 + dy as i32;
+        (nx - target.0 as i32).abs() + (ny - target.1 as i32).abs()
+    })
+}
+
+/// M8 `hunt`: the player is COMING FOR US. Predicts the step that closes on
+/// the CPU's head — the opening move of every wall-in. When this hypothesis
+/// carries the weight, the human is not foraging or habit-walking; they are
+/// hunting, and the CPU should expect to be cut off, not followed.
+fn m_hunt(game: &WormGame) -> Option<Direction> {
+    let (px, py) = game.cycles[0].head;
+    let (cx, cy) = game.cycles[1].head;
+    player_steps(game).into_iter().min_by_key(|d| {
+        let (dx, dy) = d.as_delta();
+        let nx = px as i32 + dx as i32;
+        let ny = py as i32 + dy as i32;
+        (nx - cx as i32).abs() + (ny - cy as i32).abs()
+    })
+}
+
+/// M9 `arm`: the player is GOING FOR A POWER-UP. Same shape as `eat`, but
+/// power-ups only — they are visually distinct icons, worth a longer detour,
+/// and a player heading for one is about to become dangerous. "Why are you
+/// moving" has at least three answers a habit tally can never give: food,
+/// weapon, or me. This is the weapon one.
+fn m_arm(game: &WormGame) -> Option<Direction> {
+    let (px, py) = game.cycles[0].head;
+    let target = game
+        .powerups
+        .iter()
+        .map(|&(x, y, _)| (x, y))
+        .min_by_key(|&(x, y)| {
+            (x as i32 - px as i32).abs() + (y as i32 - py as i32).abs()
+        })?;
+    player_steps(game).into_iter().min_by_key(|d| {
+        let (dx, dy) = d.as_delta();
+        let nx = px as i32 + dx as i32;
+        let ny = py as i32 + dy as i32;
+        (nx - target.0 as i32).abs() + (ny - target.1 as i32).abs()
+    })
+}
+
 pub fn compute_ensemble(
     game: &WormGame,
     brain: &CpuBrain,
@@ -3117,6 +3335,9 @@ pub fn compute_ensemble(
         m_wall(game, true),
         m_wall(game, false),
         m_knn(game, brain),
+        m_goal(game),
+        m_hunt(game),
+        m_arm(game),
     ];
 
     let e = &brain.ensemble;
@@ -3138,7 +3359,7 @@ pub fn compute_ensemble(
             continue; // never scored — not eligible yet
         }
         let mut w = e.w_fast[i] + e.w_slow[i];
-        if i == ENSEMBLE_MODELS - 1 && brain.opp_brain.episodes.len() >= COLD_START_EPISODES {
+        if i == KNN_MODEL && brain.opp_brain.episodes.len() >= COLD_START_EPISODES {
             w *= 1.0 + KNN_SCORE_BONUS;
         }
         if w > best_score {
@@ -3160,7 +3381,7 @@ pub fn compute_ensemble(
 /// the raw quadratic score so a warm k-NN bonus is never an invisible tie-break.
 pub fn ensemble_rank_score(brain: &CpuBrain, model: usize) -> f32 {
     let mut score = brain.ensemble.score(model);
-    if model == ENSEMBLE_MODELS - 1 && brain.opp_brain.episodes.len() >= COLD_START_EPISODES {
+    if model == KNN_MODEL && brain.opp_brain.episodes.len() >= COLD_START_EPISODES {
         score += KNN_SCORE_BONUS;
     }
     score
@@ -3557,7 +3778,7 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
         // Tier 3: BFS pathfinding to nearest safe food.
         // Only used when the food isn't on the wall-follow path and the
         // destination has enough open space to not trap us.
-        if let Some((food_dir, food_open)) = bfs_nearest_food_dir(game, cx, cy, candidates) {
+        if let Some((food_dir, food_open)) = best_food_target(game, cx, cy, candidates) {
             // Only take the BFS path if the destination clears the same
             // survival floor every other wall-follow deviation obeys (the
             // old hard-coded 10% undercut open_floor on both axes).
@@ -3782,10 +4003,36 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
     // ring sudden death seals — so the fallthrough that produces most of the
     // CPU's moves is exactly the one that used to walk it into the closing
     // wall. Prefer any candidate that is not about to be sealed.
-    choose!(
-        evacuate_ring(game, (cx, cy), wall_dir, candidates),
-        CpuDecisionReason::WallFollow
-    );
+    // The base policy is NOT exempt from the survival floor.
+    //
+    // Wall-follow used to return unchecked, which was harmless when the CPU
+    // never ate and died at length six. The food economy changed that: it now
+    // grows to 50-100 cells, and every instrumented warm-arm death became
+    // OwnTrail/NoLegalMove at exactly those lengths — the fallthrough coiling
+    // a long body into itself, one unexamined step at a time. If wall-follow's
+    // next cell cannot reach enough space to outrun our own length, take the
+    // candidate that can.
+    let followed = evacuate_ring(game, (cx, cy), wall_dir, candidates);
+    let step_open = |d: Direction| -> f32 {
+        let (ddx, ddy) = d.as_delta();
+        let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
+        let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
+        count_open_space(game, nx, ny)
+    };
+    if step_open(followed) < escape_cells {
+        if let Some(&roomier) = candidates
+            .iter()
+            .filter(|&&d| !ring_doomed_step(game, (cx, cy), d))
+            .max_by(|a, b| {
+                step_open(**a)
+                    .partial_cmp(&step_open(**b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+        {
+            choose!(roomier, CpuDecisionReason::ThreatDodge);
+        }
+    }
+    choose!(followed, CpuDecisionReason::WallFollow);
 }
 
 /// Predict which corner a cycle will reach next given their current direction.
