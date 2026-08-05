@@ -1880,6 +1880,89 @@ pub fn count_open_space_excluding(
     count
 }
 
+/// Timed flood fill from `from`: own-body cells become enterable at the time
+/// the tail will have vacated them (`t = len - i + pending_growth` for
+/// positions[i], head first). Returns (reachable cells, own tail reachable).
+///
+/// The plain flood fill treats the CPU's own body as permanent wall, which
+/// systematically under-counts a long worm's real room: a 100-cell body is
+/// 100 cells of "wall" that will all be floor again within 100 frames. The
+/// honest survival question at length 60+ is Tron's classic one — "can the
+/// head still reach its own tail" — because a worm that can reach its tail
+/// can follow it forever. The opponent's body is treated as static here:
+/// conservative, and it is the CPU's OWN coil this exists to see through.
+///
+/// Measured (520 games/arm, external policy, coil regime at mean length
+/// ~176): swapping the static floor for this halved OwnTrail deaths (6→3,
+/// total 18→14) with no length given up — directionally right, n too small
+/// to call significant, which is why it is used as a RELAXATION of the
+/// existing floor (OR, never instead of).
+pub fn tail_aware_reach(game: &WormGame, who: usize, from: (u16, u16)) -> (f32, bool) {
+    let w = game.width as usize;
+    let h = game.height as usize;
+    let c = &game.cycles[who];
+    let len = c.positions.len() as i32;
+    let grow = c.pending_growth as i32;
+    if len == 0 {
+        return (0.0, false);
+    }
+
+    let mut vacate = vec![i32::MAX; w * h];
+    for (i, &(px, py)) in c.positions.iter().enumerate() {
+        let t = len - i as i32 + grow;
+        let idx = py as usize * w + px as usize;
+        if t < vacate[idx] {
+            vacate[idx] = t;
+        }
+    }
+
+    let tail_cell = *c.positions.last().unwrap();
+    let tail_idx = tail_cell.1 as usize * w + tail_cell.0 as usize;
+
+    let mut best_t = vec![i32::MAX; w * h];
+    let mut q: VecDeque<(u16, u16, i32)> = VecDeque::new();
+    let start_idx = from.1 as usize * w + from.0 as usize;
+    let start_ok = game.passable(from.0, from.1) || vacate[start_idx] <= 1;
+    if !start_ok {
+        return (0.0, false);
+    }
+    best_t[start_idx] = 1;
+    q.push_back((from.0, from.1, 1));
+
+    let mut count = 0.0f32;
+    let mut tail_reachable = false;
+    while let Some((x, y, t)) = q.pop_front() {
+        count += 1.0;
+        let idx = y as usize * w + x as usize;
+        if idx == tail_idx && t >= vacate[tail_idx] {
+            tail_reachable = true;
+        }
+        for (dx, dy) in [(0i16, -1i16), (0, 1), (-1, 0), (1, 0)] {
+            let nx = x as i16 + dx;
+            let ny = y as i16 + dy;
+            if nx < 0 || ny < 0 || nx >= game.width as i16 || ny >= game.height as i16 {
+                continue;
+            }
+            let (nx, ny) = (nx as u16, ny as u16);
+            let nidx = ny as usize * w + nx as usize;
+            if best_t[nidx] != i32::MAX {
+                continue;
+            }
+            let nt = t + 1;
+            let free_now = matches!(
+                game.grid[ny as usize][nx as usize],
+                CellType::Empty | CellType::Food | CellType::Hole | CellType::PowerUp
+            ) && !game.bombs.iter().any(|b| b.x == nx && b.y == ny);
+            let frees_in_time = vacate[nidx] <= nt;
+            if free_now || frees_in_time {
+                best_t[nidx] = nt;
+                q.push_back((nx, ny, nt));
+            }
+        }
+    }
+    (count, tail_reachable)
+}
+
 /// BFS from (sx,sy) to the nearest collectible (food or power-up). Returns
 /// (direction_to_take, open_space_at_item). Only considers legal directions
 /// from the start, and checks that the item cell is reachable.
@@ -4085,7 +4168,22 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
         let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
         count_open_space(game, nx, ny)
     };
-    if step_open(followed) < escape_cells {
+    // The static floor is RELAXED — never replaced — by the tail-aware test:
+    // wall-follow's destination passes if it clears the floor OR the CPU's
+    // own tail remains reachable from it. A long worm hugging its own body
+    // fails the static count (its body is 60+ cells of "wall" that will all
+    // be floor again) while being perfectly safe; overriding wall-follow on
+    // that false alarm is what steered it INTO the coil. Measured on the
+    // frames where the floor binds: the destination was actually survivable
+    // on ~30% of them (8-56% across seeds).
+    let step_cell = |d: Direction| -> (u16, u16) {
+        let (ddx, ddy) = d.as_delta();
+        (
+            (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16,
+            (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16,
+        )
+    };
+    if step_open(followed) < escape_cells && !tail_aware_reach(game, 1, step_cell(followed)).1 {
         if let Some(&roomier) = candidates
             .iter()
             .filter(|&&d| !ring_doomed_step(game, (cx, cy), d))
