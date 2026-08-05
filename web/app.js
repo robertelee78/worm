@@ -6,6 +6,9 @@ import { Sfx } from './audio.js';
 import { computeBoardLayout, VIEWPORT_BLOCK_GUTTER } from './layout.js';
 
 let CELL = 14; // recomputed by applyBoardLayout() to fit the measured stage
+// Bump together with the ?v= in index.html whenever the wasm bundle is
+// rebuilt — it keys the cache-busting query on the .wasm fetch.
+const BUILD = 3;
 const MATCH_TARGET = 3;
 const STATE_SCHEMA_VERSION = 2;
 const ROUND_SCHEMA_VERSION = 1;
@@ -32,9 +35,24 @@ const dbPromise = new Promise((resolve, reject) => {
     // v3: identity moves in here, beside the data it keys.
     if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta');
   };
-  rq.onsuccess = () => resolve(rq.result);
+  rq.onsuccess = () => {
+    // If a LATER build bumps the version while this tab is open, close so the
+    // other tab's upgrade isn't blocked forever.
+    rq.result.onversionchange = () => rq.result.close();
+    resolve(rq.result);
+  };
   rq.onerror = () => reject(rq.error);
+  // A v2→v3 upgrade fires `blocked` when any other tab still holds the old
+  // version open. iOS Safari keeps background tabs alive and restores
+  // prior-session tabs on launch, so a phone hits this where a desktop never
+  // does — and without these two handlers the promise never settles and
+  // boot() awaits forever: a silent black cabinet.
+  rq.onblocked = () => reject(new Error('brain store blocked by another open tab — close other Worm tabs'));
+  setTimeout(() => reject(new Error('brain store open timed out')), 3000);
 });
+// An early rejection must not surface as an unhandled-rejection before the
+// first awaiter attaches; every real consumer try/catches for itself.
+dbPromise.catch(() => {});
 
 /**
  * Resolve the player identity, preferring IndexedDB.
@@ -289,7 +307,10 @@ function applyBoardLayout(layout) {
 }
 
 async function boot() {
-  await init();
+  // Cache-bust the wasm fetch alongside app.js's own ?v= (index.html): a
+  // phone that cached an old bundle before a rebuild otherwise runs stale
+  // code against a fresh wasm (or vice versa) with no way to hard-reload.
+  await init({ module_or_path: `./pkg/worm_bg.wasm?v=${BUILD}` });
   // Must resolve before anything reads or writes a keyed store.
   await resolveIdentity();
   const layout = measureBoardLayout();
@@ -324,6 +345,20 @@ async function boot() {
   roundStartAudio();
   requestAnimationFrame(loop);
 }
+
+// A phone has no console. Any failure that would otherwise leave a silent
+// black cabinet must land on screen instead — that turns "it's not working"
+// into a bug report that names the actual cause.
+function showFatal(message) {
+  try {
+    const mid = document.getElementById('mid-status');
+    if (mid) mid.textContent = `ERROR: ${message}`;
+    setBrainStatus(`boot failed: ${message}`);
+  } catch { /* the DOM itself is broken — nothing left to do */ }
+}
+window.addEventListener('error', (e) => showFatal(e.message || 'script error'));
+window.addEventListener('unhandledrejection', (e) =>
+  showFatal(e.reason?.message || String(e.reason || 'async failure')));
 
 /* ---------------- input ---------------- */
 
@@ -435,9 +470,24 @@ function loop(now) {
     acc -= delay;
     steps++;
     delay = Number(game.frame_delay_ms());
-    if (game.is_over() && !overHandled) onGameOver();
+    if (game.is_over() && !overHandled) {
+      try {
+        onGameOver();
+      } catch (e) {
+        showFatal(`${e.message} — please reload the page`);
+        return;
+      }
+    }
   }
-  state = readState();
+  // A schema mismatch here means a cached app.js is running against a newer
+  // wasm (or vice versa). Throwing would kill the loop on frame 1 with a
+  // frozen arena and no message — say "reload" instead.
+  try {
+    state = readState();
+  } catch (e) {
+    showFatal(`${e.message} — please reload the page`);
+    return;
+  }
   updateHum(state);
   render(state);
   hud(state);
@@ -1095,4 +1145,4 @@ function render(s) {
   ctx.globalAlpha = 1;
 }
 
-boot();
+boot().catch((e) => showFatal(e?.message || String(e)));

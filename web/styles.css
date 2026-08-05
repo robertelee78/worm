@@ -261,6 +261,14 @@ body {
 /* touch controls */
 .touch-controls { display: none; width: 100%; text-align: center; padding: 8px; }
 .tbtn { min-width: 64px; min-height: 52px; margin: 3px; font-size: 24px; }
+/* Rapid D-pad taps otherwise register as iOS double-tap-to-zoom: the page
+   zooms mid-game and the arena leaves the viewport. */
+.tbtn, .btn-green {
+  touch-action: manipulation;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+}
 .trow { display: flex; justify-content: center; }
 .fire { min-width: 110px; }
 @media (pointer: coarse) { .touch-controls { display: block; } .score-mid { display: none; } }

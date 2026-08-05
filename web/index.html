@@ -6,7 +6,12 @@
 <title>TRON Light Cycles — the CPU learns you</title>
 <link rel="icon" type="image/png" href="favicon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet">
+<!-- Non-blocking font load: on a LAN-only phone (no DNS/internet) a blocking
+     stylesheet link stalls first paint until the request times out. The
+     media="print" trick paints immediately with the Courier fallback and
+     upgrades to VT323 if/when the font arrives. -->
+<link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+<noscript><link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet"></noscript>
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -114,6 +119,6 @@
   <span class="dim">device <span id="device-id">…</span> — your CPU brain lives in this browser (IndexedDB), it only learns <em>you</em></span>
 </footer>
 
-<script type="module" src="app.js"></script>
+<script type="module" src="app.js?v=3"></script>
 </body>
 </html>
