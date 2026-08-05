@@ -3,3 +3,4 @@ ruvector.db
 /.swarm
 /.claude-flow
 /.metaharness
+/agentdb.rvf*

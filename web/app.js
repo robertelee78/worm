@@ -101,6 +101,9 @@ const KEYMAP = {
   ArrowRight: 3, KeyD: 3, KeyL: 3,
 };
 
+// PowerUpKind wire values from wasm state_json cycles[i].held (null = none).
+const PU_NAMES = ['LASER', 'TRI-SHOT', 'BOMB', 'WALL-PUNCH'];
+
 window.addEventListener('keydown', (e) => {
   sfx.unlock();
   tryCoin();
@@ -408,9 +411,16 @@ function hud(s) {
 
   if (roundMemoryStart === null) roundMemoryStart = b.observed[1];
 
+  // Held power-up: without this the browser player fires blind while the
+  // terminal HUD shows PWR continuously (native render parity).
+  const held = s.cycles[0].held;
+  document.getElementById('fire-btn').textContent =
+    held == null ? 'FIRE' : `FIRE ${PU_NAMES[held]}`;
+
   if (s.over) return;
+  const heldTxt = held == null ? '' : ` │ PWR ${PU_NAMES[held]} — SPACE fires`;
   document.getElementById('mid-status').textContent =
-    `FOOD you ${s.foodEaten[0]} : cpu ${s.foodEaten[1]} │ frame ${s.frame} │ speed ${s.speed}%`;
+    `FOOD you ${s.foodEaten[0]} : cpu ${s.foodEaten[1]} │ frame ${s.frame} │ speed ${s.speed}%${heldTxt}`;
 }
 
 function pushHistory(s) {

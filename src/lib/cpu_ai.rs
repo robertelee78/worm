@@ -1139,6 +1139,13 @@ pub fn sample_with_temperature(
 /// Whether cell (x,y) is threatened by a live projectile.
 fn cell_threatened_by_projectile(game: &WormGame, x: u16, y: u16) -> bool {
     for p in &game.projectiles {
+        // The CPU's own bolts cannot hit it (advance_projectiles excludes the
+        // firer), so they are not threats — without this the CPU abandoned its
+        // line to dodge its own tri-shot for up to 7 frames after every shot
+        // (mirrors the owner exclusion in cell_threatened_by_bomb).
+        if p.from == 1 {
+            continue;
+        }
         // A projectile threatens a cell if it will reach it within steps_left.
         let dx = x as i16 - p.x as i16;
         let dy = y as i16 - p.y as i16;
@@ -2184,6 +2191,28 @@ pub fn record_player_episode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn own_bolts_are_not_threats() {
+        let mut game = WormGame::with_size(120, 38);
+        game.projectiles.push(crate::game::Projectile {
+            x: 20,
+            y: 20,
+            dx: 1,
+            dy: 0,
+            steps_left: 7,
+            from: 1,
+        });
+        assert!(
+            !cell_threatened_by_projectile(&game, 24, 20),
+            "a CPU-fired bolt cannot hit the CPU and must not register as a threat"
+        );
+        game.projectiles[0].from = 0;
+        assert!(
+            cell_threatened_by_projectile(&game, 24, 20),
+            "the same bolt fired by the player is a real threat"
+        );
+    }
 
     #[test]
     fn prior_is_uniform_when_empty() {

@@ -131,11 +131,15 @@ impl WasmGame {
                 s.push(',');
             }
             s.push_str(&format!(
-                "{{\"head\":[{},{}],\"dir\":{},\"alive\":{},\"color\":[{},{},{}],\"pos\":[",
+                "{{\"head\":[{},{}],\"dir\":{},\"alive\":{},\"held\":{},\"color\":[{},{},{}],\"pos\":[",
                 c.head.0,
                 c.head.1,
                 dir_u8(c.direction),
                 c.alive,
+                match c.held_powerup {
+                    Some(k) => powerup_u8(k).to_string(),
+                    None => "null".to_string(),
+                },
                 c.color.0,
                 c.color.1,
                 c.color.2,

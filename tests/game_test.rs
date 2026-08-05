@@ -933,3 +933,159 @@ fn test_sfx_protocol_wire_format() {
     assert_eq!(format_sfx_json(&events), "[[7,440,100,0]]");
     assert_eq!(format_sfx_json(&[]), "[]");
 }
+
+/* ---- swarm-audit regression tests (2026-08) ---- */
+
+#[test]
+fn test_player_crash_is_a_cpu_win_when_cpu_can_turn() {
+    // The CPU's straight-ahead cell is blocked but a side turn is open — a
+    // routine wall-follow turn frame. The player crashing that frame must
+    // score a CPU win, not a draw (the old check probed only the heading).
+    let mut game = WormGame::with_size(120, 38);
+    game.food_items.clear();
+    game.cycles[0].head = (10, 10);
+    game.cycles[0].positions = vec![(10, 10)];
+    game.cycles[0].direction = worm::Direction::Left;
+    game.grid[10][9] = worm::CellType::Wall;
+    game.cycles[1].head = (30, 20);
+    game.cycles[1].positions = vec![(30, 20)];
+    game.cycles[1].direction = worm::Direction::Right;
+    game.grid[20][31] = worm::CellType::Wall;
+    game.update();
+    assert!(game.game_over);
+    assert_eq!(
+        game.winner,
+        Some(1),
+        "the CPU could turn Up or Down and survive — its win must not be scored a draw"
+    );
+    assert!(game.cycles[1].alive);
+}
+
+#[test]
+fn test_player_crash_is_a_draw_when_cpu_is_boxed_in() {
+    // No non-reverse CPU escape: straight, up and down all blocked. Both die
+    // this frame — a genuine draw.
+    let mut game = WormGame::with_size(120, 38);
+    game.food_items.clear();
+    game.cycles[0].head = (10, 10);
+    game.cycles[0].positions = vec![(10, 10)];
+    game.cycles[0].direction = worm::Direction::Left;
+    game.grid[10][9] = worm::CellType::Wall;
+    game.cycles[1].head = (30, 20);
+    game.cycles[1].positions = vec![(30, 20)];
+    game.cycles[1].direction = worm::Direction::Right;
+    game.grid[20][31] = worm::CellType::Wall;
+    game.grid[19][30] = worm::CellType::Wall;
+    game.grid[21][30] = worm::CellType::Wall;
+    game.update();
+    assert!(game.game_over);
+    assert_eq!(game.winner, None, "a truly boxed-in CPU dies too — draw");
+    assert!(!game.cycles[1].alive);
+}
+
+#[test]
+fn test_player_survives_entering_cpu_vacating_tail_cell() {
+    // The CPU's tail-tip vacates this same frame; the CPU's own crash check
+    // (running after both retractions) survives the mirror move, so the
+    // player must too.
+    let mut game = WormGame::with_size(120, 38);
+    game.cpu_autopilot = false;
+    game.food_items.clear();
+    game.cycles[1].head = (20, 10);
+    game.cycles[1].direction = worm::Direction::Left;
+    game.cycles[1].positions = vec![(20, 10), (21, 10), (22, 10)];
+    for &(x, y) in &[(20u16, 10u16), (21, 10), (22, 10)] {
+        game.grid[y as usize][x as usize] = worm::CellType::CPU;
+    }
+    game.cycles[0].head = (22, 11);
+    game.cycles[0].direction = worm::Direction::Up;
+    game.cycles[0].positions = vec![(22, 11)];
+    game.grid[11][22] = worm::CellType::Player;
+    game.update();
+    assert!(
+        !game.game_over,
+        "entering a same-frame-vacated tail cell is safe for the player"
+    );
+    assert_eq!(game.cycles[0].head, (22, 10));
+    assert_eq!(
+        game.grid[10][22],
+        worm::CellType::Player,
+        "the CPU's tail pop must not erase the player's head marker"
+    );
+}
+
+#[test]
+fn test_bomb_blast_trims_positions_with_grid() {
+    // detonate() clears trail cells from the grid; the owning cycle's
+    // positions must shrink in lockstep, and a surviving owner's head marker
+    // must not be swept.
+    let mut game = WormGame::with_size(120, 38);
+    game.food_items.clear();
+    // Player trail from (25,10) to a head at (50,10); the head is outside
+    // the blast radius, a long stretch of trail is inside.
+    let positions: Vec<(u16, u16)> = (25..=50u16).rev().map(|x| (x, 10)).collect();
+    for &(x, y) in &positions {
+        game.grid[y as usize][x as usize] = worm::CellType::Player;
+    }
+    game.cycles[0].head = (50, 10);
+    game.cycles[0].positions = positions;
+    // The bomb's owner (CPU) sits inside its own blast: it must survive AND
+    // keep its head marker on the grid.
+    game.cycles[1].head = (35, 10);
+    game.cycles[1].positions = vec![(35, 10)];
+    game.grid[10][35] = worm::CellType::CPU;
+    game.bombs.push(worm::game::Bomb {
+        x: 32,
+        y: 10,
+        fuse: 1,
+        owner: 1,
+    });
+    game.tick_bombs();
+    assert!(!game.game_over, "no head dies: player out of range, CPU is the owner");
+    for x in 25..=42u16 {
+        if x == 35 {
+            continue; // the owner's living head cell
+        }
+        assert_eq!(
+            game.grid[10][x as usize],
+            worm::CellType::Empty,
+            "blast must clear trail cell ({x},10)"
+        );
+        assert!(
+            !game.cycles[0].positions.contains(&(x, 10)),
+            "cleared cell ({x},10) must leave positions too"
+        );
+    }
+    for x in 43..=50u16 {
+        assert_eq!(game.grid[10][x as usize], worm::CellType::Player);
+        assert!(game.cycles[0].positions.contains(&(x, 10)));
+    }
+    assert_eq!(
+        game.grid[10][35],
+        worm::CellType::CPU,
+        "a surviving owner's head marker must not be swept from the grid"
+    );
+    assert!(game.cycles[1].alive);
+}
+
+#[test]
+fn test_bolt_hits_head_on_swap_crossing() {
+    // Post-move state: the player's head moved Left (11,10)->(10,10) while
+    // the bolt at (10,10) moves Right — they exchange cells in one frame.
+    // Post-move-only comparison tunneled straight through.
+    let mut game = WormGame::with_size(120, 38);
+    game.cycles[0].head = (10, 10);
+    game.cycles[0].positions = vec![(10, 10), (11, 10)];
+    game.projectiles.push(worm::game::Projectile {
+        x: 10,
+        y: 10,
+        dx: 1,
+        dy: 0,
+        steps_left: 5,
+        from: 1,
+    });
+    game.advance_projectiles();
+    assert!(game.game_over, "a crossing swap is a hit, not a miss");
+    assert_eq!(game.winner, Some(1));
+    assert!(!game.cycles[0].alive);
+}

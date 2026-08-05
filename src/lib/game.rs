@@ -539,12 +539,17 @@ impl WormGame {
         }
 
         // Retract player tail first (unless owed growth cells) so the vacated
-        // cell isn't a false self-collision.
+        // cell isn't a false self-collision. Only erase a cell that still holds
+        // this snake's own marker — after a blast trims the trail, or when the
+        // opponent has legally entered a just-vacated cell, a stale pop must
+        // not wipe a cell someone else now occupies.
         {
             let cycle = &mut self.cycles[self.player];
             if cycle.positions.len() > 1 && cycle.pending_growth == 0 {
                 let tail = cycle.positions.pop().unwrap();
-                self.grid[tail.1 as usize][tail.0 as usize] = CellType::Empty;
+                if self.grid[tail.1 as usize][tail.0 as usize] == CellType::Player {
+                    self.grid[tail.1 as usize][tail.0 as usize] = CellType::Empty;
+                }
             }
         }
 
@@ -559,7 +564,20 @@ impl WormGame {
                 .max(0)
                 .min((self.height - 1) as i16) as u16;
 
-            let crashed = !self.passable(new_x, new_y);
+            // The CPU's tail retracts later this frame (after cpu_decide), so
+            // its tail-tip cell is already as good as vacated. The CPU's own
+            // crash check runs after both retractions and gets that courtesy
+            // for free; without this exemption the player dies making the
+            // exact move the CPU survives.
+            let cpu_tail_vacating = {
+                let opp = &self.cycles[1];
+                opp.alive
+                    && opp.positions.len() > 1
+                    && opp.pending_growth == 0
+                    && opp.positions.last() == Some(&(new_x, new_y))
+                    && !self.bombs.iter().any(|b| b.x == new_x && b.y == new_y)
+            };
+            let crashed = !self.passable(new_x, new_y) && !cpu_tail_vacating;
 
             ((new_x, new_y), crashed)
         };
@@ -596,16 +614,54 @@ impl WormGame {
                 let ny = (cy.head.1 as i16 + dy).max(0).min((self.height - 1) as i16) as u16;
                 (nx, ny) == self.cycles[0].head
             };
-            // Same-frame sibling: the CPU would also crash this frame (boxed in,
-            // or about to run into a wall/trail/bomb). The player-crash early
-            // return used to skip evaluating the CPU's fate entirely and credit
-            // it the win even though both died.
+            // Same-frame sibling: the CPU would also die this frame. The
+            // self-driving CPU turns away from a blocked cell (cpu_decide
+            // picks from legal_directions), so "straight ahead is blocked" is
+            // a routine wall-follow turn frame, not a death — probing only the
+            // heading banked false draws on ordinary player crashes. The CPU
+            // dies only when truly boxed in: no non-reverse direction is
+            // survivable once its own about-to-vacate tail tip is discounted.
+            // Scripted opponents (cpu_autopilot off) keep their heading, so
+            // for them the straight-ahead probe remains the accurate test.
             let cpu_would_crash = self.cycles[1].alive && {
                 let cy = &self.cycles[1];
-                let (dx, dy) = cy.direction.as_delta();
-                let nx = (cy.head.0 as i16 + dx).max(0).min((self.width - 1) as i16) as u16;
-                let ny = (cy.head.1 as i16 + dy).max(0).min((self.height - 1) as i16) as u16;
-                !self.passable(nx, ny)
+                if self.cpu_autopilot {
+                    let vacating = if cy.positions.len() > 1 && cy.pending_growth == 0 {
+                        cy.positions.last().copied()
+                    } else {
+                        None
+                    };
+                    let back = match cy.direction {
+                        Direction::Up => Direction::Down,
+                        Direction::Down => Direction::Up,
+                        Direction::Left => Direction::Right,
+                        Direction::Right => Direction::Left,
+                    };
+                    ![Direction::Up, Direction::Down, Direction::Left, Direction::Right]
+                        .into_iter()
+                        .filter(|&d| d != back)
+                        .any(|d| {
+                            let (dx, dy) = d.as_delta();
+                            let nx = cy.head.0 as i16 + dx;
+                            let ny = cy.head.1 as i16 + dy;
+                            if nx < 0
+                                || ny < 0
+                                || nx >= self.width as i16
+                                || ny >= self.height as i16
+                            {
+                                return false;
+                            }
+                            let (nx, ny) = (nx as u16, ny as u16);
+                            self.passable(nx, ny)
+                                || (vacating == Some((nx, ny))
+                                    && !self.bombs.iter().any(|b| b.x == nx && b.y == ny))
+                        })
+                } else {
+                    let (dx, dy) = cy.direction.as_delta();
+                    let nx = (cy.head.0 as i16 + dx).max(0).min((self.width - 1) as i16) as u16;
+                    let ny = (cy.head.1 as i16 + dy).max(0).min((self.height - 1) as i16) as u16;
+                    !self.passable(nx, ny)
+                }
             };
             self.add_impact_particles(player_new.0, player_new.1, self.cycles[self.player].color);
             if cpu_rams_back {
@@ -713,12 +769,15 @@ impl WormGame {
         };
 
         // Retract CPU tail first (unless owed growth cells) so the vacated cell
-        // isn't a false self-collision.
+        // isn't a false self-collision. Own-marker guard, same as the player's
+        // retraction: the player may have legally entered this cell already.
         {
             let cycle = &mut self.cycles[1];
             if cycle.positions.len() > 1 && cycle.pending_growth == 0 {
                 let tail = cycle.positions.pop().unwrap();
-                self.grid[tail.1 as usize][tail.0 as usize] = CellType::Empty;
+                if self.grid[tail.1 as usize][tail.0 as usize] == CellType::CPU {
+                    self.grid[tail.1 as usize][tail.0 as usize] = CellType::Empty;
+                }
             }
         }
 
@@ -1182,11 +1241,20 @@ impl WormGame {
                 continue;
             }
             let (ux, uy) = (x as u16, y as u16);
+            let (ox, oy) = (self.projectiles[i].x, self.projectiles[i].y);
             let hit = (0..2).find(|&c| {
-                let c = c as u8;
-                c != from
-                    && self.cycles[c as usize].alive
-                    && self.cycles[c as usize].head == (ux, uy)
+                if c as u8 == from || !self.cycles[c].alive {
+                    return false;
+                }
+                let cy = &self.cycles[c];
+                // Crossing swap: heads move before bolts each frame, so an
+                // odd-gap head-on approach exchanges cells with the bolt in a
+                // single frame — comparing post-move cells alone tunneled
+                // straight through. The head's pre-move cell is positions[1].
+                let swapped = cy.head == (ox, oy)
+                    && cy.positions.len() > 1
+                    && cy.positions[1] == (ux, uy);
+                cy.head == (ux, uy) || swapped
             });
             if let Some(c) = hit {
                 self.add_impact_particles(ux, uy, self.cycles[c].color);
@@ -1242,6 +1310,10 @@ impl WormGame {
         play_beep_sequence(SfxKind::Detonate, &[110, 90, 70], &[110, 110, 110]);
         let r = BOMB_RADIUS_CELLS as i32;
         let (cx, cy) = (x as i32, y as i32);
+        // Trail cells cleared from the grid must also leave the owning cycle's
+        // positions list: a stale entry would later tail-pop an Empty write
+        // over a cell another snake has since legally occupied.
+        let mut cleared: Vec<(u16, u16)> = Vec::new();
         for yy in (cy - r)..=(cy + r) {
             for xx in (cx - r)..=(cx + r) {
                 if xx < 0 || yy < 0 || xx >= self.width as i32 || yy >= self.height as i32 {
@@ -1249,7 +1321,17 @@ impl WormGame {
                 }
                 let (ux, uy) = (xx as u16, yy as u16);
                 match self.grid[uy as usize][ux as usize] {
-                    CellType::Player | CellType::CPU | CellType::Food => {
+                    CellType::Player | CellType::CPU => {
+                        // A living head marker survives the sweep — head fates
+                        // are decided by the radius check below, and erasing a
+                        // survivor's marker would let the opponent drive onto
+                        // an occupied head cell without a collision.
+                        if !self.cycles.iter().any(|c| c.alive && c.head == (ux, uy)) {
+                            self.grid[uy as usize][ux as usize] = CellType::Empty;
+                            cleared.push((ux, uy));
+                        }
+                    }
+                    CellType::Food => {
                         self.grid[uy as usize][ux as usize] = CellType::Empty;
                         self.food_items.retain(|&(fx, fy, _)| (fx, fy) != (ux, uy));
                     }
@@ -1265,6 +1347,11 @@ impl WormGame {
                         b.fuse = 0;
                     }
                 }
+            }
+        }
+        if !cleared.is_empty() {
+            for c in &mut self.cycles {
+                c.positions.retain(|p| !cleared.contains(p));
             }
         }
         // Kill heads in the radius (owner excluded; both can die -> draw).

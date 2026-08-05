@@ -31,6 +31,51 @@ fn save_brain(game: &WormGame) {
     let _ = game.cpu_brain.save_file(&brain_path());
 }
 
+/// What a raw read on the game-over screen asks for. Arrow keys arrive as
+/// ESC-prefixed sequences in raw mode, so only a LONE ESC read (or q/Q)
+/// quits — a player still steering at the moment of death must not exit
+/// the app and lose the session scoreboard.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum GameOverKey {
+    Quit,
+    Restart,
+    None,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn game_over_key(buf: &[u8]) -> GameOverKey {
+    let mut i = 0;
+    while i < buf.len() {
+        match buf[i] {
+            0x1b => {
+                if buf.len() == 1 {
+                    return GameOverKey::Quit;
+                }
+                // Swallow the whole ESC-prefixed sequence: CSI (ESC [ ... with
+                // a 0x40-0x7e final byte), SS3 (ESC O X), or Alt+key (ESC X).
+                i += 1;
+                if i < buf.len() && (buf[i] == b'[' || buf[i] == b'O') {
+                    i += 1;
+                    while i < buf.len() {
+                        let b = buf[i];
+                        i += 1;
+                        if (0x40..=0x7e).contains(&b) {
+                            break;
+                        }
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+            b'q' | b'Q' => return GameOverKey::Quit,
+            b'r' | b'R' => return GameOverKey::Restart,
+            _ => i += 1,
+        }
+    }
+    GameOverKey::None
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> std::io::Result<()> {
     let fd = io::stdin().as_raw_fd();
@@ -257,8 +302,8 @@ fn main() -> std::io::Result<()> {
                     let mut buf = [0u8; 16];
                     if let Ok(n) = io::stdin().read(&mut buf) {
                         if n > 0 {
-                            match buf[0] as char {
-                                'q' | 'Q' | '\x1b' => {
+                            match game_over_key(&buf[..n]) {
+                                GameOverKey::Quit => {
                                     save_brain(&game);
                                     unsafe {
                                         libc::tcsetattr(fd, libc::TCSAFLUSH, &old_termios);
@@ -266,13 +311,13 @@ fn main() -> std::io::Result<()> {
                                     execute!(stdout, LeaveAlternateScreen, Show)?;
                                     return Ok(());
                                 }
-                                'r' | 'R' => {
+                                GameOverKey::Restart => {
                                     game.restart();
                                     last_update = Instant::now();
                                     input_buf.clear();
                                     break;
                                 }
-                                _ => {}
+                                GameOverKey::None => {}
                             }
                         }
                     }
@@ -286,3 +331,39 @@ fn main() -> std::io::Result<()> {
 
 #[cfg(target_arch = "wasm32")]
 fn main() {}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod tests {
+    use super::{game_over_key, GameOverKey};
+
+    #[test]
+    fn arrow_keys_do_not_quit_the_game_over_screen() {
+        for seq in [
+            b"\x1b[A".as_slice(),
+            b"\x1b[B",
+            b"\x1b[C",
+            b"\x1b[D",
+            b"\x1bOA",
+        ] {
+            assert_eq!(game_over_key(seq), GameOverKey::None);
+        }
+    }
+
+    #[test]
+    fn quit_and_restart_keys_still_work() {
+        assert_eq!(game_over_key(b"q"), GameOverKey::Quit);
+        assert_eq!(game_over_key(b"Q"), GameOverKey::Quit);
+        assert_eq!(
+            game_over_key(b"\x1b"),
+            GameOverKey::Quit,
+            "a lone ESC read is a deliberate quit"
+        );
+        assert_eq!(game_over_key(b"r"), GameOverKey::Restart);
+        assert_eq!(game_over_key(b"R"), GameOverKey::Restart);
+    }
+
+    #[test]
+    fn restart_behind_a_buffered_arrow_is_seen() {
+        assert_eq!(game_over_key(b"\x1b[Ar"), GameOverKey::Restart);
+    }
+}
