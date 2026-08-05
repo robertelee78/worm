@@ -131,3 +131,44 @@ restore with no partial-restore warning).
 Probes, both reproducible: `scratchpad/dp_probe.rs` (decision-point density,
 option mix, runway thresholds) and `scratchpad/readrate_probe.rs` (the Lefty
 curve above).
+
+## Addendum — the fix the metric pointed at
+
+The metric said the model had learned nothing. It also said where to look:
+the signature was present in the data (331:123 left:right) but unreachable.
+
+The obvious remedy — relabel predictions as relative `Turn` — would **not**
+have worked on its own. If 98% of moves are Straight, the argmax in *turn*
+space is permanently Straight too. Rotation-invariance improves
+generalisation; it does not touch the class imbalance.
+
+The actual defect was that the models happily predict a direction **into a
+wall**. That is free accuracy on the ~95% of frames where the player continues
+straight, and it is an abstention on the handful of frames that decide
+anything: when straight is blocked the player MUST turn, the answer is Left or
+Right, and a model still answering "straight" has declined the only question
+worth asking. Those forced frames are exactly where a habit lives — "breaks
+left when cornered" is a claim about them and nothing else.
+
+`mask_to_legal` constrains the forecast to moves the player can actually make,
+falling back to their direction prior when the model names something
+impossible. Measured against the same Lefty opponent, same seeds:
+
+| bucket | rate% | usual% | **lift%** |
+|---|---|---|---|
+| 1 | 99.4 | 98.4 | **64.8** |
+| 4 | 99.5 | 98.3 | **68.2** |
+| 8 | 99.5 | 98.3 | **68.9** |
+
+`significant vs base rate: YES` · `read 99% vs usual 98% · lift 69% *`
+
+Lift 0% → 69%, and it holds rather than decaying. Note the raw rate moved only
+98.3% → 99.5% — under the old metric this entire fix would have looked like
+noise. The lift number is what makes it visible, which is the argument for the
+metric restated as evidence.
+
+Win rate is unchanged at 84.5% / 8.0%: the CPU now *reads* the player far
+better but does not yet *act* on it, because the confidence gates that would
+consume the prediction are still calibrated against the old all-frame number.
+That is the next milestone, and it is now a tuning problem against a working
+signal rather than a search for one.

@@ -1037,6 +1037,14 @@ impl WormGame {
             e.active = active;
             e.confidence = confidence;
             e.predicted_dir = pending[active];
+            // Constrain the forecast to what the player can actually do next.
+            // A prediction into a wall is an abstention dressed as an answer,
+            // and it abstains precisely on the forced-turn frames where a
+            // habit is the only thing left to read.
+            let legal_next = crate::cpu_ai::legal_options(self, self.player);
+            let prior = self.cpu_brain.opp_brain.prior_distribution();
+            let e = &mut self.cpu_brain.ensemble;
+            e.predicted_dir = crate::cpu_ai::mask_to_legal(e.predicted_dir, &legal_next, &prior);
             self.cpu_brain.last_opp_prediction = e.predicted_dir;
             self.cpu_telemetry.next_forecast = Some(crate::cpu_ai::ForecastTrace {
                 target_frame: self.frame_count + 1,
