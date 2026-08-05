@@ -601,7 +601,18 @@ pub fn mask_to_legal(
     match predicted {
         // The model named something they can do — take it.
         Some(d) if legal.contains(&d) => Some(d),
-        // Impossible (or absent) while straight was still available.
+        // ABSTENTION IS PRESERVED. A model with nothing to say on a free
+        // frame must stay silent, because the fallback below is fed by the
+        // turn prior — which learns only at forced turns and therefore has
+        // ~zero Straight mass (measured 0.005–0.012). Substituting it here
+        // forces a TURN guess onto a frame that is ~95% straight and then
+        // scores the model on it: measured against a power-up seeker, `arm`
+        // abstained on 64.8% of frames, held 92.8% raw skill on the frames a
+        // power-up existed, and was scored down to a 36.1% hit rate and a
+        // 2.7% selection share by manufactured wrong guesses. score_frame
+        // skips a None pending, which is the honest treatment.
+        None => None,
+        // Impossible while straight was still available.
         //
         // The fallback must be relative, not absolute. Asking "which compass
         // direction does this player like?" cannot answer it: a player who
@@ -4255,10 +4266,11 @@ mod tests {
         );
     }
 
-    /// A forecast the player cannot execute is an abstention, and it abstains
-    /// on exactly the frames that decide anything. Masking converts it into a
-    /// real guess drawn from their habit — measured, this alone took lift from
-    /// 0% to 69% against an opponent with a left-turn signature.
+    /// A forecast the player cannot execute is an abstention, and at a FORCED
+    /// turn it abstains on exactly the frames that decide anything. Masking
+    /// converts it into a real guess drawn from their habit — measured, this
+    /// alone took lift from 0% to 69% against an opponent with a left-turn
+    /// signature.
     #[test]
     fn an_impossible_forecast_falls_back_to_the_turn_habit() {
         // Travelling Up, and they habitually break LEFT when forced.
@@ -4275,6 +4287,31 @@ mod tests {
             mask_to_legal(None, &legal, Direction::Up, &turn_prior, None),
             Some(Direction::Left),
             "so must no prediction at all"
+        );
+    }
+
+    /// On a FREE frame (straight available) an absent prediction must STAY
+    /// absent. The turn prior is fed only at forced turns, so it has ~zero
+    /// Straight mass — substituting it here manufactures a turn guess on a
+    /// frame that is ~95% straight and scores the abstaining model on it.
+    /// Measured: this alone was suppressing the power-up intent model from a
+    /// 30.9% selection share down to 2.7%.
+    #[test]
+    fn abstention_on_a_free_frame_is_preserved() {
+        let turn_prior = [0.10, 0.80, 0.10];
+        // Straight (Up) is available — this is a free choice.
+        let legal = [Direction::Up, Direction::Left, Direction::Right];
+        assert_eq!(
+            mask_to_legal(None, &legal, Direction::Up, &turn_prior, None),
+            None,
+            "a model with nothing to say must not be handed the habit's guess"
+        );
+        // But a model that named an IMPOSSIBLE move on a free frame still
+        // falls back to the habit — it spoke, and wrongly.
+        assert_eq!(
+            mask_to_legal(Some(Direction::Down), &legal, Direction::Up, &turn_prior, None),
+            Some(Direction::Left),
+            "an impossible guess (reversal) still becomes the habitual turn"
         );
     }
 
