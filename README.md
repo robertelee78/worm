@@ -50,8 +50,8 @@ The claim is not that the CPU predicts you — it is that predicting you makes i
 fixed and varies only whether the CPU may remember:
 
 ```
-COLD (cannot learn)   cpu 29 player 1 draw 0   win  97%
-WARM (remembers you)  cpu 30 player 0 draw 0   win 100%   lift 66%
+COLD (cannot learn)   cpu 27 player 3 draw 0   win  90%
+WARM (remembers you)  cpu 30 player 0 draw 0   win 100%   lift 78%
 ```
 
 That test was failing until recently, with the *warm* CPU winning less — see
@@ -167,6 +167,7 @@ living documents — if one disagrees with the code, the ADR is the bug.
 - [ADR-008](docs/adrs/008-bomb-as-a-disguised-mine.md) — the bomb becomes a mine disguised as food
 - [ADR-009](docs/adrs/009-learning-must-convert-into-winning.md) — learning must convert into winning
 - [ADR-010](docs/adrs/010-what-the-cpu-learns-from.md) — what the CPU learns from, and what it may know
+- [ADR-011](docs/adrs/011-intent-inference-and-engagement.md) — intent inference and an engaged CPU
 
 ### A note on the numbers in this repo
 
