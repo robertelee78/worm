@@ -650,6 +650,25 @@ impl WormGame {
         let player_ctx_pre =
             crate::cpu_ai::encode_player_context(self, &self.cpu_brain.player_tail);
         let player_dir_this_frame = self.cycles[self.player].direction;
+        // Was this frame INFORMATIVE about the human? Captured here, at frame
+        // start, because it describes the board they chose on — after the move
+        // it is unrecoverable. Drives which episodes the corpus keeps.
+        //
+        // Deliberately NOT `option_count >= 2`: measured, that fires on 99.6%
+        // of frames, because trails retract and the arena stays ~90% empty, so
+        // having two options is the normal state rather than a junction. It
+        // would stratify nothing.
+        //
+        // A frame carries information about the player when they were FORCED
+        // to break (straight was illegal) or when they CHOSE to turn with the
+        // line still open. Continuing straight down an open corridor is the
+        // board talking, not the human.
+        let player_heading_pre = self.cycles[self.player].prev_direction;
+        let player_had_choice = {
+            let legal_pre = crate::cpu_ai::legal_options(self, self.player);
+            !legal_pre.contains(&player_heading_pre)
+                || player_dir_this_frame != player_heading_pre
+        };
 
         // Last frame's forecasts targeted this input, even when this move is
         // lethal. Score them before collision early-returns can end the game.
@@ -989,6 +1008,7 @@ impl WormGame {
             &mut self.cpu_brain,
             player_ctx_pre,
             player_dir_this_frame,
+            player_had_choice,
         );
         // Player move history feeding the CPU tail (trailing-match bonus).
         self.cpu_brain.record_player_move(player_dir_this_frame);

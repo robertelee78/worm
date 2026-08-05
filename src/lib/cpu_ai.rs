@@ -2033,10 +2033,23 @@ fn argmax(distribution: &[f32; 4]) -> Direction {
     index_dir(best)
 }
 
+/// How much a recalled episode's label agrees with what the player has been
+/// doing lately.
+///
+/// This used to count how often the episode's LABEL appeared anywhere in the
+/// recent tail and call it a "trailing match". That is a label-frequency
+/// bonus, not a sequence match: it duplicates the absolute prior, and it
+/// rewards the answer before any contextual evidence has been weighed —
+/// doubling the weight of whichever direction the player happens to use most.
+///
+/// Now it compares against the MOST RECENT move only, which is the one claim
+/// a single stored label can actually support ("they just went this way, and
+/// this memory says they go this way"). Weaker, and honest.
 fn trailing_match_dir(a: &VecDeque<Direction>, ep: &PlayerRec) -> f32 {
-    let span = a.len().clamp(1, 4);
-    let matches = a.iter().filter(|d| **d == ep.next_dir).count();
-    (matches as f32 / span as f32).min(1.0)
+    match a.back() {
+        Some(&last) if last == ep.next_dir => 1.0,
+        _ => 0.0,
+    }
 }
 
 fn aggregate_player(
@@ -3473,13 +3486,35 @@ pub fn record_episode(
 /// Record an opponent observation: the player's context before it moved, and
 /// the direction it took next. This is the core learning signal for the
 /// opponent model — a direct analog of rps-ai storing `nextHumanMove`.
+/// Keep one in this many NON-decision frames.
+///
+/// Not zero: dropping routine frames entirely would be case-control bias — the
+/// corpus would teach the CPU that turning is far more common than it is, and
+/// the k-NN would over-predict turns everywhere. A thinned sample keeps the
+/// base rate honest while leaving room for the frames that matter.
+const STRAIGHT_KEEP_EVERY: u32 = 12;
+
+/// Record what the player did, preferring frames where they actually chose.
+///
+/// `decision` marks a frame where the player had a real alternative. Roughly
+/// 95% of frames are none — continuing down an open corridor — and storing
+/// them all meant the 4000-episode corpus filled by round THREE with
+/// interchangeable straight frames, evicting the rare decisions that carry the
+/// human. Capacity was being spent almost entirely on the least informative
+/// thing on the board.
 pub fn record_player_episode(
     brain: &mut CpuBrain,
     context: [f32; PLAYER_FEATURE_DIM],
     player_next_dir: Direction,
+    decision: bool,
 ) {
-    brain.opp_brain.remember(context, player_next_dir);
+    // The absolute base-rate tally sees EVERY move — it is a base rate, and
+    // thinning it would bias it.
     brain.opp_brain.observe(player_next_dir);
+
+    if decision || brain.opp_brain.seq % STRAIGHT_KEEP_EVERY == 0 {
+        brain.opp_brain.remember(context, player_next_dir);
+    }
 }
 
 #[cfg(test)]
@@ -4112,7 +4147,7 @@ mod tests {
                 let _last = pattern[i];
                 let next = pattern[(i + 1) % pattern.len()];
                 let ctx = encode_player_context_stub(); // Stub: one-hot for 'last' in real use
-                record_player_episode(&mut brain, ctx, next);
+                record_player_episode(&mut brain, ctx, next, true);
             }
         }
 

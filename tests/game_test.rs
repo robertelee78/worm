@@ -495,8 +495,15 @@ fn test_cpu_survival_reward_accumulates_on_straights() {
 fn test_player_context_has_no_label_leakage() {
     let mut game = WormGame::with_size(120, 38);
     game.update(); // player moves Right; episode 0 from an empty tail
-    game.update(); // player still Right; episode 1 from a 1-entry tail
-    assert_eq!(game.cpu_brain.opp_brain.episodes.len(), 2);
+    game.update(); // player still Right
+    // The corpus is now stratified — routine straight frames are thinned, so
+    // the SECOND frame of a straight run may not be stored at all. The
+    // invariant under test is about what a stored episode contains, not how
+    // many there are.
+    assert!(
+        !game.cpu_brain.opp_brain.episodes.is_empty(),
+        "the opening frame is always recorded"
+    );
     for (i, e) in game.cpu_brain.opp_brain.episodes.iter().enumerate() {
         let transition_mass: f32 = e.vector[13..29].iter().sum();
         assert_eq!(
@@ -782,7 +789,7 @@ fn test_knn_model_abstains_cold_joins_warm() {
 
     let ctx = [0.1f32; worm::cpu_ai::PLAYER_FEATURE_DIM];
     for _ in 0..60 {
-        worm::record_player_episode(&mut game.cpu_brain, ctx, worm::Direction::Right);
+        worm::record_player_episode(&mut game.cpu_brain, ctx, worm::Direction::Right, true);
     }
     let (pending, _, _) = worm::cpu_ai::compute_ensemble(&game, &game.cpu_brain);
     assert!(pending[6].is_some(), "knn predicts once warm");
