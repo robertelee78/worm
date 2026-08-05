@@ -804,6 +804,18 @@ impl WormGame {
 
         // Player collision
         if player_crashed {
+            // Record the fatal choice into the opponent corpus BEFORE the
+            // early return below. This path used to skip recording entirely —
+            // survivor bias: the memory omitted precisely the terminal
+            // mistakes and over-aggressive choices that are most informative
+            // about how this human loses. "At this kind of junction they
+            // drive into a wall" is exactly the read a dominating CPU wants.
+            crate::cpu_ai::record_player_episode(
+                &mut self.cpu_brain,
+                player_ctx_pre,
+                player_dir_this_frame,
+                true, // a death is always an informative frame
+            );
             // What killed the player: bomb cell, wall, own trail, or CPU trail.
             if self.death_cause.is_none() {
                 self.death_cause = Some(

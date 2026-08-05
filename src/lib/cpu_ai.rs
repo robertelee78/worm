@@ -41,27 +41,6 @@ pub const COLD_START_EPISODES: usize = 60;
 const EXPLORE_RATE: f32 = 0.05; // outright random legal throw rate
 const MEMORY_VOTE_MIN_OPEN: f32 = 0.05; // destination must keep >=5% of the arena reachable
 
-/// How much the CPU wants a power-up of this kind, given what it already holds.
-///
-/// It could not previously tell them apart — every site matched on the bare
-/// `CellType::PowerUp` — so it would detour for anything and destroy a held
-/// Laser by driving over a Bomb. The human has always been able to see the
-/// icons and choose; this closes that gap.
-pub fn powerup_worth_taking(game: &WormGame, who: usize, _kind: crate::game::PowerUpKind) -> bool {
-    // Refuse only one thing: trading away a laser that is MID-CHARGE. The shot
-    // is nearly paid for and a pickup silently overwrites the slot.
-    //
-    // A ranked version of this — refuse anything that does not outrank what we
-    // hold — was implemented and MEASURED, and it made the CPU markedly worse:
-    // win rate 97% -> 83%, player wins 1 -> 5. Laser outranks everything, so
-    // once holding one the CPU refused every other power-up; and because its
-    // laser needs ten consecutively-aligned frames to fire, it frequently held
-    // that laser forever and stopped collecting at all, leaving the board to
-    // the human. Preference is not worth a famine. The KIND information stays
-    // available (powerup_at, and the opponent's held kind in the feature
-    // vector) — it was the policy that was wrong, not the knowledge.
-    !(who == 1 && game.cpu_laser_charge > 0)
-}
 
 /// Reachable cells a destination must leave for the cycle to be able to keep
 /// playing from it: enough room to outrun its own body, plus a manoeuvring

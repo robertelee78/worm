@@ -723,21 +723,29 @@ function hud(s) {
   if (ex) {
     const pct = (v) => `${(v * 100).toFixed(0)}%`;
     ex.innerHTML = [
-      `<p><b>What it remembers.</b> Every move you make, with the situation you
-        were in — ${b.memory.opponentObserved} so far, keeping the most recent
-        ${b.memory.opponentRetained}.</p>`,
+      `<p><b>What it remembers.</b> The moments you had a real choice — corners,
+        forced turns, and the moves that got you killed — with the situation you
+        were in. Routine corridor frames are mostly skipped: they describe the
+        board, not you. ${b.memory.opponentRetained} situations held.</p>`,
       `<p><b>How it guesses.</b> Seven simple assumptions about you all guess at
-        once; whichever has been right most lately drives. Currently
-        ${b.nextForecast?.sourceName || '—'}.</p>`,
-      `<p><b>What the read rate means.</b> It only scores itself where you had a
-        real choice — guessing right in a one-exit corridor is worth nothing.
-        And it is measured against <i>your own habits</i>, not against random:
-        always guessing your commonest move would score
-        ${rr.ready ? pct(rr.baseRate) : '—'}, so only beating that is a read.</p>`,
+        once; whichever has been right most lately drives (currently
+        ${b.nextForecast?.sourceName || '—'}) — except when you are forced to
+        turn, where it bets directly on your measured turning habit. Guesses
+        you could not actually make are corrected to your likeliest legal
+        move.</p>`,
+      `<p><b>What the read rate means.</b> It is measured against <i>your own
+        habits</i>, not against random: a rival that always guesses your
+        commonest move would score ${rr.ready ? pct(rr.baseRate) : '—'}, and
+        only the moves where they disagree count as evidence. Beating that
+        rival is a read; matching it proves nothing.</p>`,
       `<p><b>What the seal proves.</b> Before you press a key it publishes a
         hash of its guess, and reveals it after — so the guess provably came
         first. It runs on your machine, so this is tamper-evidence, not proof
         against a hostile host.</p>`,
+      `<p><b>What it tracks in plain sight.</b> Mines are planted with a flash
+        and a sound, then disguise themselves as food. It remembers every
+        plant it saw — and so could you. Tracking them is part of the
+        game.</p>`,
       `<p><b>What it never does.</b> It never reads your keypress before
         predicting, never sees the board's future, and never sees anyone else's
         games. This brain only knows you, and it lives in this browser.</p>`,
