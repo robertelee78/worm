@@ -395,12 +395,32 @@ impl CpuBrain {
         (tvd / CLEAR_BIAS).min(1.0)
     }
 
+    /// Fold a *survived* move into the direction prior.
+    ///
+    /// Only rewarded moves are credited. A crash episode is recorded with
+    /// `reward = 0.0`, and this used to add a flat `1.0 + 0.0` for it — so
+    /// dying reinforced the direction that killed the CPU by exactly as much
+    /// as surviving a frame did. The k-NN *vote* was already protected (crash
+    /// episodes are zero-weighted by the `survived` factor in `aggregate`),
+    /// but the *prior* was not — and the prior is what blends in when memory
+    /// confidence is low, i.e. precisely when the CPU is least sure and most
+    /// in need of not repeating a fatal move.
+    ///
+    /// The decay still runs on a death — every direction ages, none is
+    /// credited. Note this does not *push the prior away* from the fatal
+    /// direction: with a Laplace-smoothed prior, decaying the others slightly
+    /// raises an uncredited direction's relative share. Actively penalising a
+    /// death is a separate question (it belongs to a death-memory, not to a
+    /// counter that only knows how to add). What this guarantees is the
+    /// narrow, load-bearing thing: dying never *earns* credit.
     pub fn observe(&mut self, dir: Direction, reward: f32) {
         let idx = dir_index(dir);
         for i in 0..4 {
             self.tally[i] *= PRIOR_DECAY;
         }
-        self.tally[idx] += 1.0 + reward.max(0.0);
+        if reward > 0.0 {
+            self.tally[idx] += 1.0 + reward;
+        }
     }
 
     pub fn record_player_move(&mut self, dir: Direction) {
@@ -2708,6 +2728,51 @@ pub fn record_player_episode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Dying must never make the fatal direction *more* attractive. The k-NN
+    /// vote already zero-weights crash episodes; the direction prior did not,
+    /// and the prior is what carries the decision when memory confidence is
+    /// low — exactly the situation a recent death describes.
+    #[test]
+    fn death_does_not_reinforce_the_fatal_direction() {
+        let mut brain = CpuBrain::new();
+        // Die going Right, from a clean prior.
+        brain.remember([0.0; CPU_FEATURE_DIM], Direction::Right, 0.0);
+
+        assert_eq!(
+            brain.tally[dir_index(Direction::Right)],
+            0.0,
+            "a crash episode must earn the fatal direction no credit at all"
+        );
+    }
+
+    /// The sharper statement: dying going one way must leave that way strictly
+    /// less favoured than surviving going the same way.
+    #[test]
+    fn dying_is_worth_strictly_less_than_surviving() {
+        let mut died = CpuBrain::new();
+        died.remember([0.0; CPU_FEATURE_DIM], Direction::Right, 0.0);
+
+        let mut lived = CpuBrain::new();
+        lived.remember([0.0; CPU_FEATURE_DIM], Direction::Right, 0.0001);
+
+        let i = dir_index(Direction::Right);
+        assert!(
+            died.prior_distribution()[i] < lived.prior_distribution()[i],
+            "even a barely-rewarded survival must outrank a death"
+        );
+    }
+
+    /// The complement: a genuinely rewarded move still earns its credit, so
+    /// the fix cannot be mistaken for "the prior stopped learning".
+    #[test]
+    fn survival_still_reinforces_its_direction() {
+        let mut brain = CpuBrain::new();
+        let before = brain.prior_distribution()[dir_index(Direction::Left)];
+        brain.remember([0.0; CPU_FEATURE_DIM], Direction::Left, 12.0);
+        let after = brain.prior_distribution()[dir_index(Direction::Left)];
+        assert!(after > before, "a surviving move must gain prior share");
+    }
 
     /// The survival floor must scale with the cycle's own body, because the
     /// only thing a snake has to outrun is itself. The floor this replaced was
