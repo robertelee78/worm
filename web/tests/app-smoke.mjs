@@ -97,6 +97,24 @@ function makeEl(id) {
     },
     addEventListener: (type, fn) => { listeners[type] = fn; },
     _listeners: listeners,
+    get clientWidth() {
+      if (id === 'play-column') {
+        return window.innerWidth >= 1240 ? window.innerWidth - 348 : window.innerWidth - 20;
+      }
+      return 0;
+    },
+    getBoundingClientRect() {
+      const playWidth = window.innerWidth >= 1240 ? window.innerWidth - 348 : window.innerWidth - 20;
+      if (id === 'play-column') {
+        const height = 600;
+        const top = 500 - scrollY;
+        return { top, bottom: top + height, left: 10, right: 10 + playWidth, width: playWidth, height };
+      }
+      if (id === 'touch-controls') {
+        return { top: 0, bottom: 0, left: 0, right: playWidth, width: playWidth, height: 0 };
+      }
+      return { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 };
+    },
     getContext: () => ctxProxy(el),
     prepend(child) {
       this.children.unshift(child);
@@ -119,6 +137,9 @@ function makeEl(id) {
 const elements = new Map();
 let createdCount = 0;
 globalThis.document = {
+  documentElement: {
+    get clientWidth() { return globalThis.window?.innerWidth ?? 1200; },
+  },
   getElementById(id) {
     if (!elements.has(id)) elements.set(id, makeEl(id));
     return elements.get(id);
@@ -128,10 +149,32 @@ globalThis.document = {
 };
 
 const winListeners = {};
+const visualListeners = {};
+let scrollY = 0;
+const scrollCalls = [];
 globalThis.window = {
   innerWidth: 1200, innerHeight: 900,
   addEventListener(type, fn) { winListeners[type] = fn; },
+  history: { scrollRestoration: 'auto' },
+  visualViewport: {
+    width: 1200, height: 900, offsetTop: 0,
+    addEventListener(type, fn) { visualListeners[type] = fn; },
+  },
+  scrollBy(options) {
+    const delta = typeof options === 'number' ? options : Number(options.top) || 0;
+    scrollY += delta;
+    scrollCalls.push(delta);
+  },
 };
+globalThis.getComputedStyle = (el) => ({
+  display: el.id === 'touch-controls' ? 'none' : 'block',
+  paddingLeft: el.id === 'arena-bezel' ? '18px' : '0px',
+  paddingRight: el.id === 'arena-bezel' ? '18px' : '0px',
+  paddingTop: el.id === 'arena-bezel' ? '18px' : '0px',
+  paddingBottom: el.id === 'arena-bezel' ? '18px' : '0px',
+  borderLeftWidth: '0px', borderRightWidth: '0px',
+  borderTopWidth: '0px', borderBottomWidth: '0px',
+});
 
 let rafQueue = [];
 globalThis.requestAnimationFrame = (cb) => { rafQueue.push(cb); return rafQueue.length; };
@@ -197,13 +240,14 @@ function frames(n, stepMs = 100) {
 }
 
 console.log('— boot lifecycle —');
-assert(rafQueue.length === 1, 'game loop scheduled after boot');
+assert(rafQueue.length >= 2, 'game loop and arena focus scheduled after boot');
 assert(/^\d+ \/ \d+$/.test(elements.get('screen').style.aspectRatio), 'arena screen receives the logical board aspect ratio');
 assert(sfxCalls.roundStart === 1, 'roundStart fired at boot');
 assert(sfxCalls.insertCoin.length === 1 && sfxCalls.insertCoin[0] === false, 'boot insertCoin invoked but silent (AudioContext still locked)');
 assert(sfxCalls.engineHum.some((c) => c.args[0] === true), 'engineHum(true) requested at round start');
 
 frames(3);
+assert(scrollCalls.length >= 1 && elements.get('play-column').dataset.autoFocused === 'true', 'boot automatically focuses the playable stage');
 assert(stub.calls.update > 0, 'game.update() driven by rAF loop');
 assert(elements.get('bp-action').textContent.includes('cutting off your next corner'), 'brain panel separates final CPU action from prediction source');
 assert(elements.get('bp-accnum').textContent.includes('n=10'), 'round prediction accuracy includes its sample size');
@@ -267,8 +311,15 @@ console.log('— next round —');
 stub.state.over = false;
 window.innerWidth = 768;
 window.innerHeight = 1024;
+window.visualViewport.width = 768;
+window.visualViewport.height = 1024;
+const activeCanvas = [elements.get('game-canvas').width, elements.get('game-canvas').height];
+const wideBezel = elements.get('arena-bezel').style.width;
+winListeners.resize();
 frames(1);
 assert(stub.calls.restart_with_size.length === 0, 'active viewport resize does not reset the round');
+assert(elements.get('game-canvas').width === activeCanvas[0] && elements.get('game-canvas').height === activeCanvas[1], 'presentation refit preserves active canvas dimensions');
+assert(elements.get('arena-bezel').style.width !== wideBezel, 'presentation refit adopts the measured live viewport');
 winListeners.keydown({ code: 'Enter', preventDefault() {} });
 assert(stub.calls.restart_with_size.length === 1, 'next round applies the newly available logical size once');
 assert(sfxCalls.roundStart === 2, 'roundStart fired on nextRound');
@@ -289,6 +340,8 @@ assert(stub.calls.reset_match_with_size.length === 1, 'new match applies the cur
 assert(elements.get('champion-overlay').classList.contains('hidden'), 'champion overlay dismissed');
 assert(sfxCalls.roundStart === 3, 'roundStart fired on new match');
 assert(elements.get('history-body').children.length === 2, 'new match retains longitudinal history');
+frames(1);
+assert(elements.get('play-column').dataset.autoFocused === 'true', 'round and match boundaries retain automatic stage focus');
 
 console.log('— fire button —');
 elements.get('fire-btn')._listeners.pointerdown({ preventDefault() {} });

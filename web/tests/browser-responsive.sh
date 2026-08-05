@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Real-Chrome proof for responsive layout, round-boundary logical resizing,
-# and IndexedDB round-history reload. Requires vibium + ChromeDriver.
+# Real-Chrome proof for no-scroll first-load stage focus, responsive layout,
+# round-boundary logical resizing, and IndexedDB reload. Requires vibium.
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -60,11 +60,70 @@ else
   vibium start >/dev/null
 fi
 started_browser=1
-vibium viewport 2560 1440 >/dev/null
+vibium viewport 1440 900 >/dev/null
 vibium go "http://127.0.0.1:$test_port" >/dev/null
 vibium wait "#game-canvas" --state visible --timeout 30000 >/dev/null
 vibium wait fn \
   "document.querySelectorAll('.bp-model').length === 7 && document.getElementById('history-summary').textContent.length > 0" \
+  >/dev/null
+
+# Start a fresh page lifecycle at scrollY=0. There is deliberately no test
+# scroll after reload: the application must focus the complete playable stage.
+vibium eval "window.scrollTo(0, 0)" >/dev/null
+vibium reload >/dev/null
+vibium wait fn \
+  "document.getElementById('play-column').dataset.autoFocused === 'true'" \
+  >/dev/null
+vibium eval --stdin >/dev/null <<'JS'
+(() => {
+  const viewport = window.visualViewport || { height: innerHeight, offsetTop: 0 };
+  const stage = document.getElementById('play-column').getBoundingClientRect();
+  const screen = document.getElementById('screen').getBoundingClientRect();
+  const top = viewport.offsetTop || 0, bottom = top + viewport.height;
+  if (stage.top < top - 1 || stage.bottom > bottom + 1) {
+    throw new Error(`1440x900 stage is not fully visible: ${stage.top}..${stage.bottom} vs ${top}..${bottom}`);
+  }
+  if (screen.top < top - 1 || screen.bottom > bottom + 1) throw new Error('1440x900 screen is clipped');
+  if (Math.abs((stage.top + stage.bottom) / 2 - (top + bottom) / 2) > 3) {
+    throw new Error('1440x900 stage is not vertically centered');
+  }
+  if (scrollY <= 0) throw new Error('application did not move the below-fold stage into view');
+  return true;
+})()
+JS
+
+# Reproduce the narrow effective content viewport from the Safari acceptance
+# capture. Again, reset before reload and issue no test scroll afterward.
+vibium viewport 768 818 >/dev/null
+vibium eval "window.scrollTo(0, 0)" >/dev/null
+vibium reload >/dev/null
+vibium wait fn \
+  "document.getElementById('play-column').dataset.autoFocused === 'true'" \
+  >/dev/null
+vibium eval --stdin >/dev/null <<'JS'
+(() => {
+  const viewport = window.visualViewport || { height: innerHeight, offsetTop: 0 };
+  const stage = document.getElementById('play-column').getBoundingClientRect();
+  const screen = document.getElementById('screen').getBoundingClientRect();
+  const top = viewport.offsetTop || 0, bottom = top + viewport.height;
+  if (stage.top < top - 1 || stage.bottom > bottom + 1) {
+    throw new Error(`768x818 stage is not fully visible: ${stage.top}..${stage.bottom} vs ${top}..${bottom}`);
+  }
+  if (screen.left < -1 || screen.right > document.documentElement.clientWidth + 1) {
+    throw new Error('768x818 screen exceeds the effective content viewport');
+  }
+  if (Math.abs((stage.top + stage.bottom) / 2 - (top + bottom) / 2) > 3) {
+    throw new Error('768x818 stage is not vertically centered');
+  }
+  if (scrollY <= 0) throw new Error('application did not auto-focus the compact stage');
+  return true;
+})()
+JS
+
+vibium viewport 2560 1440 >/dev/null
+vibium reload >/dev/null
+vibium wait fn \
+  "document.getElementById('play-column').dataset.autoFocused === 'true'" \
   >/dev/null
 
 vibium eval --stdin >/dev/null <<'JS'
@@ -78,6 +137,28 @@ vibium eval --stdin >/dev/null <<'JS'
   }
   const physicalCell = document.getElementById('screen').getBoundingClientRect().width / Number(canvas.dataset.cols);
   if (physicalCell < 30) throw new Error(`large-screen cells too small: ${physicalCell}px`);
+  return true;
+})()
+JS
+
+# A short Safari-like visual viewport refits the current presentation without
+# rebuilding the logical board and keeps an already-visible stage in view.
+vibium viewport 1440 520 >/dev/null
+vibium wait fn \
+  "document.getElementById('play-column').getBoundingClientRect().bottom <= (window.visualViewport?.height || innerHeight) + (window.visualViewport?.offsetTop || 0) + 1" \
+  >/dev/null
+vibium eval --stdin >/dev/null <<'JS'
+(() => {
+  const canvas = document.getElementById('game-canvas');
+  const stage = document.getElementById('play-column').getBoundingClientRect();
+  const viewport = window.visualViewport || { height: innerHeight, offsetTop: 0 };
+  if (canvas.width !== window.__wormGateCanvas[0] || canvas.height !== window.__wormGateCanvas[1]) {
+    throw new Error('short-height refit changed the active logical board');
+  }
+  if (stage.top < (viewport.offsetTop || 0) - 1 ||
+      stage.bottom > (viewport.offsetTop || 0) + viewport.height + 1) {
+    throw new Error('short-height refit left the playable stage clipped');
+  }
   return true;
 })()
 JS
@@ -96,6 +177,30 @@ vibium eval --stdin >/dev/null <<'JS'
   }
   if (document.querySelector('.bp-mname').getBoundingClientRect().width < 100) {
     throw new Error('model names collapsed');
+  }
+  return true;
+})()
+JS
+
+# Force the coarse-pointer controls visible and prove they are part of the
+# measured stage budget rather than appearing below the viewport.
+vibium eval --stdin >/dev/null <<'JS'
+(() => {
+  document.getElementById('touch-controls').style.display = 'block';
+  dispatchEvent(new Event('resize'));
+  return true;
+})()
+JS
+vibium wait fn \
+  "document.getElementById('play-column').getBoundingClientRect().bottom <= (window.visualViewport?.height || innerHeight) + (window.visualViewport?.offsetTop || 0) + 1" \
+  >/dev/null
+vibium eval --stdin >/dev/null <<'JS'
+(() => {
+  const stage = document.getElementById('play-column').getBoundingClientRect();
+  const controls = document.getElementById('touch-controls').getBoundingClientRect();
+  if (controls.height < 100) throw new Error('forced touch controls did not become visible');
+  if (controls.top < stage.top || controls.bottom > stage.bottom + 1) {
+    throw new Error('touch controls are not contained in the fitted play stage');
   }
   return true;
 })()
@@ -180,4 +285,4 @@ vibium eval --stdin >/dev/null <<'JS'
 })()
 JS
 
-echo "BROWSER PASS — active-round stability, boundary resize, breakpoint, and durable evidence held"
+echo "BROWSER PASS — no-scroll stage focus, live refit, boundary resize, breakpoint, and durable evidence held"

@@ -1,6 +1,6 @@
 // Pure responsive-layout contract. Run with: node web/tests/layout-test.mjs
 import assert from 'node:assert/strict';
-import { computeBoardLayout, SIDE_BY_SIDE_MIN } from '../layout.js';
+import { computeBoardLayout, SIDE_BY_SIDE_MIN, VIEWPORT_BLOCK_GUTTER } from '../layout.js';
 
 const desktopCases = [
   [3840, 2160],
@@ -37,4 +37,21 @@ const before = computeBoardLayout(1440, 900);
 const after = computeBoardLayout(1024, 768);
 assert.notDeepEqual(before, after, 'a new page load or round boundary adapts logical dimensions to its viewport');
 
-console.log('LAYOUT PASS — desktop, tablet, phone, and breakpoint contracts held');
+const measuredTall = computeBoardLayout(768, 818, {
+  availableWidth: 712,
+  availableHeight: 750,
+});
+assert.equal(measuredTall.availableWidth, 712, 'the resolved play-column width overrides outer-window estimates');
+assert.equal(measuredTall.availableHeight, 750, 'the live visual-height budget is used without a fixed header subtraction');
+const measuredShort = computeBoardLayout(768, 818, {
+  availableWidth: 712,
+  availableHeight: 420,
+});
+assert.ok(measuredShort.rows < measuredTall.rows, 'a short live viewport produces a shorter next-round board');
+assert.equal(
+  computeBoardLayout(768, 818).availableHeight,
+  818 - VIEWPORT_BLOCK_GUTTER,
+  'fallback height reserves only stage breathing room, not decorative page chrome',
+);
+
+console.log('LAYOUT PASS — measured stage, viewport, phone, and breakpoint contracts held');

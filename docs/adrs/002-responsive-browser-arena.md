@@ -30,10 +30,18 @@ effectively 4.8px cells on a 390px phone. A 1900px row cap also left most of an
 ultrawide display unused. Fitting the board was not enough; the cycles and items
 had to remain readable while the arena consumed the space actually available.
 
+A second acceptance test exposed a different failure in Safari: the sizing
+formula subtracted a fixed 240px from viewport height, even though the title,
+hero, and scoreboard consumed 532px before the cabinet at 1440x900. With the
+page at its restored top position, the screen occupied y=564..1219 and required
+manual scrolling. A captured browser session also exposed an effective 768px
+content viewport inside a much wider browser capture. Outer-window estimates
+therefore cannot establish the space the stage actually owns.
+
 ## Decision
 
-1. Select the logical board once at game construction, reserving the CPU Brain
-   panel width when the viewport can support a side-by-side layout.
+1. Select the logical board once at game construction from the play column's
+   measured content width and the live visual viewport's measured height.
 2. Lay out the arena and brain with a two-column CSS grid on wide screens and a
    one-column stack on narrow screens.
 3. Derive the screen's CSS `aspect-ratio` from the logical board and make the
@@ -49,6 +57,14 @@ had to remain readable while the arena consumed the space actually available.
    and match scoreboard survive; never migrate or reset an active round.
 7. Stack the brain below the arena below 1240px so the side card cannot make the
    playfield and its contents tiny on ordinary laptop widths.
+8. Fit the active screen from the actual play-column width, computed bezel
+   chrome, visible touch controls, and `visualViewport` height. Window and
+   `visualViewport` resize events change presentation only.
+9. Keep touch controls in the play column, then center that complete playable
+   stage on boot, next round, and new match. Decorative content remains
+   available above it, but the player never has to scroll manually to begin.
+10. Reserve hero geometry in HTML so late image decoding cannot move the stage
+    after it has been centered.
 
 ## Spike/Test Contract
 
@@ -63,6 +79,11 @@ had to remain readable while the arena consumed the space actually available.
   preserving the learned brain and, for a normal restart, the match score.
 - A real browser test verifies bounding boxes and horizontal overflow at the
   representative viewport sizes instead of relying only on formula tests.
+- From an explicit `scrollY=0`, a fresh 1440x900 and 768x818 load automatically
+  places the complete playable stage inside the visual viewport without a test
+  scroll command.
+- A short-height live resize refits the CSS presentation, keeps the stage
+  visible, and leaves the active canvas's logical dimensions unchanged.
 
 ## Consequences
 
@@ -84,5 +105,11 @@ had to remain readable while the arena consumed the space actually available.
   names on a 390x844 phone, a stable logical board during active resizes, a
   full-width 2560px arena with 30px+ cells, and a one-time roughly 34-column
   logical resize with 10px+ rendered cells on the following phone-sized round.
+- The gate now starts fresh 1440x900 and 768x818 page lifecycles at `scrollY=0`
+  and issues no test-side scroll after reload. In both cases the app centers the
+  complete play stage inside `visualViewport`; a 1440x520 live-height spike
+  refits the stage while retaining the exact active canvas dimensions.
+- Visual captures confirm a 1041x829 screen plus brain panel at 1440x900 and a
+  centered, nearly full-viewport arena at the screenshot-like 768x818 size.
 - A Rust integration test proves `restart_with_size` preserves the learned
   brain, banks the current winner once, and resets only round-owned state.

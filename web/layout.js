@@ -1,10 +1,11 @@
-// Responsive arena sizing. CSS scales the stable active board continuously;
-// the same calculation is applied to logical dimensions only at boot or a
+// Responsive arena sizing. DOM-measured presentation scales the stable active
+// board continuously; this logical calculation runs only at boot or a
 // round/new-match boundary, so a live resize never destroys an active round.
 
 export const BRAIN_PANEL_WIDTH = 310;
 export const LAYOUT_GAP = 18;
 export const SIDE_BY_SIDE_MIN = 1240;
+export const VIEWPORT_BLOCK_GUTTER = 32;
 
 const PAGE_INLINE_GUTTER = 20;
 const WIDE_BEZEL_INLINE_PADDING = 36;
@@ -29,19 +30,21 @@ function clamp(value, min, max) {
  * fixed page cap; narrow displays reduce the logical grid before shrinking the
  * cycles into near-invisible pixels.
  */
-export function computeBoardLayout(viewportWidth, viewportHeight) {
+export function computeBoardLayout(viewportWidth, viewportHeight, measured = {}) {
   const width = Math.max(320, Number(viewportWidth) || 0);
-  const height = Math.max(480, Number(viewportHeight) || 0);
+  const height = Math.max(240, Number(viewportHeight) || 0);
   const sideBySide = width >= SIDE_BY_SIDE_MIN;
   const panelReserve = sideBySide ? BRAIN_PANEL_WIDTH + LAYOUT_GAP : 0;
   const bezelInlinePadding = sideBySide
     ? WIDE_BEZEL_INLINE_PADDING
     : clamp(width * 0.05, 16, WIDE_BEZEL_INLINE_PADDING);
-  const availableWidth = Math.max(
+  const fallbackWidth = Math.max(
     270,
     width - PAGE_INLINE_GUTTER - bezelInlinePadding - panelReserve,
   );
-  const availableHeight = Math.max(height - 240, 320);
+  const fallbackHeight = Math.max(height - VIEWPORT_BLOCK_GUTTER, 240);
+  const availableWidth = Math.max(270, Number(measured.availableWidth) || fallbackWidth);
+  const availableHeight = Math.max(240, Number(measured.availableHeight) || fallbackHeight);
   const cell = clamp(
     Math.round(Math.min(availableWidth / TARGET_COLS, availableHeight / TARGET_ROWS)),
     MIN_CELL,

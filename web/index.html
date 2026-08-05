@@ -19,7 +19,7 @@
 
 <!-- codex-generated hero art -->
 <div class="hero-wrap">
-  <img class="hero" src="assets/hero.png" alt="Cyan and magenta light cycles dueling on a black grid">
+  <img class="hero" src="assets/hero.png" width="1200" height="360" alt="Cyan and magenta light cycles dueling on a black grid">
 </div>
 
 <!-- rps-ai shell: scoreboard strip -->
@@ -39,24 +39,37 @@
      history; we show the learning itself, in plain language) -->
 <div class="cabinet">
   <div class="game-row">
-    <div class="bezel">
-      <div class="screen" id="screen">
-        <canvas id="game-canvas"></canvas>
-        <div class="crt-scanlines"></div>
-        <div class="crt-vignette"></div>
-        <div class="crt-flicker"></div>
-        <div class="game-over-overlay hidden" id="over-overlay">
-          <div class="over-text glow-red" id="over-text">CPU WINS</div>
-          <div class="over-sub" id="over-sub">SCORE P1=0 P2=0</div>
-          <div class="over-brain" id="over-brain"></div>
-          <div class="blink insert-coin">PRESS R FOR NEXT ROUND</div>
-          <button class="btn-green" id="next-round-btn">Next Round</button>
+    <div class="play-column" id="play-column">
+      <div class="bezel" id="arena-bezel">
+        <div class="screen" id="screen">
+          <canvas id="game-canvas"></canvas>
+          <div class="crt-scanlines"></div>
+          <div class="crt-vignette"></div>
+          <div class="crt-flicker"></div>
+          <div class="game-over-overlay hidden" id="over-overlay">
+            <div class="over-text glow-red" id="over-text">CPU WINS</div>
+            <div class="over-sub" id="over-sub">SCORE P1=0 P2=0</div>
+            <div class="over-brain" id="over-brain"></div>
+            <div class="blink insert-coin">PRESS R FOR NEXT ROUND</div>
+            <button class="btn-green" id="next-round-btn">Next Round</button>
+          </div>
+          <div class="champion-overlay hidden" id="champion-overlay">
+            <div class="champ-text glow-green" id="champ-text">YOU are the champion!</div>
+            <div class="blink insert-coin">INSERT COIN</div>
+            <button class="btn-green" id="new-match-btn">Start a New Match</button>
+          </div>
         </div>
-        <div class="champion-overlay hidden" id="champion-overlay">
-          <div class="champ-text glow-green" id="champ-text">YOU are the champion!</div>
-          <div class="blink insert-coin">INSERT COIN</div>
-          <button class="btn-green" id="new-match-btn">Start a New Match</button>
+      </div>
+
+      <!-- Touch controls stay with the arena so fitting and focus include them. -->
+      <div class="touch-controls" id="touch-controls">
+        <button class="btn-green tbtn" data-dir="0">▲</button>
+        <div class="trow">
+          <button class="btn-green tbtn" data-dir="2">◀</button>
+          <button class="btn-green tbtn" data-dir="1">▼</button>
+          <button class="btn-green tbtn" data-dir="3">▶</button>
         </div>
+        <button class="btn-green tbtn fire" id="fire-btn">FIRE</button>
       </div>
     </div>
     <aside class="brain-panel" id="brain-panel">
@@ -78,17 +91,6 @@
       <div class="bp-foot">Every model forecasts your next move. The best recent predictor informs the hunt; weapon and survival layers can override it.</div>
     </aside>
   </div>
-</div>
-
-<!-- touch controls (mobile, rps-ai's big-green-button pattern) -->
-<div class="touch-controls">
-  <button class="btn-green tbtn" data-dir="0">▲</button>
-  <div class="trow">
-    <button class="btn-green tbtn" data-dir="2">◀</button>
-    <button class="btn-green tbtn" data-dir="1">▼</button>
-    <button class="btn-green tbtn" data-dir="3">▶</button>
-  </div>
-  <button class="btn-green tbtn fire" id="fire-btn">FIRE</button>
 </div>
 
 <!-- rps-ai shell: history table (per round) -->

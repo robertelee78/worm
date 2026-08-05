@@ -3,9 +3,9 @@
 // sfx, IndexedDB per-player brain keyed by a long-lived deviceId cookie.
 import init, { WasmGame } from './pkg/worm.js';
 import { Sfx } from './audio.js';
-import { computeBoardLayout } from './layout.js';
+import { computeBoardLayout, VIEWPORT_BLOCK_GUTTER } from './layout.js';
 
-let CELL = 14; // recomputed by boardDims() to fit the viewport
+let CELL = 14; // recomputed by applyBoardLayout() to fit the measured stage
 const MATCH_TARGET = 3;
 const STATE_SCHEMA_VERSION = 1;
 const ROUND_SCHEMA_VERSION = 1;
@@ -103,6 +103,10 @@ const canvas = document.getElementById('game-canvas');
 const ctx = canvas.getContext('2d');
 const off = document.createElement('canvas');
 const offCtx = off.getContext('2d');
+const playColumn = document.getElementById('play-column');
+const bezel = document.getElementById('arena-bezel');
+const screen = document.getElementById('screen');
+const touchControls = document.getElementById('touch-controls');
 
 let game = null;
 let cols = 0, rows = 0;
@@ -112,9 +116,118 @@ let roundMemoryStart = null;
 let roundHistory = [];
 const bombMaxFuse = new Map(); // "x,y" → max fuse seen (fuse arc countdown)
 
+function px(value) {
+  return Number.parseFloat(value) || 0;
+}
+
+function viewportBox() {
+  const visual = window.visualViewport;
+  return {
+    width: Number(visual?.width) || document.documentElement.clientWidth || window.innerWidth,
+    height: Number(visual?.height) || window.innerHeight,
+    offsetTop: Number(visual?.offsetTop) || 0,
+  };
+}
+
+// Measure the stage after CSS has resolved its real grid column. In particular,
+// do not infer this from the outer browser window: Safari's visual viewport and
+// embedded/responsive browser views can be materially smaller.
+function measureArenaSpace() {
+  const viewport = viewportBox();
+  const playRect = playColumn.getBoundingClientRect();
+  const playWidth = playRect.width || playColumn.clientWidth || viewport.width;
+  const bezelStyle = getComputedStyle(bezel);
+  const inlineChrome = px(bezelStyle.paddingLeft) + px(bezelStyle.paddingRight) +
+    px(bezelStyle.borderLeftWidth) + px(bezelStyle.borderRightWidth);
+  const blockChrome = px(bezelStyle.paddingTop) + px(bezelStyle.paddingBottom) +
+    px(bezelStyle.borderTopWidth) + px(bezelStyle.borderBottomWidth);
+  const controlsStyle = getComputedStyle(touchControls);
+  const controlsHeight = controlsStyle.display === 'none'
+    ? 0
+    : touchControls.getBoundingClientRect().height;
+  const visualWidth = Math.max(1, viewport.width - 20);
+
+  return {
+    viewport,
+    playWidth,
+    inlineChrome,
+    blockChrome,
+    controlsHeight,
+    availableWidth: Math.max(1, Math.min(playWidth, visualWidth) - inlineChrome),
+    availableHeight: Math.max(
+      1,
+      viewport.height - blockChrome - controlsHeight - VIEWPORT_BLOCK_GUTTER,
+    ),
+  };
+}
+
 function measureBoardLayout() {
-  const viewport = window.visualViewport || window;
-  return computeBoardLayout(viewport.width || window.innerWidth, viewport.height || window.innerHeight);
+  const space = measureArenaSpace();
+  const layoutWidth = document.documentElement.clientWidth || window.innerWidth;
+  return computeBoardLayout(layoutWidth, space.viewport.height, space);
+}
+
+// A live resize changes only CSS presentation. The logical board remains
+// stable until the next round boundary, but its existing aspect ratio is fit
+// into the exact width/height currently available to the complete play stage.
+function refitArenaPresentation() {
+  if (!cols || !rows) return;
+  const space = measureArenaSpace();
+  const aspect = cols / rows;
+  const displayWidth = Math.min(space.availableWidth, space.availableHeight * aspect);
+  const outerWidth = Math.min(space.playWidth, displayWidth + space.inlineChrome);
+  bezel.style.width = `${Math.max(1, outerWidth)}px`;
+  screen.dataset.displayWidth = String(Math.round(displayWidth));
+  screen.dataset.displayHeight = String(Math.round(displayWidth / aspect));
+}
+
+function arenaIntersectsViewport() {
+  const viewport = viewportBox();
+  const rect = playColumn.getBoundingClientRect();
+  return rect.bottom > viewport.offsetTop && rect.top < viewport.offsetTop + viewport.height;
+}
+
+function arenaFitsViewport() {
+  const viewport = viewportBox();
+  const rect = playColumn.getBoundingClientRect();
+  const gutter = VIEWPORT_BLOCK_GUTTER / 2;
+  return rect.top >= viewport.offsetTop + gutter - 1 &&
+    rect.bottom <= viewport.offsetTop + viewport.height - gutter + 1;
+}
+
+function focusArena() {
+  refitArenaPresentation();
+  const viewport = viewportBox();
+  const rect = playColumn.getBoundingClientRect();
+  const desiredTop = viewport.offsetTop + Math.max(
+    VIEWPORT_BLOCK_GUTTER / 2,
+    (viewport.height - rect.height) / 2,
+  );
+  const delta = rect.top - desiredTop;
+  if (Math.abs(delta) > 1) {
+    window.scrollBy({ top: delta, left: 0, behavior: 'auto' });
+  }
+  playColumn.dataset.autoFocused = 'true';
+}
+
+let focusFrame = 0;
+function scheduleArenaFocus() {
+  if (focusFrame) return;
+  focusFrame = requestAnimationFrame(() => {
+    focusFrame = 0;
+    focusArena();
+  });
+}
+
+let refitFrame = 0;
+function scheduleArenaRefit() {
+  const wasVisible = arenaIntersectsViewport();
+  if (refitFrame) return;
+  refitFrame = requestAnimationFrame(() => {
+    refitFrame = 0;
+    refitArenaPresentation();
+    if (wasVisible && !arenaFitsViewport()) focusArena();
+  });
 }
 
 function applyBoardLayout(layout) {
@@ -124,8 +237,9 @@ function applyBoardLayout(layout) {
   canvas.dataset.cols = String(cols);
   canvas.dataset.rows = String(rows);
   canvas.dataset.cell = String(CELL);
-  document.getElementById('screen').style.aspectRatio = `${cols} / ${rows}`;
+  screen.style.aspectRatio = `${cols} / ${rows}`;
   bombMaxFuse.clear();
+  refitArenaPresentation();
 }
 
 async function boot() {
@@ -143,6 +257,7 @@ async function boot() {
   }
   roundHistory = await roundsRead();
   renderHistory();
+  scheduleArenaFocus();
 
   sfx.insertCoin(); // no-op pre-gesture; tryCoin() replays it after unlock
   roundStartAudio();
@@ -206,6 +321,7 @@ document.getElementById('new-match-btn').addEventListener('click', () => {
   overHandled = false;
   roundMemoryStart = null;
   roundStartAudio();
+  scheduleArenaFocus();
 });
 
 function championVisible() {
@@ -220,6 +336,7 @@ function nextRound() {
   roundMemoryStart = null;
   document.getElementById('over-overlay').classList.add('hidden');
   roundStartAudio();
+  scheduleArenaFocus();
 }
 
 /* ---------------- game loop ---------------- */
@@ -616,6 +733,19 @@ setInterval(() => {
   }
 }, 10000);
 window.addEventListener('pagehide', () => { if (game) brainWrite(game.brain_save()); });
+
+// Safari changes visualViewport dimensions as browser chrome expands/collapses.
+// Keep presentation fitted without reconstructing the active WasmGame.
+if (window.history && 'scrollRestoration' in window.history) {
+  window.history.scrollRestoration = 'manual';
+}
+window.addEventListener('resize', scheduleArenaRefit);
+window.addEventListener('orientationchange', scheduleArenaFocus);
+window.addEventListener('load', scheduleArenaFocus, { once: true });
+if (window.visualViewport) {
+  window.visualViewport.addEventListener('resize', scheduleArenaRefit);
+  window.visualViewport.addEventListener('scroll', scheduleArenaRefit);
+}
 
 /* ---------------- render ---------------- */
 
