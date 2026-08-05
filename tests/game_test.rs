@@ -1089,3 +1089,21 @@ fn test_bolt_hits_head_on_swap_crossing() {
     assert_eq!(game.winner, Some(1));
     assert!(!game.cycles[0].alive);
 }
+
+#[test]
+fn test_no_180_via_two_quick_turns_in_one_tick() {
+    // Moving Right; Up then Left arrive within the same tick. The latch
+    // compares against the direction actually moved (prev_direction), so
+    // Left — a net 180 into the neck cell — must be rejected while Up stands.
+    let mut game = WormGame::with_size(120, 38);
+    game.change_direction(worm::Direction::Up);
+    game.change_direction(worm::Direction::Left);
+    assert_eq!(game.cycles[0].direction, worm::Direction::Up);
+    // After a tick actually moving Up, Left becomes legal again...
+    game.update();
+    game.change_direction(worm::Direction::Left);
+    assert_eq!(game.cycles[0].direction, worm::Direction::Left);
+    // ...but Down (the 180 of the tick just moved) is not.
+    game.change_direction(worm::Direction::Down);
+    assert_eq!(game.cycles[0].direction, worm::Direction::Left);
+}

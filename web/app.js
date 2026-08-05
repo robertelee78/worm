@@ -131,6 +131,11 @@ document.getElementById('fire-btn').addEventListener('pointerdown', (e) => {
   e.preventDefault();
   game.fire();
 });
+// Touch players have no keyboard: without this button a phone/tablet player
+// was permanently stuck on the first round-over screen (R/Enter only).
+document.getElementById('next-round-btn').addEventListener('click', () => {
+  if (game && game.is_over() && !championVisible()) nextRound();
+});
 document.getElementById('new-match-btn').addEventListener('click', () => {
   game.reset_match();
   document.getElementById('champion-overlay').classList.add('hidden');

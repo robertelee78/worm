@@ -966,8 +966,13 @@ impl WormGame {
     }
 
     pub fn change_direction(&mut self, new_dir: Direction) {
-        let current_dir = self.cycles[self.player].direction;
-        match (current_dir, new_dir) {
+        // Latch against the direction actually MOVED last tick
+        // (prev_direction, snapshotted at the end of every update), not the
+        // pending one: two quick inputs between ticks (Up then Left while
+        // moving Right) used to net a 180 into the neck cell — an instant
+        // self-kill in both the terminal and browser builds.
+        let moved_dir = self.cycles[self.player].prev_direction;
+        match (moved_dir, new_dir) {
             (Direction::Up, Direction::Down) | (Direction::Down, Direction::Up) => {}
             (Direction::Left, Direction::Right) | (Direction::Right, Direction::Left) => {}
             _ => self.cycles[self.player].direction = new_dir,

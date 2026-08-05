@@ -76,6 +76,57 @@ fn game_over_key(buf: &[u8]) -> GameOverKey {
     GameOverKey::None
 }
 
+/// One key parsed from the in-play input buffer.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum PlayKey {
+    Dir(Direction),
+    Fire,
+    Quit,
+    Ignore,
+}
+
+/// Parse the next key at the head of the buffer, returning what it asks for
+/// and how many bytes it consumed. `None` means an incomplete ESC sequence —
+/// wait for more bytes. Every COMPLETE ESC-prefixed sequence is consumed
+/// whole (CSI, SS3 arrows, Alt+key): the old parser only understood ESC '['
+/// and broke without consuming on anything else, so one Alt+key or
+/// application-cursor arrow wedged the buffer — and every later key,
+/// including 'q', queued behind it forever.
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_play_key(buf: &[u8]) -> Option<(PlayKey, usize)> {
+    match buf[0] {
+        0x1b => {
+            if buf.len() < 2 {
+                return None; // lone ESC — the standalone-ESC timer decides
+            }
+            if buf[1] == b'[' || buf[1] == b'O' {
+                if buf.len() < 3 {
+                    return None; // incomplete CSI/SS3 — wait for the final byte
+                }
+                let key = match buf[2] {
+                    b'A' => PlayKey::Dir(Direction::Up),
+                    b'B' => PlayKey::Dir(Direction::Down),
+                    b'C' => PlayKey::Dir(Direction::Right),
+                    b'D' => PlayKey::Dir(Direction::Left),
+                    _ => PlayKey::Ignore,
+                };
+                Some((key, 3))
+            } else {
+                // Alt+key or unknown ESC pair — discard both bytes.
+                Some((PlayKey::Ignore, 2))
+            }
+        }
+        b'q' | b'Q' => Some((PlayKey::Quit, 1)),
+        b'h' | b'a' => Some((PlayKey::Dir(Direction::Left), 1)),
+        b'j' | b's' => Some((PlayKey::Dir(Direction::Down), 1)),
+        b'k' | b'w' => Some((PlayKey::Dir(Direction::Up), 1)),
+        b'l' | b'd' => Some((PlayKey::Dir(Direction::Right), 1)),
+        b' ' => Some((PlayKey::Fire, 1)),
+        _ => Some((PlayKey::Ignore, 1)),
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> std::io::Result<()> {
     let fd = io::stdin().as_raw_fd();
@@ -163,45 +214,24 @@ fn main() -> std::io::Result<()> {
             }
         }
 
-        // Process complete input sequences
-        // Parse 3-byte ESC sequences, keep incomplete ones in buffer
+        // Process complete input sequences; parse_play_key consumes every
+        // complete ESC sequence whole, so unrecognized ones (Alt+key, SS3)
+        // can never wedge the buffer.
         let mut processed = 0;
         while processed < input_buf.len() {
-            // Look for ESC [ X pattern
-            if input_buf[processed] == 0x1b {
-                if processed + 2 < input_buf.len() && input_buf[processed + 1] == b'[' {
-                    // Have complete ESC [ X sequence
-                    let cmd = input_buf[processed + 2];
-                    match cmd {
-                        b'A' => game.change_direction(Direction::Up),
-                        b'B' => game.change_direction(Direction::Down),
-                        b'C' => game.change_direction(Direction::Right),
-                        b'D' => game.change_direction(Direction::Left),
-                        _ => {}
+            match parse_play_key(&input_buf[processed..]) {
+                None => break, // incomplete ESC sequence — wait for more bytes
+                Some((key, n)) => {
+                    match key {
+                        PlayKey::Dir(d) => game.change_direction(d),
+                        PlayKey::Fire => {
+                            let _ = game.fire_powerup(0);
+                        }
+                        PlayKey::Quit => quit = true,
+                        PlayKey::Ignore => {}
                     }
-                    processed += 3;
-                } else {
-                    // Incomplete ESC sequence - stop processing, wait for more
-                    break;
+                    processed += n;
                 }
-            } else {
-                // Regular character
-                match input_buf[processed] as char {
-                    'q' | 'Q' => quit = true,
-                    'h' => game.change_direction(Direction::Left),
-                    'j' => game.change_direction(Direction::Down),
-                    'k' => game.change_direction(Direction::Up),
-                    'l' => game.change_direction(Direction::Right),
-                    'w' => game.change_direction(Direction::Up),
-                    'a' => game.change_direction(Direction::Left),
-                    's' => game.change_direction(Direction::Down),
-                    'd' => game.change_direction(Direction::Right),
-                    ' ' => {
-                        let _ = game.fire_powerup(0);
-                    }
-                    _ => {}
-                }
-                processed += 1;
             }
         }
 
@@ -334,7 +364,30 @@ fn main() {}
 
 #[cfg(all(test, not(target_arch = "wasm32")))]
 mod tests {
-    use super::{game_over_key, GameOverKey};
+    use super::{game_over_key, parse_play_key, GameOverKey, PlayKey};
+    use worm::Direction;
+
+    #[test]
+    fn alt_key_noise_cannot_wedge_the_input_buffer() {
+        // ESC + non-'[' (Alt+x) is consumed whole; the quit key behind it
+        // is reachable on the next parse step instead of queueing forever.
+        assert_eq!(parse_play_key(b"\x1bxq"), Some((PlayKey::Ignore, 2)));
+        assert_eq!(parse_play_key(b"q"), Some((PlayKey::Quit, 1)));
+    }
+
+    #[test]
+    fn ss3_application_cursor_arrows_steer() {
+        assert_eq!(
+            parse_play_key(b"\x1bOA"),
+            Some((PlayKey::Dir(Direction::Up), 3))
+        );
+    }
+
+    #[test]
+    fn incomplete_esc_sequences_wait_for_more_bytes() {
+        assert_eq!(parse_play_key(b"\x1b"), None);
+        assert_eq!(parse_play_key(b"\x1b["), None);
+    }
 
     #[test]
     fn arrow_keys_do_not_quit_the_game_over_screen() {
