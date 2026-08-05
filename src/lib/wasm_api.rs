@@ -21,6 +21,8 @@ fn dir_from_u8(v: u8) -> Option<Direction> {
 #[wasm_bindgen]
 pub struct WasmGame {
     game: WormGame,
+    /// Outcome of the last `brain_load` — what the migration kept vs reset.
+    brain_restore: Option<crate::BrainRestore>,
 }
 
 #[wasm_bindgen]
@@ -29,6 +31,7 @@ impl WasmGame {
     pub fn new(width: u16, height: u16, seed: u64) -> Self {
         Self {
             game: WormGame::with_size_seed(width, height, seed),
+            brain_restore: None,
         }
     }
 
@@ -110,9 +113,16 @@ impl WasmGame {
     }
 
     /// Restore a previously exported brain (deviceId-keyed corpus).
+    ///
+    /// A brain written by an older build is MIGRATED, not rejected: sections
+    /// whose schema this build no longer understands are dropped individually
+    /// while the player's habit priors and head-to-head record carry forward.
+    /// Call [`brain_restore_summary`](Self::brain_restore_summary) afterwards
+    /// for a line to show the player.
     pub fn brain_load(&mut self, bytes: &[u8]) -> bool {
-        match CpuBrain::from_bytes(bytes) {
-            Some(mut b) => {
+        match CpuBrain::from_bytes_report(bytes) {
+            Some((mut b, report)) => {
+                self.brain_restore = Some(report);
                 // A persisted corpus is longitudinal memory, not an unfinished
                 // round. Never score its pending forecast against a new board.
                 b.ensemble.reset_scores();
@@ -124,5 +134,20 @@ impl WasmGame {
             }
             None => false,
         }
+    }
+
+    /// Human-readable outcome of the last `brain_load` (empty before one).
+    /// Shown in the brain panel so a returning player can see the opponent
+    /// still remembers them — and, after a schema change, exactly what was
+    /// carried forward versus reset.
+    pub fn brain_restore_summary(&self) -> String {
+        self.brain_restore
+            .map(|r| r.summary())
+            .unwrap_or_else(String::new)
+    }
+
+    /// True when the last `brain_load` had to discard some learned state.
+    pub fn brain_restore_was_partial(&self) -> bool {
+        self.brain_restore.map(|r| r.is_partial()).unwrap_or(false)
     }
 }

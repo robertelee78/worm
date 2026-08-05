@@ -251,7 +251,10 @@ async function boot() {
 
   const saved = await brainRead();
   if (saved && game.brain_load(saved)) {
-    setBrainStatus('brain restored from this device');
+    // A brain saved by an older build is migrated, not discarded — the
+    // summary says what carried forward so a returning player is never
+    // silently handed a blank opponent.
+    setBrainStatus(game.brain_restore_summary() || 'brain restored from this device');
   } else {
     setBrainStatus('fresh brain — teach it by playing');
   }

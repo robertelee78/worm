@@ -1337,3 +1337,114 @@ fn test_cpu_laser_charges_before_firing() {
     );
     assert_eq!(game.winner, Some(1));
 }
+
+/* ------------------- brain persistence + schema migration ------------------- */
+//
+// The game's premise is that the CPU learns YOU across many matches, so a
+// schema change must never silently reset that. These pin the guarantee.
+
+/// Build a brain with content in every section.
+fn seeded_brain() -> worm::CpuBrain {
+    let mut b = worm::CpuBrain::new();
+    for i in 0..12 {
+        let mut v = [0.0f32; worm::cpu_ai::CPU_FEATURE_DIM];
+        v[0] = i as f32;
+        b.remember(v, worm::Direction::Up, 1.0);
+    }
+    for i in 0..7 {
+        let mut v = [0.0f32; worm::cpu_ai::PLAYER_FEATURE_DIM];
+        v[0] = i as f32;
+        b.opp_brain.remember(v, worm::Direction::Left);
+        b.opp_brain.observe(worm::Direction::Left);
+    }
+    b.opp_pred_hits = 41;
+    b.opp_pred_total = 100;
+    b
+}
+
+#[test]
+fn test_brain_roundtrip_preserves_every_section() {
+    let original = seeded_brain();
+
+    let (restored, report) =
+        worm::CpuBrain::from_bytes_report(&original.to_bytes()).expect("brain must decode");
+
+    assert_eq!(report.format, 2, "saves use the current sectioned format");
+    assert!(!report.is_partial(), "a same-version load loses nothing");
+    assert_eq!(restored.episodes.len(), original.episodes.len());
+    assert_eq!(
+        restored.opp_brain.episodes.len(),
+        original.opp_brain.episodes.len()
+    );
+    assert_eq!(restored.opp_pred_hits, 41);
+    assert_eq!(restored.opp_pred_total, 100);
+    assert_eq!(restored.cpu_seq, original.cpu_seq);
+    assert_eq!(restored.tally, original.tally);
+}
+
+#[test]
+fn test_brain_survives_survival_feature_space_change() {
+    // THE case this format exists for: the survival encoding gains new
+    // features (power-up awareness), so those vectors become meaningless —
+    // but what the CPU learned about the HUMAN must carry forward.
+    let bytes = seeded_brain().to_bytes();
+    let corrupted = rewrite_cpu_episode_dim(&bytes, (worm::cpu_ai::CPU_FEATURE_DIM + 4) as u16);
+
+    let (restored, report) =
+        worm::CpuBrain::from_bytes_report(&corrupted).expect("a stale brain migrates, never fails");
+
+    assert!(report.is_partial());
+    assert_eq!(
+        restored.episodes.len(),
+        0,
+        "survival episodes are bound to the encoding and must be dropped"
+    );
+    assert_eq!(
+        restored.opp_brain.episodes.len(),
+        7,
+        "opponent episodes are independent and must survive"
+    );
+    assert_eq!(
+        (restored.opp_pred_hits, restored.opp_pred_total),
+        (41, 100),
+        "the head-to-head record is knowledge about the human — never reset it"
+    );
+}
+
+#[test]
+fn test_brain_rejects_non_brain_bytes() {
+    assert!(worm::CpuBrain::from_bytes(b"not a brain at all").is_none());
+    assert!(worm::CpuBrain::from_bytes(&[]).is_none());
+    assert!(worm::CpuBrain::from_bytes(&[1, 2, 3]).is_none());
+}
+
+#[test]
+fn test_brain_tolerates_truncation_without_losing_earlier_sections() {
+    // A half-written IndexedDB record must not cost the whole corpus.
+    let bytes = seeded_brain().to_bytes();
+    let truncated = &bytes[..bytes.len() * 2 / 3];
+
+    let (restored, _) =
+        worm::CpuBrain::from_bytes_report(truncated).expect("a truncated brain still decodes");
+    // Sections are written CPU-core first, so the earliest survive.
+    assert!(restored.cpu_seq > 0, "leading sections decode despite truncation");
+}
+
+/// Rewrite the `dim` field inside the CPU-episodes section, simulating a brain
+/// saved by a build whose survival feature space differed from this one.
+fn rewrite_cpu_episode_dim(bytes: &[u8], new_dim: u16) -> Vec<u8> {
+    let mut out = bytes.to_vec();
+    let mut off = 8; // magic(4) + format(2) + section_count(2)
+    while off + 6 <= out.len() {
+        let tag = u16::from_le_bytes(out[off..off + 2].try_into().unwrap());
+        let len = u32::from_le_bytes(out[off + 2..off + 6].try_into().unwrap()) as usize;
+        let body = off + 6;
+        if tag == 2 {
+            // EpisodesWire serializes `dim: u16` first.
+            out[body..body + 2].copy_from_slice(&new_dim.to_le_bytes());
+            return out;
+        }
+        off = body + len;
+    }
+    panic!("CPU-episode section not found");
+}

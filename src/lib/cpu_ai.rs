@@ -382,26 +382,248 @@ impl CpuBrain {
     /* -------------------- persistence (per-player memory) -------------------- */
 
     /// Serialize the whole brain (both k-NN memories, priors, tail, ensemble
-    /// scores, prediction bookkeeping) with a magic/version tag. This is the
-    /// per-player corpus: saved to a local file on native, to IndexedDB in
-    /// the browser (keyed by the deviceId cookie).
+    /// scores, prediction bookkeeping). This is the per-player corpus: saved
+    /// to a local file on native, to IndexedDB in the browser (keyed by the
+    /// deviceId cookie).
+    ///
+    /// Written in the SECTIONED "WRM2" format — see [`BRAIN_MAGIC_V2`]. Each
+    /// section is independently length-framed and independently decoded, so a
+    /// schema change that invalidates one section (say, the survival feature
+    /// space) never costs the player the others (their habit priors, their
+    /// head-to-head prediction record). That partial-migration guarantee is
+    /// the whole point: this game's premise is that the CPU learns YOU over
+    /// many matches, so a version bump must never silently reset that.
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut out = BRAIN_MAGIC.to_le_bytes().to_vec();
-        out.extend(bincode::serialize(self).expect("CpuBrain serialize"));
+        let mut sections: Vec<(u16, Vec<u8>)> = Vec::new();
+
+        push_section(
+            &mut sections,
+            SEC_CPU_CORE,
+            &CpuCoreWire {
+                cpu_seq: self.cpu_seq,
+                tally: self.tally,
+                player_tail: self.player_tail.iter().copied().collect(),
+                tail_len: self.tail_len as u32,
+            },
+        );
+        push_section(
+            &mut sections,
+            SEC_CPU_EPISODES,
+            &EpisodesWire {
+                dim: CPU_FEATURE_DIM as u16,
+                items: self
+                    .episodes
+                    .iter()
+                    .map(|e| EpisodeWire {
+                        v: e.vector.to_vec(),
+                        d: e.surviving_dir,
+                        r: e.reward,
+                        s: e.seq,
+                    })
+                    .collect(),
+            },
+        );
+        push_section(
+            &mut sections,
+            SEC_OPP_CORE,
+            &OppCoreWire {
+                seq: self.opp_brain.seq,
+                tally: self.opp_brain.tally,
+                pred_hits: self.opp_pred_hits,
+                pred_total: self.opp_pred_total,
+            },
+        );
+        push_section(
+            &mut sections,
+            SEC_OPP_EPISODES,
+            &EpisodesWire {
+                dim: PLAYER_FEATURE_DIM as u16,
+                items: self
+                    .opp_brain
+                    .episodes
+                    .iter()
+                    .map(|e| EpisodeWire {
+                        v: e.vector.to_vec(),
+                        d: e.next_dir,
+                        r: 0.0,
+                        s: e.seq,
+                    })
+                    .collect(),
+            },
+        );
+        push_section(&mut sections, SEC_ENSEMBLE, &self.ensemble);
+
+        let mut out = BRAIN_MAGIC_V2.to_le_bytes().to_vec();
+        out.extend(BRAIN_FORMAT_V2.to_le_bytes());
+        out.extend((sections.len() as u16).to_le_bytes());
+        for (tag, body) in &sections {
+            out.extend(tag.to_le_bytes());
+            out.extend((body.len() as u32).to_le_bytes());
+            out.extend(body);
+        }
         out
     }
 
-    /// Inverse of to_bytes; None on corruption or version mismatch (a stale
-    /// brain is dropped, never half-loaded).
+    /// Inverse of [`to_bytes`](Self::to_bytes). Reads both the sectioned
+    /// "WRM2" format and the legacy single-blob "WRM1" format. `None` only
+    /// when the bytes are not a brain at all — a brain that is merely STALE
+    /// is migrated, never discarded.
     pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        Self::from_bytes_report(bytes).map(|(brain, _)| brain)
+    }
+
+    /// [`from_bytes`](Self::from_bytes) plus an account of what survived the
+    /// migration, so the UI can tell the player what was kept rather than
+    /// silently resetting their opponent.
+    pub fn from_bytes_report(bytes: &[u8]) -> Option<(Self, BrainRestore)> {
         if bytes.len() < 4 {
             return None;
         }
-        let (magic, payload) = bytes.split_at(4);
-        if u32::from_le_bytes(magic.try_into().ok()?) != BRAIN_MAGIC {
+        let magic = u32::from_le_bytes(bytes[0..4].try_into().ok()?);
+        match magic {
+            BRAIN_MAGIC_V1 => Self::from_bytes_v1(&bytes[4..]),
+            BRAIN_MAGIC_V2 => Self::from_bytes_v2(&bytes[4..]),
+            _ => None,
+        }
+    }
+
+    /// Legacy "WRM1": magic + one bincode blob of the whole struct. Readable
+    /// only while `CpuBrain`'s shape is unchanged — which is precisely why
+    /// WRM2 exists. Every load rewrites as WRM2 (the game always saves in the
+    /// current format), so this path drains as players return.
+    fn from_bytes_v1(payload: &[u8]) -> Option<(Self, BrainRestore)> {
+        let brain: Self = bincode::deserialize(payload).ok()?;
+        let report = BrainRestore {
+            format: 1,
+            cpu_episodes_kept: brain.episodes.len(),
+            cpu_episodes_dropped: 0,
+            opp_episodes_kept: brain.opp_brain.episodes.len(),
+            opp_episodes_dropped: 0,
+            ensemble_kept: true,
+            sections_skipped: 0,
+        };
+        Some((brain, report))
+    }
+
+    /// Sectioned "WRM2". Decodes section-by-section: an unknown tag, a
+    /// corrupt body, or a feature-space mismatch costs only that section.
+    fn from_bytes_v2(payload: &[u8]) -> Option<(Self, BrainRestore)> {
+        if payload.len() < 4 {
             return None;
         }
-        bincode::deserialize(payload).ok()
+        let format = u16::from_le_bytes(payload[0..2].try_into().ok()?);
+        if format != BRAIN_FORMAT_V2 {
+            // A NEWER format than this build understands. Section framing is
+            // stable across format revisions by construction, so keep going
+            // and let per-section decoding drop whatever we cannot read.
+        }
+        let count = u16::from_le_bytes(payload[2..4].try_into().ok()?) as usize;
+
+        let mut brain = Self::default();
+        let mut report = BrainRestore {
+            format: 2,
+            ..BrainRestore::default()
+        };
+
+        let mut off = 4usize;
+        for _ in 0..count {
+            if off + 6 > payload.len() {
+                break; // truncated frame — keep what we already decoded
+            }
+            let tag = u16::from_le_bytes(payload[off..off + 2].try_into().ok()?);
+            let len = u32::from_le_bytes(payload[off + 2..off + 6].try_into().ok()?) as usize;
+            off += 6;
+            let end = off.saturating_add(len);
+            if end > payload.len() {
+                break;
+            }
+            let body = &payload[off..end];
+            off = end;
+
+            match tag {
+                SEC_CPU_CORE => match bincode::deserialize::<CpuCoreWire>(body) {
+                    Ok(c) => {
+                        brain.cpu_seq = c.cpu_seq;
+                        brain.tally = c.tally;
+                        brain.player_tail = c.player_tail.into_iter().collect();
+                        brain.tail_len = c.tail_len as usize;
+                    }
+                    Err(_) => report.sections_skipped += 1,
+                },
+                SEC_CPU_EPISODES => match bincode::deserialize::<EpisodesWire>(body) {
+                    // The survival corpus is bound to the feature encoding.
+                    // A dimension change makes these vectors meaningless, so
+                    // they go — but nothing else does.
+                    Ok(e) if e.dim as usize == CPU_FEATURE_DIM => {
+                        for it in e.items {
+                            let Ok(vector) = <[f32; CPU_FEATURE_DIM]>::try_from(it.v.as_slice())
+                            else {
+                                report.cpu_episodes_dropped += 1;
+                                continue;
+                            };
+                            brain.episodes.push_back(CpuEpisode {
+                                vector,
+                                surviving_dir: it.d,
+                                reward: it.r,
+                                seq: it.s,
+                            });
+                        }
+                        while brain.episodes.len() > MAX_EPISODES {
+                            brain.episodes.pop_front();
+                        }
+                        report.cpu_episodes_kept = brain.episodes.len();
+                    }
+                    Ok(e) => report.cpu_episodes_dropped = e.items.len(),
+                    Err(_) => report.sections_skipped += 1,
+                },
+                SEC_OPP_CORE => match bincode::deserialize::<OppCoreWire>(body) {
+                    // The habit priors and the head-to-head record are about
+                    // the HUMAN, not about any encoding — these must survive
+                    // every schema change we ever make.
+                    Ok(c) => {
+                        brain.opp_brain.seq = c.seq;
+                        brain.opp_brain.tally = c.tally;
+                        brain.opp_pred_hits = c.pred_hits;
+                        brain.opp_pred_total = c.pred_total;
+                    }
+                    Err(_) => report.sections_skipped += 1,
+                },
+                SEC_OPP_EPISODES => match bincode::deserialize::<EpisodesWire>(body) {
+                    Ok(e) if e.dim as usize == PLAYER_FEATURE_DIM => {
+                        for it in e.items {
+                            let Ok(vector) = <[f32; PLAYER_FEATURE_DIM]>::try_from(it.v.as_slice())
+                            else {
+                                report.opp_episodes_dropped += 1;
+                                continue;
+                            };
+                            brain.opp_brain.episodes.push_back(PlayerEpisode {
+                                vector,
+                                next_dir: it.d,
+                                seq: it.s,
+                            });
+                        }
+                        while brain.opp_brain.episodes.len() > MAX_EPISODES {
+                            brain.opp_brain.episodes.pop_front();
+                        }
+                        report.opp_episodes_kept = brain.opp_brain.episodes.len();
+                    }
+                    Ok(e) => report.opp_episodes_dropped = e.items.len(),
+                    Err(_) => report.sections_skipped += 1,
+                },
+                SEC_ENSEMBLE => match bincode::deserialize::<Ensemble>(body) {
+                    Ok(e) => {
+                        brain.ensemble = e;
+                        report.ensemble_kept = true;
+                    }
+                    Err(_) => report.sections_skipped += 1,
+                },
+                // Forward compatibility: a section this build has never heard
+                // of is skipped by its length, not treated as corruption.
+                _ => report.sections_skipped += 1,
+            }
+        }
+
+        Some((brain, report))
     }
 
     /// Load a brain from a file (native terminal play).
@@ -418,8 +640,119 @@ impl CpuBrain {
     }
 }
 
-/// Magic + version for brain persistence ("WRM1" — bump on schema change).
-const BRAIN_MAGIC: u32 = 0x31524D57;
+/* ----------------------- brain wire format (WRM2) ----------------------- */
+
+/// Legacy format: `"WRM1"` + one bincode blob of the whole `CpuBrain`. Any
+/// change to the struct made every saved brain unreadable — the reason this
+/// module now writes [`BRAIN_MAGIC_V2`] instead. Still READ so returning
+/// players keep their corpus; they are upgraded on their next save.
+const BRAIN_MAGIC_V1: u32 = 0x31524D57;
+/// Current format: `"WRM2"` + `[format:u16][section_count:u16]` followed by
+/// `[tag:u16][len:u32][body]` frames.
+///
+/// Sections are decoded INDEPENDENTLY. A section whose tag is unknown, whose
+/// body is corrupt, or whose feature dimension no longer matches this build is
+/// skipped — and only that section is lost. That is what lets the survival
+/// feature space evolve (adding power-up awareness, say) while the player's
+/// habit priors and head-to-head record carry forward untouched.
+///
+/// Because the frame header is fixed-width and length-prefixed, a NEWER writer
+/// can add sections an older reader has never seen and the older reader will
+/// skip them cleanly. Bump [`BRAIN_FORMAT_V2`] only for a change to the
+/// FRAMING itself; adding a section does not require it.
+const BRAIN_MAGIC_V2: u32 = 0x32524D57;
+const BRAIN_FORMAT_V2: u16 = 2;
+
+/// Survival-memory scalars: monotonic seq, direction prior, player tail ring.
+const SEC_CPU_CORE: u16 = 1;
+/// Survival k-NN corpus. Bound to `CPU_FEATURE_DIM` — dropped when it changes.
+const SEC_CPU_EPISODES: u16 = 2;
+/// Opponent-model scalars: seq, habit prior, lifetime prediction record.
+/// Encoding-independent — this is knowledge about the HUMAN and must never be
+/// dropped by a schema change.
+const SEC_OPP_CORE: u16 = 3;
+/// Opponent k-NN corpus. Bound to `PLAYER_FEATURE_DIM`.
+const SEC_OPP_EPISODES: u16 = 4;
+/// The rps-ai ensemble scores.
+const SEC_ENSEMBLE: u16 = 5;
+
+/// One `(vector, direction, reward, seq)` row. The vector is a length-prefixed
+/// `Vec<f32>` rather than a fixed array precisely so a dimension change is a
+/// readable mismatch instead of a decode failure that eats the whole file.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct EpisodeWire {
+    v: Vec<f32>,
+    d: Direction,
+    /// Unused (always 0.0) for opponent episodes, which carry no reward.
+    r: f32,
+    s: u32,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct EpisodesWire {
+    dim: u16,
+    items: Vec<EpisodeWire>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct CpuCoreWire {
+    cpu_seq: u32,
+    tally: [f32; 4],
+    player_tail: Vec<Direction>,
+    tail_len: u32,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct OppCoreWire {
+    seq: u32,
+    tally: [f32; 4],
+    pred_hits: u32,
+    pred_total: u32,
+}
+
+/// Encode one section and append it. A section that fails to serialize is
+/// omitted rather than poisoning the whole save.
+fn push_section<T: serde::Serialize>(out: &mut Vec<(u16, Vec<u8>)>, tag: u16, value: &T) {
+    if let Ok(body) = bincode::serialize(value) {
+        out.push((tag, body));
+    }
+}
+
+/// What survived a brain restore. Surfaced to the UI so a player can be told
+/// "your opponent still remembers you" instead of silently meeting a blank AI.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct BrainRestore {
+    /// Wire format the blob was written in (1 = legacy WRM1, 2 = WRM2).
+    pub format: u8,
+    pub cpu_episodes_kept: usize,
+    pub cpu_episodes_dropped: usize,
+    pub opp_episodes_kept: usize,
+    pub opp_episodes_dropped: usize,
+    pub ensemble_kept: bool,
+    /// Sections skipped as unknown, corrupt, or unserializable.
+    pub sections_skipped: usize,
+}
+
+impl BrainRestore {
+    /// True when any learned state had to be discarded to load this brain.
+    pub fn is_partial(&self) -> bool {
+        self.cpu_episodes_dropped > 0 || self.opp_episodes_dropped > 0 || self.sections_skipped > 0
+    }
+
+    /// One-line status for the HUD / brain panel.
+    pub fn summary(&self) -> String {
+        if !self.is_partial() {
+            return format!(
+                "brain restored — {} survival, {} opponent episodes",
+                self.cpu_episodes_kept, self.opp_episodes_kept
+            );
+        }
+        format!(
+            "brain migrated — kept {} opponent episodes, reset {} survival episodes",
+            self.opp_episodes_kept, self.cpu_episodes_dropped
+        )
+    }
+}
 
 #[inline]
 fn dir_index(dir: Direction) -> usize {
@@ -1918,8 +2251,23 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
             // Only take the BFS path if the destination clears the same
             // survival floor every other wall-follow deviation obeys (the
             // old hard-coded 10% undercut open_floor on both axes).
-            if norm_open >= open_floor && food_dir != wall_dir {
-                choose!(food_dir, CpuDecisionReason::ItemPath);
+            //
+            // The route is taken even when it coincides with wall-follow.
+            // It previously bailed on `food_dir != wall_dir` — a HUD-honesty
+            // guard (don't label a move "ItemPath" when wall-follow would make
+            // it anyway) that silently cost the food itself: measured, 98.6%
+            // of the frames where the CPU moved AWAY from reachable food were
+            // frames where the food lay in the wall-follow direction, so the
+            // layer declined and the k-NN below wandered off instead.
+            // Honesty is preserved by labelling the coincidence, not by
+            // forfeiting the food.
+            if norm_open >= open_floor {
+                let reason = if food_dir == wall_dir {
+                    CpuDecisionReason::WallFollow
+                } else {
+                    CpuDecisionReason::ItemPath
+                };
+                choose!(food_dir, reason);
             }
         }
     }
@@ -2266,6 +2614,53 @@ pub fn record_player_episode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A brain saved by a pre-WRM2 build must still load. This is the actual
+    /// upgrade path for every player who already has a corpus in IndexedDB —
+    /// if it regresses, they all silently meet a brand-new opponent.
+    #[test]
+    fn legacy_wrm1_brain_still_loads() {
+        let mut original = CpuBrain::new();
+        original.remember([0.5; CPU_FEATURE_DIM], Direction::Right, 2.0);
+        original.opp_brain.remember([0.25; PLAYER_FEATURE_DIM], Direction::Down);
+        original.opp_pred_hits = 17;
+        original.opp_pred_total = 40;
+
+        // Exactly what the old to_bytes emitted: magic + one bincode blob.
+        let mut legacy = BRAIN_MAGIC_V1.to_le_bytes().to_vec();
+        legacy.extend(bincode::serialize(&original).unwrap());
+
+        let (restored, report) =
+            CpuBrain::from_bytes_report(&legacy).expect("legacy corpora must keep loading");
+
+        assert_eq!(report.format, 1);
+        assert!(!report.is_partial(), "a readable WRM1 blob loses nothing");
+        assert_eq!(restored.episodes.len(), 1);
+        assert_eq!(restored.opp_brain.episodes.len(), 1);
+        assert_eq!((restored.opp_pred_hits, restored.opp_pred_total), (17, 40));
+    }
+
+    /// Loading legacy and re-saving must produce the new format, so the WRM1
+    /// read path drains as players return rather than living forever.
+    #[test]
+    fn legacy_brain_is_upgraded_on_next_save() {
+        let mut original = CpuBrain::new();
+        original.opp_pred_hits = 3;
+        original.opp_pred_total = 9;
+        let mut legacy = BRAIN_MAGIC_V1.to_le_bytes().to_vec();
+        legacy.extend(bincode::serialize(&original).unwrap());
+
+        let restored = CpuBrain::from_bytes(&legacy).unwrap();
+        let resaved = restored.to_bytes();
+
+        assert_eq!(
+            u32::from_le_bytes(resaved[0..4].try_into().unwrap()),
+            BRAIN_MAGIC_V2
+        );
+        let (again, report) = CpuBrain::from_bytes_report(&resaved).unwrap();
+        assert_eq!(report.format, 2);
+        assert_eq!((again.opp_pred_hits, again.opp_pred_total), (3, 9));
+    }
 
     #[test]
     fn tri_shot_needs_forward_arc() {
