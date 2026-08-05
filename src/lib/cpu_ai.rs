@@ -1909,9 +1909,15 @@ pub fn encode_player_context(
     }
 
     // 6..9 FOOD bearing per option — "breaks toward food unless threatened".
-    let food = nearest_food_distance(game, hx, hy, 6.0);
+    //
+    // The cap is 24, not 6. At a 6-cell cap on a 120x38 board with at most
+    // five morsels, the measured value was the cap on essentially every frame
+    // — three constant slots eating 17% of the vector's energy while carrying
+    // zero information. A feature that never varies is worse than no feature:
+    // it dilutes every real one.
+    let food = nearest_food_distance(game, hx, hy, 24.0);
     for (i, &d) in turn_dirs.iter().enumerate() {
-        vector[6 + i] = food[dir_index(d)] / 6.0;
+        vector[6 + i] = food[dir_index(d)] / 24.0;
     }
 
     // 9..13 WHERE IS THE CPU, in the player's own frame: ahead, behind, to
@@ -1934,11 +1940,18 @@ pub fn encode_player_context(
     let manhattan = ox.abs() + oy.abs();
     vector[13] = ((12.0 - manhattan).max(0.0)) / 12.0;
 
-    // 14 IS THE CPU CLOSING? Trajectory, not just position: a CPU driving at
-    // them reads differently from one drifting away at the same distance.
+    // 14 IS THE CPU CLOSING? Radial relative velocity — the rate the gap is
+    // actually shrinking, in cells/frame along the line between the heads.
+    // The first version projected only the CPU's velocity and divided by a
+    // constant, which made it distance-scaled alignment: approaching at one
+    // cell/frame read as strong from twelve cells and weak from one, and
+    // matched-velocity motion at constant separation read as "closing".
     let (cfx, cfy) = game.cycles[1].direction.as_delta();
-    let closing = -(ox * cfx as f32 + oy * cfy as f32);
-    vector[14] = (closing / 12.0).clamp(-1.0, 1.0) * 0.5 + 0.5;
+    let (pfx, pfy) = heading.as_delta();
+    let (rvx, rvy) = (cfx as f32 - pfx as f32, cfy as f32 - pfy as f32);
+    let dist = (ox * ox + oy * oy).sqrt().max(1.0);
+    let closing = -((ox * rvx + oy * rvy) / dist); // + = gap shrinking
+    vector[14] = (closing / 2.0).clamp(-1.0, 1.0) * 0.5 + 0.5;
 
     // 15..19 PLAYER HEADING one-hot. Keeps absolute compass habits learnable
     // ("this player likes going Up") now that everything else went relative —
@@ -1998,10 +2011,20 @@ pub fn encode_player_context(
     // at all.
     let tail_vec: Vec<Direction> = tail.iter().copied().collect();
     let mut last_turn = None;
+    let mut pairs = 0.0f32;
     for w in tail_vec.windows(2) {
         if let Some(t) = Turn::from_dirs(w[0], w[1]) {
             vector[25 + turn_index(t)] += 1.0;
+            pairs += 1.0;
             last_turn = Some(t);
+        }
+    }
+    // Normalise the mix by its own mass. Raw counts reached 3.0 while every
+    // other slot was <= 1.0, so after L2 this one block carried ~47% of the
+    // vector's energy and cosine retrieval was mostly comparing tail lengths.
+    if pairs > 0.0 {
+        for i in 25..28 {
+            vector[i] /= pairs;
         }
     }
     if let Some(t) = last_turn {
@@ -3319,7 +3342,8 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
                     // Wall-follow gets a bonus so we don't abandon the wall
                     // for a marginal intercept.
                     let wall_bonus = if d == wall_dir { 1.0 } else { 0.0 };
-                    let score = (20.0 - corner_dist) * 0.5 + norm_open * 3.0 + wall_bonus;
+                    let score =
+                        (20.0 - corner_dist) * (0.5 + 2.5 * game.read_rate) + norm_open * 3.0 + wall_bonus;
 
                     if score > best_score {
                         best_score = score;
@@ -3386,7 +3410,8 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
                     // Wall-follow gets a bonus so we don't abandon the wall
                     // for a marginal intercept.
                     let wall_bonus = if d == wall_dir { 1.0 } else { 0.0 };
-                    let score = (15.0 - intercept_dist) * 0.6 + norm_open * 3.0 + wall_bonus;
+                    let score =
+                        (15.0 - intercept_dist) * (0.6 + 3.0 * game.read_rate) + norm_open * 3.0 + wall_bonus;
 
                     if score > best_score {
                         best_score = score;
@@ -3623,7 +3648,7 @@ pub fn record_episode(
 /// corpus would teach the CPU that turning is far more common than it is, and
 /// the k-NN would over-predict turns everywhere. A thinned sample keeps the
 /// base rate honest while leaving room for the frames that matter.
-const STRAIGHT_KEEP_EVERY: u32 = 12;
+const STRAIGHT_KEEP_EVERY: u32 = 64;
 
 /// Record what the player did, preferring frames where they actually chose.
 ///
@@ -3643,6 +3668,19 @@ pub fn record_player_episode(
     // thinning it would bias it.
     brain.opp_brain.observe(player_next_dir);
 
+    // DECISION-FOCUSED RETENTION, deliberately paced by retained rows.
+    //
+    // `seq` advances only when a row is retained, so this keeps every decision
+    // frame and roughly one routine "anchor" row per twelve retained ones —
+    // the corpus ends up ~90% decision frames. That is intentional, and it
+    // was arrived at the hard way: an "honest" clock counting OBSERVED frames
+    // was tried at both 1-in-12 (routine-majority ~6:1) and 1-in-64 (class
+    // parity), and BOTH collapsed the measured read to zero lift while wins
+    // held. The k-NN needs a decision-dominated corpus to emit turn
+    // predictions confident enough to ever disagree with the trivial
+    // always-straight baseline — and those disagreements are where all the
+    // evidence of reading a player lives. The routine anchors stay as a
+    // small calibration trickle, not as ballast.
     if decision || brain.opp_brain.seq % STRAIGHT_KEEP_EVERY == 0 {
         brain.opp_brain.remember(context, player_next_dir);
     }

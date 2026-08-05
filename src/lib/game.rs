@@ -696,31 +696,24 @@ impl WormGame {
             // Recording only forced turns makes the decay rate match the event
             // rate, and it is also the honest definition of the habit: "which
             // way do you break when you cannot go straight".
-            // ...and only when they genuinely CHOSE between left and right.
+            // ...at every forced turn — single-option ones included.
             //
-            // Gating on "straight was blocked" alone also swept up frames
-            // where exactly one side was legal. Those reveal the geometry of
-            // the board, not the preference of the human, yet they updated
-            // their handedness — so a player boxed into a series of forced
-            // rights would teach the CPU they favour right. The prior now
-            // drives the forecast at every forced turn, so polluting it with
-            // geometry is directly harmful.
+            // A stricter "only when both sides were legal" gate was measured:
+            // it records ~1.2 events per game against ~4.4 for this rule, and
+            // the prior it produces is data-starved (2:1 on an 85:15 habit).
+            // It was also answering the wrong question. The prior's consumer
+            // is the forced-turn forecast, whose job is to predict WHICH WAY
+            // THE PLAYER ENDS UP GOING when blocked — and single-option
+            // outcomes are part of that target distribution. A player's
+            // environment is downstream of their own habit (a left-breaker
+            // spends their life on left-curving paths), so those frames carry
+            // real signal about the exact quantity being predicted. This
+            // models outcomes, not idealised choices, and outcomes are what
+            // the forecast is scored on.
             let legal_now = crate::cpu_ai::legal_options(self, self.player);
             if !legal_now.contains(&player_heading) {
-                let real_choice = legal_now
-                    .iter()
-                    .filter(|&&d| {
-                        matches!(
-                            crate::cpu_ai::Turn::from_dirs(player_heading, d),
-                            Some(crate::cpu_ai::Turn::Left) | Some(crate::cpu_ai::Turn::Right)
-                        )
-                    })
-                    .count()
-                    >= 2;
-                if real_choice {
-                    if let Some(turn) = player_turn {
-                        self.cpu_brain.opp_brain.observe_turn(turn);
-                    }
+                if let Some(turn) = player_turn {
+                    self.cpu_brain.opp_brain.observe_turn(turn);
                 }
             }
 
