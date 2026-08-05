@@ -677,9 +677,31 @@ impl WormGame {
             // Recording only forced turns makes the decay rate match the event
             // rate, and it is also the honest definition of the habit: "which
             // way do you break when you cannot go straight".
-            if !crate::cpu_ai::legal_options(self, self.player).contains(&player_heading) {
-                if let Some(turn) = player_turn {
-                    self.cpu_brain.opp_brain.observe_turn(turn);
+            // ...and only when they genuinely CHOSE between left and right.
+            //
+            // Gating on "straight was blocked" alone also swept up frames
+            // where exactly one side was legal. Those reveal the geometry of
+            // the board, not the preference of the human, yet they updated
+            // their handedness — so a player boxed into a series of forced
+            // rights would teach the CPU they favour right. The prior now
+            // drives the forecast at every forced turn, so polluting it with
+            // geometry is directly harmful.
+            let legal_now = crate::cpu_ai::legal_options(self, self.player);
+            if !legal_now.contains(&player_heading) {
+                let real_choice = legal_now
+                    .iter()
+                    .filter(|&&d| {
+                        matches!(
+                            crate::cpu_ai::Turn::from_dirs(player_heading, d),
+                            Some(crate::cpu_ai::Turn::Left) | Some(crate::cpu_ai::Turn::Right)
+                        )
+                    })
+                    .count()
+                    >= 2;
+                if real_choice {
+                    if let Some(turn) = player_turn {
+                        self.cpu_brain.opp_brain.observe_turn(turn);
+                    }
                 }
             }
 
@@ -977,15 +999,7 @@ impl WormGame {
         if self.cpu_autopilot {
             let (pending, active, confidence) =
                 crate::cpu_ai::compute_ensemble(self, &self.cpu_brain);
-            let e = &mut self.cpu_brain.ensemble;
-            e.pending = pending;
-            e.active = active;
-            e.confidence = confidence;
-            e.predicted_dir = pending[active];
-            // Constrain the forecast to what the player can actually do next.
-            // A prediction into a wall is an abstention dressed as an answer,
-            // and it abstains precisely on the forced-turn frames where a
-            // habit is the only thing left to read.
+
             // The heading the player will be travelling when they choose next.
             // `snapshot_direction` has not run yet, so this frame's move lives
             // in `direction` — and the next frame's reversal ban is relative to
@@ -993,9 +1007,28 @@ impl WormGame {
             let heading = self.cycles[self.player].direction;
             let legal_next = crate::cpu_ai::legal_options_from(self, self.player, heading);
             let turn_prior = self.cpu_brain.opp_brain.turn_prior();
+
+            // Mask EVERY model's prediction, not just the winner's.
+            //
+            // The ensemble used to store raw model output in `pending` and
+            // score that, while gameplay published the masked forecast — so
+            // model SELECTION was optimising a different prediction from the
+            // one actually acted on. A model could be crowned for predicting
+            // moves into walls, and one that lost on raw output could be the
+            // better predictor of what the game really published. Scoring what
+            // is published is the point of scoring at all.
+            let masked: Vec<Option<Direction>> = pending
+                .iter()
+                .map(|&p| crate::cpu_ai::mask_to_legal(p, &legal_next, heading, &turn_prior))
+                .collect();
+
             let e = &mut self.cpu_brain.ensemble;
-            e.predicted_dir =
-                crate::cpu_ai::mask_to_legal(e.predicted_dir, &legal_next, heading, &turn_prior);
+            for (slot, m) in e.pending.iter_mut().zip(masked.iter()) {
+                *slot = *m;
+            }
+            e.active = active;
+            e.confidence = confidence;
+            e.predicted_dir = e.pending[active];
             self.cpu_brain.last_opp_prediction = e.predicted_dir;
             // Commit the prediction BEFORE the player's input for that frame
             // exists. The salt is a pure function of (seal_seed, frame) — it
