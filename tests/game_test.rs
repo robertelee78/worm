@@ -634,8 +634,18 @@ fn test_opp_prediction_accuracy_tracking() {
     assert_eq!(scored.actual, worm::Direction::Right);
     assert!(scored.hit);
     let decision = game.cpu_telemetry.decision.as_ref().unwrap();
-    assert_eq!(decision.forecast, Some(scored.forecast));
     assert_eq!(decision.frame, game.frame_count);
+    // The decision must be driven by the forecast for the frame the player has
+    // NOT yet chosen. This previously asserted `decision.forecast ==
+    // scored.forecast` — the forecast for the frame already in progress, whose
+    // answer is on the board by the time the CPU runs. That made the
+    // "prediction" a restatement of an observable and meant no improvement to
+    // the opponent model could change a decision. See ADR-007.
+    assert_eq!(
+        decision.forecast.unwrap().target_frame,
+        game.frame_count + 1,
+        "the CPU must steer on a forecast of the NEXT frame, not the current one"
+    );
     assert_eq!(
         game.cpu_telemetry.next_forecast.unwrap().target_frame,
         game.frame_count + 1

@@ -92,6 +92,28 @@ fn evacuate_ring(
         .unwrap_or(preferred)
 }
 
+/// How much of its escape margin a HUNT may spend at a perfect read. At
+/// `read_rate` 0 the floor is untouched (today's behaviour exactly); at 1.0 the
+/// CPU commits to an intercept on ~45% of the room it normally insists on.
+const HUNT_MARGIN_SPEND: f32 = 0.55;
+/// Superlinear, so a strong read bites noticeably harder than a middling one
+/// rather than the whole range feeling the same.
+const HUNT_MARGIN_CURVE: f32 = 0.7;
+
+/// The floor a HUNT deviation must clear, given how well the CPU reads this
+/// player.
+///
+/// Confidence buys COMMITMENT, never safety margin. `escape_floor_cells` — the
+/// survival floor — is untouched at every read rate, and the threat-dodge,
+/// ring-evacuation, forced-move and wall-follow layers do not consult this at
+/// all. A well-read player faces a CPU that takes intercepts it would
+/// otherwise decline; they never face one that suicides. Never drops below the
+/// flat manoeuvring allowance, so it cannot be tuned into recklessness.
+pub fn hunt_floor_cells(game: &WormGame, who: usize, read_rate: f32) -> f32 {
+    let spend = HUNT_MARGIN_SPEND * read_rate.clamp(0.0, 1.0).powf(HUNT_MARGIN_CURVE);
+    (escape_floor_cells(game, who) * (1.0 - spend)).max(ESCAPE_MARGIN_CELLS)
+}
+
 /// How many times its own length a cycle wants reachable before committing.
 const ESCAPE_LENGTH_MULTIPLE: f32 = 3.0;
 /// Flat manoeuvring allowance on top, so a very short cycle still needs room.
@@ -2875,7 +2897,12 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
     // The quantity that actually decides survival is not "how much of the
     // arena" but "can I still outrun my own body", so the floor scales with
     // length. `escape_floor_cells` is the single source of truth.
+    // Survival floor — never scaled by difficulty.
     let escape_cells = escape_floor_cells(game, 1);
+    // Hunt floor — what an OPTIONAL aggressive deviation must clear. Shrinks
+    // as the CPU's read of this player improves, so a well-read player faces a
+    // CPU that commits to intercepts it would otherwise decline.
+    let hunt_cells = hunt_floor_cells(game, 1, game.read_rate);
 
     // --- DEFENSIVE: avoid predicted player when very close ---
     // SURVIVAL BEFORE HUNTING: this used to run AFTER the intercept layers,
@@ -3030,8 +3057,9 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
                     let open = count_open_space(game, nx, ny);
                     let norm_open = open / (game.width as f32 * game.height as f32);
 
-                    // Survival floor: never dive into a pocket for a hunt.
-                    if open < escape_cells {
+                    // Hunt floor: never dive into a pocket for a hunt, but
+                    // spend margin in proportion to how well we read them.
+                    if open < hunt_cells {
                         continue;
                     }
 
@@ -3096,8 +3124,9 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
                     let open = count_open_space(game, nx, ny);
                     let norm_open = open / (game.width as f32 * game.height as f32);
 
-                    // Survival floor: never dive into a pocket for a hunt.
-                    if open < escape_cells {
+                    // Hunt floor: never dive into a pocket for a hunt, but
+                    // spend margin in proportion to how well we read them.
+                    if open < hunt_cells {
                         continue;
                     }
 

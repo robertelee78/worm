@@ -1,0 +1,6 @@
+{
+  "env": {
+    "ENABLE_CLAUDE_CODE": "true",
+    "ENABLE_CODEX": "true"
+  }
+}

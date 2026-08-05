@@ -29,35 +29,48 @@ nothing:
 |---|---|---|
 | **POSITIVE** | `compass` — prefers a fixed direction | An absolute habit the model provably *can* hold. If this stops being learned, the pipeline has regressed. |
 | **NULL** | `coinflip` — no habit at all | There is nothing to learn. If the CPU ever reads this above chance, the harness is leaking the answer and every other number here is void. |
-| **ACCEPTANCE** | `lefty` — "break left when cornered" | Heading-relative, and the actual product goal. **Currently fails**, `#[ignore]`d with its reason. |
+| **ACCEPTANCE** | `lefty` — "break left when cornered" | Heading-relative, and the actual product goal. |
 
 Latest measured:
 
 ```
-compass  (POSITIVE)   n=1697    read 99.2%  chance 34.0%  z= +56.8   PASS
-coinflip (NULL)       n=10532   read 35.0%  chance 34.5%  z=  +1.1   PASS
-lefty    (ACCEPTANCE) n=94      read 43.6%  chance 43.8%  z=  -0.0   FAILS
+compass  (POSITIVE)   n=5230    read 99.7%  chance 34.1%  z= +100.1
+coinflip (NULL)       n=9930    read 34.7%  chance 34.8%  z=   -0.3
+lefty    (ACCEPTANCE) n=127     read 81.1%  chance 50.0%  z=   +7.0
 ```
 
-Un-ignoring the acceptance test is the definition of the remaining work being
-done.
+The null control is what makes the other two rows evidence: the same CPU that
+reads `lefty` at 81% remains unable to read an opponent with no habit, so the
+suite is not leaking the answer into the forecast.
 
-## What works, and what doesn't
+## Learning, and then winning
 
-**Absolute habits are learned.** A player who favours a compass direction, or
-alternates between two, is read far above chance (z = +57, +85).
+A read is only worth something if it reaches the wheel. Against `lefty`, over
+40 games with one persistent brain:
 
-**Heading-relative habits are not — yet.** "Breaks left when cornered" is one
-habit, but left-of-Up and left-of-Right are different compass directions, so a
-direction-based prior smears it across all four and cancels it out. Measured
-against a persona breaking left 84:16, the model built a confident *absolute*
-Left prior: it observed the habit and encoded it in a space that cannot hold
-it.
+```
+read_rate:  0.569 → 0.676 → 0.760 → 0.779 → 0.788 → 0.804
+tier:            3      4      4      4      4      4
+record:     CPU 37 · player 3
+```
 
-A relative turn prior is now in place and demonstrably learns the habit
-(0.830 left / 0.157 right against a ground truth of 84:16), and the read rate
-has moved from *below* chance up to chance. It is not yet a read. See
-[ADR-006](docs/adrs/006-honest-read-rate.md).
+`read_rate` is **lift over the player's own base rate**, and it drives how much
+survival margin the CPU will spend on an intercept. Confidence buys
+*commitment*, never safety: the survival floor is untouched at every read rate,
+and the dodge, ring-evacuation and wall-follow layers never consult the hunt
+floor. A well-read player faces a CPU that takes intercepts it would otherwise
+decline. They never face one that suicides. See
+[ADR-007](docs/adrs/007-difficulty-earned-by-reading-you.md).
+
+### Where it plateaus, and why
+
+`read_rate` settles near 0.80 rather than climbing indefinitely. That is the
+model reaching the limit of what its features can express: it holds a single
+global turn prior, so it learns *"this player breaks left"* but not *"this
+player breaks left when the wall is three cells away and the CPU is behind
+them"*. The remaining headroom is richer features, not more data — the corpus
+is full by round three. Compensating with a difficulty multiplier would just
+restore the arbitrary clock ramp ADR-007 deleted.
 
 ## The metric, and why the obvious version is wrong
 
@@ -136,6 +149,7 @@ living documents — if one disagrees with the code, the ADR is the bug.
 - [ADR-004](docs/adrs/004-cpu-fundamentals.md) — fixing the CPU's fundamentals
 - [ADR-005](docs/adrs/005-durable-player-identity.md) — durable identity and brain integrity
 - [ADR-006](docs/adrs/006-honest-read-rate.md) — measuring against the player's own base rate
+- [ADR-007](docs/adrs/007-difficulty-earned-by-reading-you.md) — difficulty earned by reading you, not by the clock
 
 ### A note on the numbers in this repo
 

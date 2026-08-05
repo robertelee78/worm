@@ -1,0 +1,13 @@
+{
+  "embeddingModel": "transformer",
+  "hnswConfig": {
+    "M": 8,
+    "efConstruction": 100,
+    "efSearch": 50
+  },
+  "qualityThreshold": 0.5,
+  "promotionThreshold": 2,
+  "databasePath": "/opt/worm/.agentic-qe/data/memory.db",
+  "hnswIndexPath": "/opt/worm/.agentic-qe/data/hnsw/index.bin",
+  "initialized": "2026-08-05T16:07:40.066Z"
+}

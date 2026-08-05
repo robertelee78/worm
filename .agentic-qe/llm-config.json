@@ -1,0 +1,91 @@
+{
+  "_managedBy": "agentic-kit",
+  "defaultProvider": "claude-code",
+  "providers": {
+    "claude-code": {
+      "enabled": true
+    },
+    "openai": {
+      "enabled": true
+    }
+  },
+  "fallbackChain": {
+    "id": "agentic-kit",
+    "entries": [
+      {
+        "provider": "claude-code",
+        "models": [
+          "claude-opus-5"
+        ],
+        "enabled": true,
+        "priority": 100,
+        "maxAttempts": 2,
+        "timeoutMs": 30000
+      },
+      {
+        "provider": "openai",
+        "models": [
+          "gpt-5.6"
+        ],
+        "enabled": true,
+        "priority": 90,
+        "maxAttempts": 2,
+        "timeoutMs": 30000
+      }
+    ],
+    "maxRetries": 3,
+    "retryDelayMs": 100,
+    "backoffMultiplier": 2,
+    "maxDelayMs": 5000
+  },
+  "agentOverrides": {
+    "qe-security-scanner": {
+      "provider": "codex",
+      "model": "gpt-5.4"
+    },
+    "qe-security-auditor": {
+      "provider": "codex",
+      "model": "gpt-5.4"
+    },
+    "qe-pentest-validator": {
+      "provider": "codex",
+      "model": "gpt-5.4"
+    },
+    "qe-security-reviewer": {
+      "provider": "claude-code",
+      "model": "claude-opus-5"
+    },
+    "qe-test-architect": {
+      "provider": "codex",
+      "model": "gpt-5.4"
+    },
+    "qe-test-generator": {
+      "provider": "codex",
+      "model": "gpt-5.4"
+    },
+    "qe-coverage-specialist": {
+      "provider": "codex",
+      "model": "gpt-5.4"
+    },
+    "qe-mutation-tester": {
+      "provider": "codex",
+      "model": "gpt-5.4"
+    },
+    "qe-code-reviewer": {
+      "provider": "claude-code",
+      "model": "claude-sonnet-5"
+    },
+    "qe-integration-reviewer": {
+      "provider": "claude-code",
+      "model": "claude-sonnet-5"
+    },
+    "qe-performance-reviewer": {
+      "provider": "claude-code",
+      "model": "claude-sonnet-5"
+    },
+    "qe-requirements-validator": {
+      "provider": "claude-code",
+      "model": "claude-sonnet-5"
+    }
+  }
+}

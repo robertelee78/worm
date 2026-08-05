@@ -4,3 +4,16 @@ ruvector.db
 /.claude-flow
 /.metaharness
 /agentdb.rvf*
+
+# Ruflo local secrets and runtime data
+.env
+.env.local
+.env.*.local
+.claude-flow/data/
+.claude-flow/logs/
+.claude-flow/sessions/
+
+# Codex local configuration
+.codex/
+# Claude Flow runtime data
+# Environment variables

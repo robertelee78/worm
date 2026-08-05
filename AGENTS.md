@@ -1,155 +1,412 @@
-# worm — agent briefing
+# worm
 
-TRON light-cycle duel in Rust (crossterm terminal UI). The CPU opponent
-(`src/lib/cpu_ai.rs`) is a **live learner** ported from the REAL `/opt/rps-ai`
-mechanism — there is no training phase; the loop is the game:
+> Multi-agent orchestration framework for agentic coding
 
-```
-every frame: every model predicts the player's next direction
-      ↓
-next frame: score every prediction (hit/miss × frame² — quadratic recency)
-      ↓
-argmax-score model drives the hunt layers; wall-follow floor vetoes traps
-```
+## Project Overview
 
-Seven specialist models (`rep/pat/frq/due/wlR/wlL/knn`), each a falsifiable
-assumption about the player. The cheap ones work from frame 2; `knn` (k-NN
-over player-centric contexts) is the sophisticated member and abstains cold.
-Per-game scores reset on restart; the k-NN memory persists as the corpus.
+A Claude Flow powered project
 
-## Commands
+**Tech Stack**: TypeScript, Node.js
+**Architecture**: Domain-Driven Design with bounded contexts
 
-```
-cargo build                          # debug build
-cargo test --lib --tests             # 70 unit/integration tests
-cargo bench --bench cpu_ai_bench     # THE behavioural gate (harness=false, runs main)
-cargo run --release                  # play it (terminal)
-./web/build.sh                       # build the browser bundle (web/pkg)
-node web/tests/app-smoke.mjs         # browser driver/IndexedDB integration smoke
-./web/tests/browser-responsive.sh    # real Chrome responsive + persistence gate
-cd web && python3 -m http.server 8080  # serve the web version
+## Quick Start
+
+### Installation
+```bash
+npm install
 ```
 
-## One engine, two frontends
+### Build
+```bash
+npm run build
+```
 
-The same `WormGame` (src/lib/) drives both: terminal UI (crossterm,
-`src/main.rs`) and browser (WASM via `src/lib/wasm_api.rs` + `web/`,
-wasm-bindgen `--target web`). All gameplay changes go in the lib — never in a
-frontend. Terminal-specific code is `#[cfg(not(target_arch = "wasm32"))]`;
-wasm-only code is `#[cfg(target_arch = "wasm32")]` or the `wasm` feature.
-rand is target-split (full features native; `std,std_rng` only on wasm —
-games on wasm are always seeded).
+### Test
+```bash
+npm test
+```
 
-- **Terminal**: board = (term_w/2, term_h−2) cells, rendered 2 chars/cell
-  (terminal cells are ~2:1 tall — 1-char cells made horizontal travel look
-  2× vertical). Sounds = terminal bell (threaded jingles).
-- **Browser**: `WormGame::with_size_seed` from JS; canvas render + CRT
-  overlay in `web/`; real WebAudio chiptune SFX (`web/audio.js`, typed
-  event protocol kind∈0..7 via `sfx_json`) + procedural 8-bit BGM (drop-in
-  slot: `web/music.mp3` wins if present); hero art `web/assets/hero.png`.
-- **Per-player brain persistence**: `CpuBrain::to_bytes/from_bytes` (bincode
-  + magic). Native: `worm_brain.bin` (env `WORM_BRAIN`). Browser: IndexedDB
-  keyed by a long-lived `worm_device_id` localStorage nonce — the CPU learns
-  THAT player across sessions; no server needed. IndexedDB v2 also retains up
-  to 200 validated per-device round summaries and aggregates wins, prediction
-  accuracy, and strongest-model evidence across reloads and new matches.
-- **Speed model**: speed is earned by eating — `frame_delay = 115ms −
-  min(80, food_eaten_total/2)` (floor 35ms), `speed_pct()` for HUD/music.
-  Not time-based. Food renders as value-sized orbs/glyphs (no digits).
-- **Scoreboard**: `session_wins` banks at `restart()`; DISPLAY code uses
-  `displayed_wins()` (banked + current winner) or the champion check fires
-  a round late. Match target: first to 3 (web).
-- **Death cause**: `death_cause: Option<DeathCause>` records the first
-  lethal event (wall / own / enemy trail / head-on / bomb / laser / bolt)
-  and both game-over screens show it ("CPU WINS — bomb blast"). Bombs are
-  the only weapon that erases trails (detonate clears cells in radius).
-- **Bomb telegraphing**: blast zone drawn pulsing with fuse urgency (red
-  '░' smoulder on terminal Empty cells at fuse ≤ 15; full 21×21 zone +
-  fuse-arc countdown on canvas). Never leave the bomb as just a dot.
-- **Brain panel (web)**: plain-language CPU BRAIN side card — prediction
-  glyph + confidence/sample size for the explicitly labeled next forecast;
-  the executed frame's tactical action, evidence source, scored result, and
-  projected five-cell path are a separate coherent snapshot. Seven compact
-  model rows show human names/forecasts/effective scores/hit rates, warm-up and
-  retention state, direction habits, and separately scoped round/lifetime
-  accuracy against the 25% chance floor. Game-over/history falls back to the
-  explicitly labeled last completed decision when the lethal frame ended
-  before the CPU's turn. The arena and side panel share the browser viewport
-  without overflow; below 1240 px the panel stacks. CSS scales an active round;
-  newly available logical dimensions apply on the next round boundary while
-  preserving the brain and match score. The terminal bottom bar keeps the
-  compact `BRAIN rep:… knn:*` line on ≥100-col terminals.
+### Development
+```bash
+npm run dev
+```
 
-## The benchmark rule (load-bearing, from /opt/rps-ai/CLAUDE.md)
+## Agent Coordination
 
-The bench pits the adaptive CPU against scripted opponents and scores
-**survival (moves) + food**. Discipline:
+### Swarm Configuration
 
-1. **FAMILIAR** opponents (wall-follower) are for iterating, not evidence.
-2. **HELD-OUT** opponents (not wall-follower restatements) decide what ships.
-3. Do not tune constants to make a held-out row look good — that converts it
-   to familiar and spends it.
-4. A change ships only if the bench improves: adaptive must beat naive.
+This project uses hierarchical swarm coordination for complex tasks:
 
-Harness facts (corrected 2026-08-05, read before trusting rows):
+| Setting | Value | Purpose |
+|---------|-------|---------|
+| Topology | `hierarchical` | Queen-led coordination (anti-drift) |
+| Max Agents | 8 | Optimal team size |
+| Strategy | `specialized` | Clear role boundaries |
+| Consensus | `raft` | Leader-based consistency |
 
-- `frames` is `game.time`; `actual-food` is `food_eaten_by[1]`. Never relabel
-  `cycles[1].score` as food: it includes survival frames.
-- Naive and adaptive rows use paired seeds and explicit `winner` outcomes. The
-  held-out gate fails closed unless adaptive CPU wins exceed naive CPU wins.
-- Scripted opponents circle 2×2 blocks in open space (right turn every free
-  frame) and suicide when food grows them mid-circle. Opponent death time is
-  mostly seed luck.
-- Scripted bench rows set `game.cpu_autopilot = false`; update() then keeps
-  the external steer and records nothing. Never let update() run cpu_decide
-  for a scripted row — that was the old bug and it made "naive" a
-  fresh-brain adaptive in disguise.
-- A fast kill lowers the adaptive row's `moves` — survival delta punishes
-  winning quickly. Read wins first, deltas second.
+### When to Use Swarms
 
-Current truthful baseline (2026-08-05, board pinned at
-120×38 via with_size_seed):
+**Invoke swarm for:**
+- Multi-file changes (3+ files)
+- New feature implementation
+- Cross-module refactoring
+- API changes with tests
+- Security-related changes
+- Performance optimization
 
-- Familiar wall-follower (iteration only): naive caps 100/100; adaptive records
-  37 CPU wins, 57 player wins, and 6 caps, averaging 2082.9 round frames and
-  5.9 actual food.
-- Held-out chaser (shipping evidence): adaptive **99/100 CPU wins vs naive
-  0/100** (naive draws 100/100), with +19.4 round frames and +0.1 actual food.
-- Reward signal: episodes record frames survived *on the current heading*
-  (resets on turn, 0 on crash) + 10× food — verified accumulating by test.
-- Opponent-model accuracy is tracked live: `cpu_brain.opp_pred_accuracy()`
-  (HUD `MEM:` readout on wide terminals). A constant-direction player locks
-  in at 80%+ within 5 frames (chance floor is 25%).
-- Corpus retention: DECAY_TAU=1500 (~10 games), MAX_EPISODES=4000 — rps-ai's
-  corpus never decays; ours used to last ~1 game.
+**Skip swarm for:**
+- Single file edits
+- Simple bug fixes (1-2 lines)
+- Documentation updates
+- Configuration changes
 
-## The mission: dual live memory — LANDED (2026-08-04)
+### Available Skills
 
-1. **Opponent-model episodes** — `(player-centric situation → next
-   direction)` recorded every frame (pre-move context, no label leakage).
-2. **Player-centric encoder** — open neighbours, trail/food distances,
-   CPU-threat proximity, 4×4 direction-transition matrix.
-3. **Use the prediction** — the rps-ai ensemble drives avoid/intercept
-   layers with hit-rate confidence; the self-survival k-NN casts one gated
-   vote above the wall-follow floor.
-4. **Cross-game persistence** — brain survives restart(); ensemble scores
-   reset per game (rps-ai's per-game record), k-NN memory persists.
-5. **Visible intelligence** — HUD brain panel (per-model scores, active
-   driver, live prediction, hit-rate) on ≥100-col terminals, `MEM:` episode
-   counts, session WINS scoreboard, game-over brain summary.
+Use `$skill-name` syntax to invoke:
 
-## Reference implementation (read it, don't approximate it)
+| Skill | Use Case |
+|-------|----------|
+| `$swarm-orchestration` | Multi-agent task coordination |
+| `$memory-management` | Pattern storage and retrieval |
+| `$sparc-methodology` | Structured development workflow |
+| `$security-audit` | Security scanning and CVE detection |
+| `$performance-analysis` | Profiling and optimization |
+| `$github-automation` | CI/CD and PR management |
 
-- `/opt/rps-ai/src/model.py` — THE mechanism: 6 models (assumptions, not
-  memories) + `score_model` (quadratic recency) + `computer_choice` (argmax
-  ensemble). NOTE: there is no k-NN / embedding / temperature machinery in
-  rps-ai, and no TypeScript sources — earlier docs here claimed otherwise.
-- `/opt/rps-ai/src/game.py` — `beats`/`loses_to` + round resolution.
-- `/opt/rps-ai/app.py` + `templates/play-studio.html` — per-round record
-  (p1, p2, winner, model_choice, model0..5), scoreboard, history table.
+### Agent Types
 
-## Working rules
+| Type | Role | Use Case |
+|------|------|----------|
+| `researcher` | Requirements analysis | Understanding scope |
+| `architect` | System design | Planning structure |
+| `coder` | Implementation | Writing code |
+| `tester` | Test creation | Quality assurance |
+| `reviewer` | Code review | Security and quality |
 
-- Read a file before editing it. Minimal diffs. Follow existing style.
-- After any cpu_ai.rs change: `cargo test --lib --tests` AND the bench.
-- Constants changes must be justified by the bench, not vibes.
+## Execution Model
+
+- **claude-flow** = LEDGER (coordinates: memory, routing, swarm state)
+- **Codex** = EXECUTOR (writes code, runs tests, creates files)
+
+**Critical rule:** DON'T STOP after calling claude-flow commands. Coordination commands return instantly — continue immediately with the next implementation step.
+
+## Ruflo + Codex Automated Workflow
+
+Ruflo is the coordination ledger and policy decision point; Codex workers execute code, tests, and commands. A Ruflo coordination call records work but never replaces implementation.
+
+Use `guidance_brain({ mode: "recommend", task: "..." })` when the task can
+benefit from Ruflo-specific capabilities. Its live registry is authoritative
+for tool presence; registration alone does not prove configuration,
+reachability, health, or authorization. If it is not registered, use compatible
+`guidance_recommend`, CLI discovery, and repository instructions.
+
+1. **Recall** — search AgentDB memory and relevant ADRs for patterns and constraints.
+2. **Inspect** — read source, runtime, dependency, policy, and health state.
+3. **Route** — choose the smallest capable topology, agents, skills, and tools.
+4. **Plan** — define acceptance criteria, safety envelope, ownership, and validation.
+5. **Execute** — Codex workers implement in isolated scopes; Ruflo records coordination.
+6. **Test** — run focused tests, regression tests, and failure-path checks.
+7. **Validate** — check types, security, policy, compatibility, and artifact integrity.
+8. **Benchmark** — compare a source-bound candidate with a source-bound baseline.
+9. **Optimize** — improve measured bottlenecks without weakening the safety envelope.
+10. **Receipt** — bind claims, evidence, and decisions to exact source/build inputs.
+11. **Handoff** — reconcile concurrent work and disclose unresolved limitations.
+12. **Publish** — only an independently authorized release gate may publish immutable artifacts.
+
+### Concurrency and authority invariants
+
+- Never allow two writers in one worktree.
+- Read-only research agents may share a checkout; writing agents may not.
+- A child may drop capabilities but can never add tools, servers, namespaces, network access, spend, concurrency, or delegation depth.
+- Cancel dependent and not-yet-started sibling work when policy denies an action or a required dependency fails.
+- MetaHarness may benchmark candidates concurrently, but it cannot promote, serve, or expand its own SafetyEnvelope.
+- Only the integration agent changes shared manifests or lockfiles.
+- Do not auto-commit, push, merge, release, or delete worktrees unless the user authorized that operation.
+- Every consequential action must produce a policy decision receipt; production, destructive, spend, and promotion actions may require human approval.
+
+### Repository harness adapter
+
+When tracked repository instructions define a local collaboration harness:
+
+1. Assign the isolated worktree before starting a writing session.
+2. Start or register the session, inspect current claims, and acquire only the
+   exact paths, resources, and development ports needed for the task.
+3. Renew leases during long work, check acknowledged inbox messages at integration
+   boundaries, and release claims when handing off or ending.
+4. Record focused and integration evidence against the exact source state,
+   then let the designated integration owner decide release.
+
+A repository lease coordinates ownership; it does not grant authorization.
+In-memory reference adapters demonstrate semantics but are not distributed,
+restart-durable release authorities.
+The worker still needs the current ADR-324/325 action capability and fencing
+epoch for every protected side effect. Heartbeat and lease expiry establish
+liveness; a PID is diagnostic only. HEAD alone is not an exact source-state
+identity when tracked or untracked changes exist, so a release receipt must
+bind a clean commit or an immutable snapshot including those changes.
+
+
+## MCP Integration
+
+Use MCP tools for coordination, then keep coding:
+
+| Tool | Purpose | Example |
+|------|---------|---------|
+| `swarm_init` | Start coordination | `swarm_init({topology: "hierarchical"})` |
+| `memory_store` | Save patterns | `memory_store({key: "auth", value: "JWT"})` |
+| `memory_search` | Find patterns | `memory_search({query: "auth patterns"})` |
+| `task_orchestrate` | Assign work | `task_orchestrate({task: "implement"})` |
+
+## Code Standards
+
+### File Organization
+- **NEVER** save to root folder
+- `/src` - Source code files
+- `/tests` - Test files
+- `/docs` - Documentation
+- `/config` - Configuration files
+
+### Quality Rules
+- Files under 500 lines
+- No hardcoded secrets
+- Input validation at boundaries
+- Typed interfaces for public APIs
+- TDD London School (mock-first) preferred
+
+### Commit Messages
+```
+<type>(<scope>): <description>
+
+[optional body]
+```
+
+Types: `feat`, `fix`, `docs`, `style`, `refactor`, `perf`, `test`, `chore`
+
+Do not add a `Co-Authored-By` trailer unless the repository explicitly
+configures and authorizes that attribution.
+
+## Security
+
+### Critical Rules
+- NEVER commit secrets, credentials, or .env files
+- NEVER hardcode API keys
+- Always validate user input
+- Use parameterized queries for SQL
+- Sanitize output to prevent XSS
+
+### Path Security
+- Validate all file paths
+- Prevent directory traversal (../)
+- Use absolute paths internally
+
+## Memory System
+
+### Storing Patterns
+```bash
+npx @claude-flow/cli memory store \
+  --key "pattern-name" \
+  --value "pattern description" \
+  --namespace patterns
+```
+
+### Searching Memory
+```bash
+npx @claude-flow/cli memory search \
+  --query "search terms" \
+  --namespace patterns
+```
+
+## Quick Commands
+
+```bash
+npx @claude-flow/cli memory search --query "relevant patterns"
+npx @claude-flow/cli hooks route --task "current task description"
+npx @claude-flow/cli swarm init --topology hierarchical
+npx @claude-flow/cli hooks pre-task --description "task summary"
+```
+
+## Links
+
+- Documentation: https://github.com/ruvnet/ruflo
+- Issues: https://github.com/ruvnet/ruflo/issues
+
+## Performance Targets
+
+| Metric | Target | Notes |
+|--------|--------|-------|
+| HNSW Search | 150x-12,500x faster | Vector operations |
+| Memory Reduction | 50-75% | Int8 quantization |
+| MCP Response | <100ms | API latency |
+| CLI Startup | <500ms | Cold start |
+| SONA Adaptation | <0.05ms | Neural learning |
+
+## Testing
+
+### Running Tests
+```bash
+# Unit tests
+npm test
+
+# Integration tests
+npm run test:integration
+
+# Coverage
+npm run test:coverage
+
+# Security tests
+npm run test:security
+```
+
+### Test Philosophy
+- TDD London School (mock-first)
+- Unit tests for business logic
+- Integration tests for boundaries
+- E2E tests for critical paths
+- Security tests for sensitive operations
+
+### Coverage Requirements
+- Minimum 80% line coverage
+- 100% coverage for security-critical code
+- All public APIs must have tests
+
+## MCP Integration
+
+Claude Flow exposes tools via Model Context Protocol:
+
+```bash
+# Start MCP server
+npx ruflo mcp start
+
+# List available tools
+npx ruflo mcp tools
+```
+
+### Available Tools
+
+| Tool | Purpose | Example |
+|------|---------|---------|
+| `swarm_init` | Initialize swarm coordination | `swarm_init({topology: "hierarchical"})` |
+| `agent_spawn` | Spawn new agents | `agent_spawn({type: "coder", name: "dev-1"})` |
+| `memory_store` | Store in AgentDB | `memory_store({key: "pattern", value: "..."})` |
+| `memory_search` | Semantic search | `memory_search({query: "auth patterns"})` |
+| `task_orchestrate` | Task coordination | `task_orchestrate({task: "implement feature"})` |
+| `neural_train` | Train neural patterns | `neural_train({iterations: 10})` |
+| `benchmark_run` | Performance benchmarks | `benchmark_run({type: "all"})` |
+
+## Hooks System
+
+Claude Flow uses hooks for lifecycle automation:
+
+### Core Hooks
+
+| Hook | Trigger | Purpose |
+|------|---------|---------|
+| `pre-task` | Before task starts | Get context, load patterns |
+| `post-task` | After task completes | Record completion, train |
+| `pre-edit` | Before file changes | Validate, backup |
+| `post-edit` | After file changes | Train patterns, verify |
+| `pre-command` | Before shell commands | Security check |
+| `post-command` | After shell commands | Log results |
+
+### Session Hooks
+
+| Hook | Purpose |
+|------|---------|
+| `session-start` | Initialize context, load memory |
+| `session-end` | Export metrics, consolidate memory |
+| `session-restore` | Resume from checkpoint |
+| `notify` | Send notifications |
+
+### Intelligence Hooks
+
+| Hook | Purpose |
+|------|---------|
+| `route` | Route task to appropriate agents |
+| `explain` | Generate explanations |
+| `pretrain` | Pre-train neural patterns |
+| `build-agents` | Build specialized agents |
+| `transfer` | Transfer learning between domains |
+
+### Example Usage
+```bash
+# Before starting a task
+npx @claude-flow/cli hooks pre-task \
+  --description "implementing authentication"
+
+# After completing a task
+npx @claude-flow/cli hooks post-task \
+  --task-id "task-123" \
+  --success true
+
+# Route a task to agents
+npx @claude-flow/cli hooks route \
+  --task "implement OAuth2 login flow"
+```
+
+## Background Workers
+
+12 background workers provide continuous optimization:
+
+| Worker | Priority | Purpose |
+|--------|----------|---------|
+| `ultralearn` | normal | Deep knowledge acquisition |
+| `optimize` | high | Performance optimization |
+| `consolidate` | low | Memory consolidation |
+| `predict` | normal | Predictive preloading |
+| `audit` | critical | Security analysis |
+| `map` | normal | Codebase mapping |
+| `preload` | low | Resource preloading |
+| `deepdive` | normal | Deep code analysis |
+| `document` | normal | Auto-documentation |
+| `refactor` | normal | Refactoring suggestions |
+| `benchmark` | normal | Performance benchmarking |
+| `testgaps` | normal | Test coverage analysis |
+
+### Managing Workers
+```bash
+# List workers
+npx @claude-flow/cli hooks worker list
+
+# Trigger specific worker
+npx @claude-flow/cli hooks worker dispatch --trigger audit
+
+# Check worker status
+npx @claude-flow/cli hooks worker status
+```
+
+## Intelligence System
+
+The RuVector Intelligence System provides neural learning:
+
+### Components
+- **SONA**: Self-Optimizing Neural Architecture (<0.05ms adaptation)
+- **MoE**: Mixture of Experts for specialized routing
+- **HNSW**: Hierarchical Navigable Small World for fast search
+- **EWC++**: Elastic Weight Consolidation (prevents forgetting)
+- **Flash Attention**: Optimized attention mechanism
+
+### 4-Step Pipeline
+1. **RETRIEVE** - Fetch relevant patterns via HNSW
+2. **JUDGE** - Evaluate with verdicts (success/failure)
+3. **DISTILL** - Extract key learnings via LoRA
+4. **CONSOLIDATE** - Prevent catastrophic forgetting via EWC++
+
+## Debugging
+
+### Log Levels
+```bash
+# Set log level
+export CLAUDE_FLOW_LOG_LEVEL=debug
+
+# Enable verbose mode
+npx @claude-flow/cli --verbose <command>
+```
+
+### Health Checks
+```bash
+# Run diagnostics
+npx @claude-flow/cli doctor --fix
+
+# Check system status
+npx @claude-flow/cli status
+```

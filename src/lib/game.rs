@@ -218,6 +218,11 @@ pub struct WormGame {
     /// The every-frame `round_pred_*` counters above are kept untouched so
     /// existing telemetry does not silently change meaning.
     pub round_read: crate::cpu_ai::ReadRate,
+    /// How well the CPU reads THIS player, in [0,1] — lift over their own base
+    /// rate, pooled over their lifetime. Recomputed ONCE per round and held
+    /// constant for its duration: a CPU whose aggression drifts mid-round
+    /// reads as erratic rather than as adaptive.
+    pub read_rate: f32,
     /// Frame-owned CPU evidence: scored forecast, actual decision, and the
     /// separately-labelled forecast for the next frame.
     pub cpu_telemetry: crate::cpu_ai::CpuFrameTelemetry,
@@ -380,6 +385,7 @@ impl WormGame {
             food_eaten_total: 0,
             food_eaten_by: [0, 0],
             round_read: crate::cpu_ai::ReadRate::default(),
+            read_rate: 0.0,
             round_pred_hits: 0,
             round_pred_total: 0,
             cpu_telemetry: crate::cpu_ai::CpuFrameTelemetry::default(),
@@ -522,8 +528,10 @@ impl WormGame {
         let incoming_forecast = self.cpu_telemetry.next_forecast.take();
         self.cpu_telemetry = crate::cpu_ai::CpuFrameTelemetry::for_frame(self.frame_count);
 
-        // Update difficulty based on time
-        self.difficulty = self.time / 300 + 1;
+        // (The old `difficulty = time/300 + 1` clock ramp lived here. It was
+        // read nowhere, and an arbitrary timer is the opposite of what the
+        // difficulty is supposed to mean: the CPU gets harder because it has
+        // learned YOU, not because the clock advanced. See refresh_read_rate.)
 
         // Update particles with gravity and fading
         self.particles.retain_mut(|p| {
@@ -1283,6 +1291,28 @@ impl WormGame {
         }
     }
 
+    /// Recompute the difficulty signal from what the CPU has learned.
+    ///
+    /// MUST be called after any brain restore as well as at every round
+    /// boundary — otherwise a returning player who has been read for twenty
+    /// matches faces a CPU reset to tier 1, which is the exact opposite of the
+    /// premise.
+    ///
+    /// The signal is LIFT over the player's own base rate, not raw accuracy.
+    /// Raw accuracy cannot drive difficulty here: most moves are "keep going",
+    /// so a model scoring 90% may have learned nothing, while 45% against a
+    /// 33% baseline is a genuinely strong read. Lift is the only number that
+    /// means "it learned you", and it is self-normalising — a player who is
+    /// trivially predictable produces a high base rate and cannot inflate the
+    /// CPU's aggression by being boring.
+    pub fn refresh_read_rate(&mut self) {
+        let read = &self.cpu_brain.lifetime_read;
+        self.read_rate = if read.is_ready() { read.lift() } else { 0.0 };
+        // HUD tier 1..=5, so the number the player sees and the aggression the
+        // CPU spends are the same axis.
+        self.difficulty = 1 + (self.read_rate * 4.0).round() as u32;
+    }
+
     pub fn restart(&mut self) {
         // Explicit-size games (browser) keep their dimensions; native games
         // re-read the terminal so resizes take effect.
@@ -1328,8 +1358,11 @@ impl WormGame {
         self.particles.clear();
         self.time = 0;
         self.winner = None;
-        self.difficulty = 1;
         self.frame_count = 0;
+        // Recompute how well the CPU reads this player, once, for the whole
+        // round ahead. Difficulty is a HUD tier derived from it — earned by
+        // reading you, never by the clock.
+        self.refresh_read_rate();
         // Preserve the brain across restarts — this is in-game persistence.
         // rps-ai: "what someone opens with is a habit, it is stored."
         // The brain carries learned patterns from the previous game into the next,

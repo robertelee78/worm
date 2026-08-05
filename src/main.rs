@@ -183,6 +183,9 @@ fn main() -> std::io::Result<()> {
     // (rps-ai: "what someone opens with is a habit, it is stored").
     if let Some(brain) = worm::CpuBrain::load_file(&brain_load_path()) {
         game.cpu_brain = brain;
+        // A returning player must not face a CPU reset to tier 1 — the
+        // difficulty is earned by having read them, and that is in the brain.
+        game.refresh_read_rate();
     }
     let mut last_update = Instant::now();
     let mut input_buf: Vec<u8> = Vec::new();

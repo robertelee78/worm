@@ -130,6 +130,8 @@ impl WasmGame {
                 self.game.cpu_brain = b;
                 self.game.cpu_telemetry = crate::CpuFrameTelemetry::default();
                 self.game.round_last_cpu_decision = None;
+                // A returning player must not face a CPU reset to tier 1.
+                self.game.refresh_read_rate();
                 true
             }
             None => false,
