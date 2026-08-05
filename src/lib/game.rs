@@ -90,6 +90,12 @@ pub struct Bomb {
 
 pub const BOMB_RADIUS_CELLS: i16 = 10;
 pub const BOMB_FUSE_MS: u64 = 3000;
+/// Frames the CPU's laser charges (visibly, along the beam) before firing.
+pub const LASER_TELEGRAPH_FRAMES: u32 = 10;
+/// Sudden death: after this many frames the arena starts shrinking inward.
+pub const SUDDEN_DEATH_START: u32 = 3000;
+/// Sudden death: one wall ring closes every this many frames.
+pub const SUDDEN_DEATH_INTERVAL: u32 = 150;
 pub const TRI_SHOT_RANGE: u8 = 7;
 pub const MAX_POWERUPS_ON_BOARD: usize = 3;
 
@@ -217,6 +223,12 @@ pub struct WormGame {
     /// What killed the losing cycle (first lethal event wins). Shown on the
     /// game-over screen so "how did I die?" is never a mystery.
     pub death_cause: Option<DeathCause>,
+    /// Frames the CPU's laser has been visibly charging. The beam telegraphs
+    /// for LASER_TELEGRAPH_FRAMES before it fires so crossing the CPU's
+    /// firing line is dodgeable, not an unannounced instant death.
+    pub cpu_laser_charge: u32,
+    /// Sudden death: how many inward wall rings have closed so far.
+    pub shrink_level: u16,
 }
 
 /// The lethal event that ended the game.
@@ -370,6 +382,8 @@ impl WormGame {
             cpu_decision_reason: crate::cpu_ai::CpuDecisionReason::Opening,
             cpu_predicted_path: Vec::new(),
             death_cause: None,
+            cpu_laser_charge: 0,
+            shrink_level: 0,
         };
         game.generate_food_items();
         game
@@ -440,6 +454,7 @@ impl WormGame {
                 let x = self.rng_range(xlo..xhi);
                 let y = self.rng_range(ylo..yhi);
                 if self.grid[y as usize][x as usize] == CellType::Empty
+                    && !self.bombs.iter().any(|b| (b.x, b.y) == (x, y))
                     && !self
                         .food_items
                         .iter()
@@ -457,7 +472,9 @@ impl WormGame {
             for _ in 0..200 {
                 let x = self.rng_range(xlo..xhi);
                 let y = self.rng_range(ylo..yhi);
-                if self.grid[y as usize][x as usize] == CellType::Empty {
+                if self.grid[y as usize][x as usize] == CellType::Empty
+                    && !self.bombs.iter().any(|b| (b.x, b.y) == (x, y))
+                {
                     let num = self.rng_range(1..=9);
                     self.food_items.push((x, y, num));
                     self.grid[y as usize][x as usize] = CellType::Food;
@@ -681,8 +698,10 @@ impl WormGame {
             self.cycles[self.player].alive = false;
             self.game_over = true;
             play_death_riff(100);
-            // A bomb at fuse 0 still detonates this frame (frame-end order);
-            // it may kill the surviving CPU and turn the loss into a draw.
+            // In-flight bolts and a bomb at fuse 0 still get their frame-end
+            // step; either may kill the surviving CPU and turn the loss into
+            // a draw (bombs alone used to tick while bolts froze mid-air).
+            self.advance_projectiles();
             self.tick_bombs();
             return false;
         }
@@ -707,9 +726,15 @@ impl WormGame {
             let cycle = &mut self.cycles[self.player];
             cycle.head = player_new;
             cycle.positions.insert(0, player_new);
+            // The tail was kept this frame iff growth was already owed at
+            // retraction time; that kept tail consumes one credit even on a
+            // frame that also eats (eating used to skip the payment, granting
+            // one segment more than the food value).
+            let tail_kept = cycle.pending_growth > 0;
             if player_food_val > 0 {
                 cycle.pending_growth += player_food_val as u32;
-            } else if cycle.pending_growth > 0 {
+            }
+            if tail_kept {
                 cycle.pending_growth -= 1;
             }
             self.grid[player_new.1 as usize][player_new.0 as usize] = CellType::Player;
@@ -733,19 +758,65 @@ impl WormGame {
             play_food_pickup(player_food_val);
         }
 
+        // Retract CPU tail before the CPU decides (unless owed growth cells):
+        // cpu_decide, the crash check, and the learning encoder all see the
+        // same post-retract world — previously the AI treated its own
+        // about-to-vacate tail tip as an illegal move. Own-marker guard, same
+        // as the player's retraction: the player may have legally entered
+        // this cell already.
+        {
+            let cycle = &mut self.cycles[1];
+            if cycle.positions.len() > 1 && cycle.pending_growth == 0 {
+                let tail = cycle.positions.pop().unwrap();
+                if self.grid[tail.1 as usize][tail.0 as usize] == CellType::CPU {
+                    self.grid[tail.1 as usize][tail.0 as usize] = CellType::Empty;
+                }
+            }
+        }
+
         // CPU AI — faithful k-NN memory opponent (rps-ai mechanism).
         // Only runs when the CPU drives itself: scripted bench opponents
         // (cpu_autopilot = false) keep their externally-steered heading and
         // leave no episodes in the learner's brain.
         let mut cpu_obs = None;
         let cpu_dir = if self.cpu_autopilot {
-            // The CPU fires a held power-up when the heuristic sees a good shot.
-            if crate::cpu_ai::should_fire(self, 1) {
+            // The CPU fires a held power-up when the heuristic sees a good
+            // shot. The laser is special-cased: it kills the same frame it
+            // fires, so it charges visibly for LASER_TELEGRAPH_FRAMES first
+            // (red embers along the beam) — crossing the CPU's firing line is
+            // dodgeable instead of an unannounced instant death.
+            let wants_fire = crate::cpu_ai::should_fire(self, 1);
+            let holding_laser = self.cycles[1].held_powerup == Some(PowerUpKind::Laser);
+            let fire_now = if holding_laser {
+                if wants_fire {
+                    self.cpu_laser_charge += 1;
+                    let (hx, hy) = self.cycles[1].head;
+                    let (dx, dy) = self.cycles[1].direction.as_delta();
+                    let beam = self.beam_cells(hx, hy, dx, dy);
+                    for &(bx, by) in &beam {
+                        self.particles.push(Particle {
+                            x: bx as f32,
+                            y: by as f32,
+                            vx: 0.0,
+                            vy: 0.0,
+                            lifetime: 3,
+                            color: (255, 70, 70),
+                        });
+                    }
+                    self.cpu_laser_charge >= LASER_TELEGRAPH_FRAMES
+                } else {
+                    // Target left the firing line — the charge resets.
+                    self.cpu_laser_charge = 0;
+                    false
+                }
+            } else {
+                wants_fire
+            };
+            if fire_now {
+                self.cpu_laser_charge = 0;
                 self.fire_powerup(1);
                 if self.game_over {
-                    // A beam-triggered kill mid-frame must not freeze an armed
-                    // bomb at fuse 0 that would have detonated at frame-end.
-                    self.tick_bombs();
+                    // fire_powerup already ran the frame-end draw-parity pass.
                     return false;
                 }
             }
@@ -767,19 +838,6 @@ impl WormGame {
         } else {
             self.cycles[1].direction
         };
-
-        // Retract CPU tail first (unless owed growth cells) so the vacated cell
-        // isn't a false self-collision. Own-marker guard, same as the player's
-        // retraction: the player may have legally entered this cell already.
-        {
-            let cycle = &mut self.cycles[1];
-            if cycle.positions.len() > 1 && cycle.pending_growth == 0 {
-                let tail = cycle.positions.pop().unwrap();
-                if self.grid[tail.1 as usize][tail.0 as usize] == CellType::CPU {
-                    self.grid[tail.1 as usize][tail.0 as usize] = CellType::Empty;
-                }
-            }
-        }
 
         // Recompute CPU position after AI decision
         let (cpu_new, cpu_crashed) = {
@@ -846,8 +904,10 @@ impl WormGame {
             self.game_over = true;
             self.winner = if same_cell { None } else { Some(0) };
             play_death_riff(100);
-            // A bomb at fuse 0 still detonates this frame; it may kill the
-            // surviving player and turn the CPU win into a draw.
+            // In-flight bolts and a bomb at fuse 0 still get their frame-end
+            // step; either may kill the surviving player and turn the CPU win
+            // into a draw (bombs alone used to tick while bolts froze).
+            self.advance_projectiles();
             self.tick_bombs();
             return false;
         }
@@ -867,19 +927,17 @@ impl WormGame {
             self.food_eaten_total += cpu_food_val as u32;
         }
 
-        // If we've cleared the tray, spawn a fresh 1-5.
-        if self.food_items.is_empty() {
-            self.generate_food_items();
-        }
-
         // Move CPU head (grow by the food value eaten)
         {
             let cycle = &mut self.cycles[1];
             cycle.head = cpu_new;
             cycle.positions.insert(0, cpu_new);
+            // Same kept-tail growth accounting as the player block above.
+            let tail_kept = cycle.pending_growth > 0;
             if cpu_food_val > 0 {
                 cycle.pending_growth += cpu_food_val as u32;
-            } else if cycle.pending_growth > 0 {
+            }
+            if tail_kept {
                 cycle.pending_growth -= 1;
             }
             self.grid[cpu_new.1 as usize][cpu_new.0 as usize] = CellType::CPU;
@@ -895,6 +953,14 @@ impl WormGame {
             let (_, _, kind) = self.powerups.remove(idx);
             self.cycles[1].held_powerup = Some(kind);
             play_beep(SfxKind::PowerUp, 1560, 40);
+        }
+
+        // If we've cleared the tray, spawn a fresh 1-5. This runs AFTER both
+        // head markers are on the grid — refilling between the CPU's food
+        // collection and its head write could spawn food on the CPU's new
+        // head cell, leaving an invisible orphaned tray entry.
+        if self.food_items.is_empty() {
+            self.generate_food_items();
         }
 
         if cpu_food_val > 0 {
@@ -954,6 +1020,30 @@ impl WormGame {
             return false;
         }
 
+        // Sudden death: from SUDDEN_DEATH_START the arena walls close inward
+        // one ring every SUDDEN_DEATH_INTERVAL frames, so no round can orbit
+        // forever. The next ring to close is telegraphed with ember
+        // particles for its last 30 frames.
+        if self.has_corridor() && self.time >= SUDDEN_DEATH_START {
+            let elapsed = self.time - SUDDEN_DEATH_START;
+            let max_level = (self.width.min(self.height).saturating_sub(8) / 2)
+                .saturating_sub(2);
+            let target = ((elapsed / SUDDEN_DEATH_INTERVAL) as u16).min(max_level);
+            while self.shrink_level < target && !self.game_over {
+                self.shrink_level += 1;
+                self.close_ring(2 + self.shrink_level);
+            }
+            if self.game_over {
+                return false;
+            }
+            if self.shrink_level < max_level {
+                let next_in = SUDDEN_DEATH_INTERVAL - (elapsed % SUDDEN_DEATH_INTERVAL);
+                if next_in <= 30 && self.time % 3 == 0 {
+                    self.ring_ember_particles(2 + self.shrink_level + 1);
+                }
+            }
+        }
+
         // Power-up spawn timer.
         if self.powerup_timer > 0 {
             self.powerup_timer -= 1;
@@ -963,6 +1053,92 @@ impl WormGame {
         }
 
         true
+    }
+
+    /// Sudden death: seal the square ring at wall offset `off` (the ring-2
+    /// arena wall sits at off=2). Heads on the ring die (both -> draw); trail
+    /// cells consumed by the wall leave their cycle's positions list
+    /// (grid/positions lockstep, same rule as detonate); food, power-ups and
+    /// bombs on the ring are removed.
+    fn close_ring(&mut self, off: u16) {
+        if self.width <= 2 * off + 4 || self.height <= 2 * off + 4 {
+            return;
+        }
+        let (l, r, t, b) = (off, self.width - 1 - off, off, self.height - 1 - off);
+        let on_ring =
+            |x: u16, y: u16| (x == l || x == r || y == t || y == b) && (l..=r).contains(&x) && (t..=b).contains(&y);
+        let mut dead = [false; 2];
+        for (c, d) in dead.iter_mut().enumerate() {
+            let (hx, hy) = self.cycles[c].head;
+            if self.cycles[c].alive && on_ring(hx, hy) {
+                *d = true;
+            }
+        }
+        let mut sealed: Vec<(u16, u16)> = Vec::new();
+        for x in l..=r {
+            sealed.push((x, t));
+            sealed.push((x, b));
+        }
+        for y in (t + 1)..b {
+            sealed.push((l, y));
+            sealed.push((r, y));
+        }
+        for &(x, y) in &sealed {
+            self.grid[y as usize][x as usize] = CellType::Wall;
+            self.food_items.retain(|&(fx, fy, _)| (fx, fy) != (x, y));
+            self.powerups.retain(|&(px, py, _)| (px, py) != (x, y));
+            self.bombs.retain(|bb| (bb.x, bb.y) != (x, y));
+        }
+        for c in &mut self.cycles {
+            c.positions.retain(|p| !sealed.contains(p));
+        }
+        if dead[0] || dead[1] {
+            if self.death_cause.is_none() {
+                self.death_cause = Some(DeathCause::Wall);
+            }
+            for (c, &d) in dead.iter().enumerate() {
+                if d {
+                    let (hx, hy) = self.cycles[c].head;
+                    self.add_impact_particles(hx, hy, self.cycles[c].color);
+                    self.cycles[c].alive = false;
+                }
+            }
+            self.game_over = true;
+            self.winner = match (dead[0], dead[1]) {
+                (true, false) => Some(1),
+                (false, true) => Some(0),
+                _ => None,
+            };
+            play_death_riff(100);
+        }
+    }
+
+    /// Ember particles along the ring that is about to close (deterministic —
+    /// no RNG, so seeded games stay reproducible).
+    fn ring_ember_particles(&mut self, off: u16) {
+        if self.width <= 2 * off + 4 || self.height <= 2 * off + 4 {
+            return;
+        }
+        let (l, r, t, b) = (off, self.width - 1 - off, off, self.height - 1 - off);
+        let mut cells: Vec<(u16, u16)> = Vec::new();
+        for x in (l..=r).step_by(2) {
+            cells.push((x, t));
+            cells.push((x, b));
+        }
+        for y in (t..=b).step_by(2) {
+            cells.push((l, y));
+            cells.push((r, y));
+        }
+        for (x, y) in cells {
+            self.particles.push(Particle {
+                x: x as f32,
+                y: y as f32,
+                vx: 0.0,
+                vy: 0.0,
+                lifetime: 4,
+                color: (255, 90, 30),
+            });
+        }
     }
 
     pub fn change_direction(&mut self, new_dir: Direction) {
@@ -1045,6 +1221,8 @@ impl WormGame {
         self.food_eaten_by = [0, 0];
         self.round_pred_hits = 0;
         self.round_pred_total = 0;
+        self.cpu_laser_charge = 0;
+        self.shrink_level = 0;
         self.last_scored_prediction = None;
         self.last_player_actual = None;
         self.last_prediction_hit = None;
@@ -1110,11 +1288,15 @@ impl WormGame {
         match kind {
             PowerUpKind::Laser => {
                 let beam = self.beam_cells(hx, hy, dx, dy);
-                // The beam detonates any bombs caught in its path.
+                // The beam detonates any bombs caught in its path. Blast
+                // credit follows the TRIGGER, not the planter: the firer is
+                // immune to the blast it set off, and the bomb's owner can
+                // die to it — previously an enemy bomb you lasered could
+                // never harm its planter.
                 for &(bx, by) in &beam {
                     if let Some(i) = self.bombs.iter().position(|b| b.x == bx && b.y == by) {
                         let b = self.bombs.remove(i);
-                        self.detonate(b.x, b.y, b.owner);
+                        self.detonate(b.x, b.y, who as u8);
                     }
                 }
                 // Kill on contact with the opponent head.
@@ -1203,6 +1385,15 @@ impl WormGame {
                     }
                 }
             }
+        }
+        if self.game_over {
+            // The shot ended the game mid-frame (laser kill or a triggered
+            // blast). In-flight bolts and armed bombs still get their
+            // frame-end step — a survivor killed here turns the win into a
+            // draw. The player-fired path runs OUTSIDE update() (which stops
+            // once game_over is set), so this is its only chance to run.
+            self.advance_projectiles();
+            self.tick_bombs();
         }
         true
     }
@@ -1344,6 +1535,15 @@ impl WormGame {
                         self.grid[uy as usize][ux as usize] = CellType::Empty;
                         self.powerups.retain(|&(px, py, _)| (px, py) != (ux, uy));
                     }
+                    CellType::Wall => {
+                        // Design intent: a blast punches the ring-2 arena
+                        // wall open (same Hole as WallPunch) so players can
+                        // reach the outer corridor. The ring-0 frame is
+                        // indestructible.
+                        if self.is_arena_wall(ux, uy) {
+                            self.grid[uy as usize][ux as usize] = CellType::Hole;
+                        }
+                    }
                     _ => {}
                 }
                 // Chain: other armed bombs caught in the blast go off too.
@@ -1419,11 +1619,15 @@ impl WormGame {
         for _ in 0..200 {
             let x = self.rng_range(xlo..xhi);
             let y = self.rng_range(ylo..yhi);
-            if self.grid[y as usize][x as usize] == CellType::Empty {
-                let kind = match self.rng_range(0..4) {
-                    0 => PowerUpKind::Laser,
-                    1 => PowerUpKind::TriShot,
-                    2 => PowerUpKind::Bomb,
+            if self.grid[y as usize][x as usize] == CellType::Empty
+                && !self.bombs.iter().any(|b| (b.x, b.y) == (x, y))
+            {
+                // Weighted kinds: WallPunch is situational (only useful when
+                // facing the ring-2 wall), so a flat 25% over-served it.
+                let kind = match self.rng_range(0..10) {
+                    0..=2 => PowerUpKind::Laser,
+                    3..=5 => PowerUpKind::TriShot,
+                    6..=8 => PowerUpKind::Bomb,
                     _ => PowerUpKind::WallPunch,
                 };
                 self.powerups.push((x, y, kind));
@@ -1489,24 +1693,28 @@ impl WormGame {
                 // (emoji are already ~2 cols wide, so they print once).
                 let (r, g, b, ch, double): (u8, u8, u8, char, bool) = match cell {
                     CellType::Empty => {
-                        // Bomb danger telegraph: empty cells inside the blast
-                        // radius of a bomb with <= 15 frames left smoulder red
-                        // (the zone pulses as the fuse runs out).
-                        let mut danger = false;
+                        // Bomb danger telegraph: empty cells inside any armed
+                        // bomb's blast radius smoulder for the WHOLE fuse
+                        // (parity with the web renderer, which shows the zone
+                        // from plant time), heating up as detonation nears.
+                        let mut danger: Option<f32> = None;
                         for b in &self.bombs {
-                            if b.fuse <= 15 {
-                                let dx = (x as i32 - b.x as i32).abs();
-                                let dy = (y as i32 - b.y as i32).abs();
-                                if dx <= BOMB_RADIUS_CELLS as i32 && dy <= BOMB_RADIUS_CELLS as i32
-                                {
-                                    danger = true;
-                                    break;
-                                }
+                            let dx = (x as i32 - b.x as i32).abs();
+                            let dy = (y as i32 - b.y as i32).abs();
+                            if dx <= BOMB_RADIUS_CELLS as i32 && dy <= BOMB_RADIUS_CELLS as i32 {
+                                let urgency = 1.0 - (b.fuse as f32 / 60.0).min(1.0);
+                                danger = Some(danger.map_or(urgency, |d: f32| d.max(urgency)));
                             }
                         }
-                        if danger {
+                        if let Some(urgency) = danger {
                             let heat = ((self.time as f32 * 0.4).sin() * 0.5 + 0.5) * 60.0;
-                            ((70.0 + heat) as u8, 15, 10, '░', true)
+                            (
+                                (40.0 + 90.0 * urgency + heat * urgency) as u8,
+                                15,
+                                10,
+                                '░',
+                                true,
+                            )
                         } else {
                             (0, 0, 0, ' ', true)
                         }
@@ -1602,7 +1810,10 @@ impl WormGame {
                             .unwrap_or(PowerUpKind::Laser);
                         let ch = match pu {
                             PowerUpKind::Laser => '⚡',
-                            PowerUpKind::TriShot => '✦',
+                            // Emoji-width like its siblings: the narrow '✦'
+                            // printed one column and skewed every cell after
+                            // it on that row.
+                            PowerUpKind::TriShot => '🔱',
                             PowerUpKind::Bomb => '💣',
                             PowerUpKind::WallPunch => '🔨',
                         };

@@ -107,6 +107,7 @@ const PU_NAMES = ['LASER', 'TRI-SHOT', 'BOMB', 'WALL-PUNCH'];
 window.addEventListener('keydown', (e) => {
   sfx.unlock();
   tryCoin();
+  if (!game) return; // wasm module may still be booting
   if (e.code in KEYMAP) {
     game.set_direction(KEYMAP[e.code]);
     e.preventDefault();
@@ -117,6 +118,8 @@ window.addEventListener('keydown', (e) => {
     if (game.is_over() && !championVisible()) nextRound();
   } else if (e.code === 'KeyM') {
     if (sfx.bgm) sfx.bgm.toggleMute();
+  } else if (e.code === 'KeyP') {
+    paused = !paused;
   }
 });
 window.addEventListener('pointerdown', () => { sfx.unlock(); tryCoin(); }, { once: true });
@@ -124,11 +127,13 @@ window.addEventListener('pointerdown', () => { sfx.unlock(); tryCoin(); }, { onc
 document.querySelectorAll('.tbtn[data-dir]').forEach((btn) => {
   btn.addEventListener('pointerdown', (e) => {
     e.preventDefault();
+    if (!game) return;
     game.set_direction(Number(btn.dataset.dir));
   });
 });
 document.getElementById('fire-btn').addEventListener('pointerdown', (e) => {
   e.preventDefault();
+  if (!game) return;
   game.fire();
 });
 // Touch players have no keyboard: without this button a phone/tablet player
@@ -161,11 +166,16 @@ function nextRound() {
 
 let last = performance.now();
 let acc = 0;
+let paused = false;
 
 function loop(now) {
   const dt = Math.min(now - last, 250);
   last = now;
-  acc += dt;
+  if (paused) {
+    acc = 0; // don't bank frozen time — resume without a step burst
+  } else {
+    acc += dt;
+  }
   let delay = Number(game.frame_delay_ms());
   let steps = 0;
   while (acc >= delay && steps < 8) {
@@ -182,6 +192,9 @@ function loop(now) {
   updateHum(state);
   render(state);
   hud(state);
+  if (paused) {
+    document.getElementById('mid-status').textContent = 'PAUSED — press P to resume';
+  }
   requestAnimationFrame(loop);
 }
 

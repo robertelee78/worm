@@ -82,6 +82,7 @@ fn game_over_key(buf: &[u8]) -> GameOverKey {
 enum PlayKey {
     Dir(Direction),
     Fire,
+    Pause,
     Quit,
     Ignore,
 }
@@ -118,6 +119,7 @@ fn parse_play_key(buf: &[u8]) -> Option<(PlayKey, usize)> {
             }
         }
         b'q' | b'Q' => Some((PlayKey::Quit, 1)),
+        b'p' | b'P' => Some((PlayKey::Pause, 1)),
         b'h' | b'a' => Some((PlayKey::Dir(Direction::Left), 1)),
         b'j' | b's' => Some((PlayKey::Dir(Direction::Down), 1)),
         b'k' | b'w' => Some((PlayKey::Dir(Direction::Up), 1)),
@@ -154,6 +156,7 @@ fn main() -> std::io::Result<()> {
     let mut last_update = Instant::now();
     let mut input_buf: Vec<u8> = Vec::new();
     let mut quit = false;
+    let mut paused = false;
 
     loop {
         // Read all available input (non-blocking with 1ms timeout)
@@ -227,6 +230,22 @@ fn main() -> std::io::Result<()> {
                         PlayKey::Fire => {
                             let _ = game.fire_powerup(0);
                         }
+                        PlayKey::Pause => {
+                            paused = !paused;
+                            if paused {
+                                execute!(
+                                    stdout,
+                                    SetForegroundColor(Color::Yellow),
+                                    MoveTo(0, game.height),
+                                    Print("PAUSED — press P to resume"),
+                                    ResetColor,
+                                )?;
+                                stdout.flush()?;
+                            } else {
+                                // Don't bank the frozen time as owed frames.
+                                last_update = Instant::now();
+                            }
+                        }
                         PlayKey::Quit => quit = true,
                         PlayKey::Ignore => {}
                     }
@@ -285,7 +304,7 @@ fn main() -> std::io::Result<()> {
         }
 
         // Game update
-        if last_update.elapsed() >= game.frame_delay() {
+        if !paused && last_update.elapsed() >= game.frame_delay() {
             game.update();
             game.render(&mut stdout);
             stdout.flush()?;
@@ -387,6 +406,12 @@ mod tests {
     fn incomplete_esc_sequences_wait_for_more_bytes() {
         assert_eq!(parse_play_key(b"\x1b"), None);
         assert_eq!(parse_play_key(b"\x1b["), None);
+    }
+
+    #[test]
+    fn p_toggles_pause() {
+        assert_eq!(parse_play_key(b"p"), Some((PlayKey::Pause, 1)));
+        assert_eq!(parse_play_key(b"P"), Some((PlayKey::Pause, 1)));
     }
 
     #[test]

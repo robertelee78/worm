@@ -76,6 +76,22 @@ Refactor the CPU intelligence to a **dual-mode opponent-centric architecture**:
     familiar wall-follower adaptive wins 100/100 (pre-vote 1/100 — the vote
     breaks the perimeter stalemate and kills in ~10 frames).
 
+## Update (2026-08-05, audit round 2)
+*   Self-memory vote refinements (all verified against the seeded bench):
+    crash episodes (reward 0) no longer vote FOR the move that died; the
+    5% close-evasion explore draws from the threat-filtered candidate set;
+    tier-3 food pathing obeys the shared `open_floor` survival floor instead
+    of a hard-coded 10%; `m_due`'s tie-break now matches its longest-unseen
+    doc; `SurvivalMemory` is only reported when the vote actually changed the
+    move; dead `sample_with_temperature` removed (decisions are gated argmax —
+    cpu_decide's doc now says so).
+*   Fairness/telegraph: the CPU's laser charges visibly for
+    `LASER_TELEGRAPH_FRAMES` (10) before firing; tri-shot only fires into the
+    forward arc.
+*   Bench after these changes: held-out chaser adaptive wins 99/100 (the
+    two earlier round-1 non-wins were removed unearned tail-cell kills;
+    round 2 recovered one). Verdict: WINS.
+
 ## Consequences
 *   Positive: Moves the CPU from a "self-survival" agent to a "strategic opponent"
     agent. The opponent model infrastructure is in place and learning.

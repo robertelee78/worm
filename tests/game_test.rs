@@ -1107,3 +1107,161 @@ fn test_no_180_via_two_quick_turns_in_one_tick() {
     game.change_direction(worm::Direction::Down);
     assert_eq!(game.cycles[0].direction, worm::Direction::Left);
 }
+
+/* ---- audit round 2: improvements + verified leftovers (2026-08) ---- */
+
+#[test]
+fn test_bomb_blast_breaks_arena_wall_not_frame() {
+    // Design intent: a blast punches the ring-2 arena wall open (Hole) so
+    // players can reach the outer corridor; the ring-0 frame is untouchable.
+    let mut game = WormGame::with_size(120, 38);
+    game.bombs.push(worm::game::Bomb {
+        x: 5,
+        y: 5,
+        fuse: 1,
+        owner: 0,
+    });
+    game.tick_bombs();
+    assert_eq!(
+        game.grid[5][2],
+        worm::CellType::Hole,
+        "ring-2 wall cell in the blast must open"
+    );
+    assert_eq!(game.grid[2][5], worm::CellType::Hole);
+    assert_eq!(
+        game.grid[5][0],
+        worm::CellType::Wall,
+        "the ring-0 outer frame is indestructible"
+    );
+    assert_eq!(game.grid[0][5], worm::CellType::Wall);
+}
+
+#[test]
+fn test_laser_triggered_bomb_kills_its_owner() {
+    // Blast credit follows the trigger: lasering an ENEMY bomb detonates it
+    // as the firer's blast — the bomb's planter can die to it, the firer
+    // cannot.
+    let mut game = WormGame::with_size(120, 38);
+    game.food_items.clear();
+    game.cycles[0].head = (30, 20);
+    game.cycles[0].positions = vec![(30, 20)];
+    game.cycles[0].direction = worm::Direction::Right;
+    game.cycles[0].held_powerup = Some(worm::game::PowerUpKind::Laser);
+    game.grid[20][30] = worm::CellType::Player;
+    game.cycles[1].head = (35, 25); // inside the blast, off the beam line
+    game.cycles[1].positions = vec![(35, 25)];
+    game.grid[25][35] = worm::CellType::CPU;
+    game.bombs.push(worm::game::Bomb {
+        x: 35,
+        y: 20,
+        fuse: 60,
+        owner: 1, // the CPU planted it
+    });
+    assert!(game.fire_powerup(0));
+    assert!(game.game_over);
+    assert_eq!(game.winner, Some(0), "the triggering firer gets the kill");
+    assert!(!game.cycles[1].alive, "the planter is not immune to a triggered blast");
+    assert!(game.cycles[0].alive, "the firer is immune to the blast it triggered");
+}
+
+#[test]
+fn test_growth_matches_food_value_when_chain_eating() {
+    // Eating while growth is still owed used to skip that frame's payment,
+    // granting one extra segment. pending = old + food - 1 (the kept tail).
+    let mut game = WormGame::with_size(120, 38);
+    let head = game.cycles[0].head;
+    game.cycles[0].positions = vec![head, (head.0 - 1, head.1), (head.0 - 2, head.1)];
+    for &(x, y) in &game.cycles[0].positions.clone() {
+        game.grid[y as usize][x as usize] = worm::CellType::Player;
+    }
+    game.cycles[0].pending_growth = 2;
+    game.cycles[0].direction = worm::Direction::Right;
+    game.food_items.clear();
+    game.food_items.push((head.0 + 1, head.1, 3));
+    game.grid[head.1 as usize][(head.0 + 1) as usize] = worm::CellType::Food;
+    game.update();
+    assert_eq!(
+        game.cycles[0].pending_growth,
+        4,
+        "pending = 2 owed + 3 eaten - 1 paid by the kept tail"
+    );
+}
+
+#[test]
+fn test_sudden_death_closes_ring_on_schedule() {
+    let mut game = WormGame::with_size(120, 38);
+    game.cpu_autopilot = false;
+    game.cycles[0].head = (30, 20);
+    game.cycles[0].positions = vec![(30, 20)];
+    game.cycles[0].direction = worm::Direction::Right;
+    game.grid[20][30] = worm::CellType::Player;
+    game.cycles[1].head = (70, 25);
+    game.cycles[1].positions = vec![(70, 25)];
+    game.cycles[1].direction = worm::Direction::Right;
+    game.grid[25][70] = worm::CellType::CPU;
+    game.time = worm::game::SUDDEN_DEATH_START + worm::game::SUDDEN_DEATH_INTERVAL - 1;
+    game.update();
+    assert_eq!(game.shrink_level, 1);
+    assert_eq!(
+        game.grid[3][10],
+        worm::CellType::Wall,
+        "the first inward ring (offset 3) must be sealed"
+    );
+    assert_eq!(game.grid[10][3], worm::CellType::Wall);
+    assert!(!game.game_over, "both snakes were safely inside the ring");
+}
+
+#[test]
+fn test_sudden_death_kills_head_on_closing_ring() {
+    let mut game = WormGame::with_size(120, 38);
+    game.cpu_autopilot = false;
+    game.food_items.clear();
+    // The player steps onto (10,3) the same frame that ring seals.
+    game.cycles[0].head = (10, 4);
+    game.cycles[0].positions = vec![(10, 4)];
+    game.cycles[0].direction = worm::Direction::Up;
+    game.grid[4][10] = worm::CellType::Player;
+    game.cycles[1].head = (70, 25);
+    game.cycles[1].positions = vec![(70, 25)];
+    game.cycles[1].direction = worm::Direction::Right;
+    game.grid[25][70] = worm::CellType::CPU;
+    game.time = worm::game::SUDDEN_DEATH_START + worm::game::SUDDEN_DEATH_INTERVAL - 1;
+    game.update();
+    assert!(game.game_over);
+    assert_eq!(game.winner, Some(1), "the head caught on the closing ring dies");
+    assert!(!game.cycles[0].alive);
+}
+
+#[test]
+fn test_cpu_laser_charges_before_firing() {
+    // The CPU's laser telegraphs for LASER_TELEGRAPH_FRAMES before firing —
+    // it must NOT kill the moment the player crosses the firing line.
+    let mut game = WormGame::with_size(120, 38);
+    game.food_items.clear();
+    // Corridor walls force the CPU straight (ForcedMove) so the setup is
+    // deterministic: CPU chases the player along row 20.
+    for x in 25..=70usize {
+        game.grid[19][x] = worm::CellType::Wall;
+        game.grid[21][x] = worm::CellType::Wall;
+    }
+    game.cycles[1].head = (30, 20);
+    game.cycles[1].positions = vec![(30, 20)];
+    game.cycles[1].direction = worm::Direction::Right;
+    game.cycles[1].held_powerup = Some(worm::game::PowerUpKind::Laser);
+    game.grid[20][30] = worm::CellType::CPU;
+    game.cycles[0].head = (50, 20);
+    game.cycles[0].positions = vec![(50, 20)];
+    game.cycles[0].direction = worm::Direction::Right;
+    game.grid[20][50] = worm::CellType::Player;
+    for _ in 0..(worm::game::LASER_TELEGRAPH_FRAMES - 1) {
+        game.update();
+        assert!(!game.game_over, "the laser must not fire while still charging");
+        assert_eq!(
+            game.cycles[1].held_powerup,
+            Some(worm::game::PowerUpKind::Laser)
+        );
+    }
+    game.update();
+    assert!(game.game_over, "the charged laser fires on the telegraph deadline");
+    assert_eq!(game.winner, Some(1));
+}

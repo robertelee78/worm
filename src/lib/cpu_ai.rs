@@ -799,6 +799,8 @@ pub struct Recalled {
     pub surviving_dir: Direction,
     pub seq: u32,
     pub distance: f32,
+    /// Episode outcome (survival frames + food). 0 = the move died instantly.
+    pub reward: f32,
 }
 
 /// Exact cosine k-NN scan (rps-ai `store.recall`).
@@ -813,6 +815,7 @@ pub fn recall(brain: &CpuBrain, query: &[f32; CPU_FEATURE_DIM], k: usize) -> Vec
                 surviving_dir: e.surviving_dir,
                 seq: e.seq,
                 distance: distance.max(0.0),
+                reward: e.reward,
             }
         })
         .collect();
@@ -1042,7 +1045,10 @@ pub fn aggregate(
             let age = (current_seq as i64 - ep.seq as i64).max(0) as u32;
             let recency = (-((age as f32) / DECAY_TAU)).exp();
             let trail = trailing_match(tail, ep);
-            proximity * recency * (1.0 + MATCH_BONUS * trail)
+            // Crash episodes (reward 0, recorded at death) must not vote FOR
+            // repeating the move that died — only surviving episodes count.
+            let survived = if ep.reward > 0.0 { 1.0 } else { 0.0 };
+            proximity * recency * survived * (1.0 + MATCH_BONUS * trail)
         })
         .collect();
 
@@ -1103,33 +1109,6 @@ fn trailing_match(a: &VecDeque<Direction>, ep: &Recalled) -> f32 {
     let span = a.len().clamp(1, 4);
     let matches = a.iter().filter(|d| **d == ep.surviving_dir).count();
     (matches as f32 / span as f32).min(1.0)
-}
-
-/* ----------------------------- sampling ----------------------------- */
-
-/// Softmax-with-temperature (rps-ai `sampleWithTemperature`).
-pub fn sample_with_temperature(
-    distribution: &[f32; 4],
-    temperature: f32,
-    rng_fn: &mut impl FnMut(f32, f32) -> f32,
-) -> Direction {
-    let safe_temp = temperature.max(0.05);
-    let adjusted: Vec<f32> = distribution
-        .iter()
-        .map(|p| (p.max(0.0)).powf(1.0 / safe_temp))
-        .collect();
-    let total: f32 = adjusted.iter().sum();
-    if total <= 0.0 || !total.is_finite() {
-        return index_dir(rng_fn(0.0, 4.0) as usize);
-    }
-    let mut ticket = rng_fn(0.0, total);
-    for (i, value) in adjusted.iter().enumerate() {
-        ticket -= value;
-        if ticket <= 0.0 {
-            return index_dir(i);
-        }
-    }
-    index_dir(3)
 }
 
 /* --------------------------- move scoring --------------------------- */
@@ -1477,7 +1456,9 @@ fn m_due(tail: &VecDeque<Direction>) -> Option<Direction> {
         last_seen[dir_index(d)] = i;
     }
     let best = (0..4)
-        .min_by_key(|&i| (counts[i], usize::MAX - last_seen[i].min(usize::MAX - 1)))
+        // Tie-break: smaller last_seen = longest unseen, per the doc above.
+        // (The old key inverted this and picked the MOST recently seen.)
+        .min_by_key(|&i| (counts[i], last_seen[i]))
         .unwrap_or(3);
     Some(index_dir(best))
 }
@@ -1595,9 +1576,15 @@ pub fn should_fire(game: &mut WormGame, who: usize) -> bool {
             beam.contains(&(ox, oy))
         }
         crate::game::PowerUpKind::TriShot => {
-            // Player within TRI_SHOT_RANGE cells in any forward direction.
-            let dist = ((hx as i16 - ox as i16).abs() + (hy as i16 - oy as i16).abs()) as u8;
-            dist <= crate::game::TRI_SHOT_RANGE
+            // Player within TRI_SHOT_RANGE cells AND in the forward arc:
+            // bolts travel straight + the two forward diagonals, so a target
+            // behind the head can never be hit — firing there wasted the
+            // power-up every time.
+            let (dx, dy) = game.cycles[who].direction.as_delta();
+            let fdx = ox as i16 - hx as i16;
+            let fdy = oy as i16 - hy as i16;
+            let dist = fdx.abs() + fdy.abs();
+            dist <= crate::game::TRI_SHOT_RANGE as i16 && dx * fdx + dy * fdy > 0
         }
         crate::game::PowerUpKind::Bomb => {
             // Player within bomb blast radius.
@@ -1634,8 +1621,10 @@ fn beam_cells(game: &WormGame, hx: u16, hy: u16, dx: i16, dy: i16) -> Vec<(u16, 
     out
 }
 
-/// Faithful to rps-ai's `think` + `decide`: memory-driven read, confidence-gated,
-/// blended with a base-rate prior, temperature-sampled with 5% explore.
+/// Faithful to rps-ai's `think` + `decide`: memory-driven read,
+/// confidence-gated, blended with a base-rate prior, resolved by
+/// deterministic argmax (the 5% explore lives only in the close-evasion
+/// branch).
 pub fn cpu_decide(game: &mut WormGame) -> Direction {
     game.cpu_predicted_path.clear();
     macro_rules! choose {
@@ -1782,8 +1771,12 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
                 }
             }
             if game.rng_f32(0.0, 1.0) < EXPLORE_RATE {
+                // Draw from the threat-filtered candidates, not raw legal —
+                // exploration must not step onto a bolt path or blast zone
+                // the dodge logic just steered around.
                 choose!(
-                    legal[(game.rng_f32(0.0, legal.len() as f32) as usize).min(legal.len() - 1)],
+                    candidates[(game.rng_f32(0.0, candidates.len() as f32) as usize)
+                        .min(candidates.len() - 1)],
                     CpuDecisionReason::CloseEvasion
                 );
             }
@@ -1846,9 +1839,10 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
         // destination has enough open space to not trap us.
         if let Some((food_dir, food_open)) = bfs_nearest_food_dir(game, cx, cy, candidates) {
             let norm_open = food_open / (game.width as f32 * game.height as f32);
-            // Only take the BFS path if the destination is reasonably open
-            // (at least 10% of arena is reachable from there).
-            if norm_open > 0.10 && food_dir != wall_dir {
+            // Only take the BFS path if the destination clears the same
+            // survival floor every other wall-follow deviation obeys (the
+            // old hard-coded 10% undercut open_floor on both axes).
+            if norm_open >= open_floor && food_dir != wall_dir {
                 choose!(food_dir, CpuDecisionReason::ItemPath);
             }
         }
@@ -2029,7 +2023,13 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
                 let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
                 let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
                 let vote_open = count_open_space(game, nx, ny) / total_cells;
-                if agg.confidence >= SELF_VOTE_MIN_CONFIDENCE
+                // `sampled != wall_dir` matches the convention of the
+                // intercept layers: when the vote merely AGREES with
+                // wall-follow, fall through and label it WallFollow — the
+                // HUD must not credit memory for moves the base policy
+                // produces anyway.
+                if sampled != wall_dir
+                    && agg.confidence >= SELF_VOTE_MIN_CONFIDENCE
                     && vote_open >= wall_open
                     && vote_open >= MEMORY_VOTE_MIN_OPEN
                 {
@@ -2191,6 +2191,52 @@ pub fn record_player_episode(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tri_shot_needs_forward_arc() {
+        let mut game = WormGame::with_size(120, 38);
+        game.cycles[1].head = (30, 20);
+        game.cycles[1].direction = Direction::Right;
+        game.cycles[1].held_powerup = Some(crate::game::PowerUpKind::TriShot);
+        game.cycles[0].head = (25, 20); // behind the firing direction
+        assert!(
+            !should_fire(&mut game, 1),
+            "bolts travel forward — a target behind the head is unhittable"
+        );
+        game.cycles[0].head = (35, 20); // in front
+        assert!(should_fire(&mut game, 1));
+    }
+
+    #[test]
+    fn dead_episodes_do_not_vote() {
+        let brain = CpuBrain::new();
+        let recalled = vec![
+            Recalled {
+                surviving_dir: Direction::Up,
+                seq: 5,
+                distance: 0.05,
+                reward: 0.0,
+            },
+            Recalled {
+                surviving_dir: Direction::Up,
+                seq: 6,
+                distance: 0.05,
+                reward: 0.0,
+            },
+            Recalled {
+                surviving_dir: Direction::Down,
+                seq: 7,
+                distance: 0.05,
+                reward: 4.0,
+            },
+        ];
+        let agg = aggregate(&brain, &recalled, 10, 200, &VecDeque::new());
+        assert!(
+            agg.distribution[dir_index(Direction::Down)]
+                > agg.distribution[dir_index(Direction::Up)],
+            "two instant-death Up episodes must not outvote one surviving Down"
+        );
+    }
 
     #[test]
     fn own_bolts_are_not_threats() {
