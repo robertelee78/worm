@@ -1124,6 +1124,7 @@ impl CpuBrain {
         );
         push_section(&mut sections, SEC_ENSEMBLE, &self.ensemble);
         push_section(&mut sections, SEC_READ_RATE, &self.lifetime_read);
+        push_section(&mut sections, SEC_TURN_PRIOR, &self.opp_brain.turn_tally);
 
         let mut out = BRAIN_MAGIC_V2.to_le_bytes().to_vec();
         out.extend(BRAIN_FORMAT_V2.to_le_bytes());
@@ -1353,6 +1354,10 @@ impl CpuBrain {
                     }
                     Err(_) => report.sections_skipped += 1,
                 },
+                SEC_TURN_PRIOR => match bincode::deserialize::<[f32; TURNS]>(body) {
+                    Ok(t) => brain.opp_brain.turn_tally = t,
+                    Err(_) => report.sections_skipped += 1,
+                },
                 SEC_READ_RATE => match bincode::deserialize::<ReadRate>(body) {
                     Ok(r) => brain.lifetime_read = r,
                     Err(_) => report.sections_skipped += 1,
@@ -1422,6 +1427,13 @@ const SEC_ENSEMBLE: u16 = 5;
 /// Encoding-independent — this is knowledge about the human and must survive
 /// every future feature-space change.
 const SEC_READ_RATE: u16 = 6;
+/// The player's relative-turn habit. Its own section because it is knowledge
+/// about the HUMAN and encoding-independent — and because it was silently NOT
+/// persisted at all: `OppCoreWire` carries seq/tally/prediction counts and
+/// nothing else, so the one statistic that makes a heading-relative habit
+/// learnable was forgotten between sessions. For a game whose premise is "it
+/// remembers you", that is the worst possible thing to drop.
+const SEC_TURN_PRIOR: u16 = 7;
 
 /// One `(vector, direction, reward, seq)` row. The vector is a length-prefixed
 /// `Vec<f32>` rather than a fixed array precisely so a dimension change is a
@@ -2398,12 +2410,30 @@ fn predict_player_positions_iterative(
 
         if blocked {
             // Corner: follow the ensemble's prediction when it leads anywhere
-            // occupiable; otherwise assume the canonical right-hand turn.
+            // occupiable; otherwise fall back to THIS PLAYER'S learned
+            // handedness.
+            //
+            // This used to assume `right_turn` unconditionally — "the
+            // canonical wall-follower turn". Against a player the CPU had just
+            // learned breaks LEFT, every projected corner went the wrong way,
+            // and the intercept layers drove to the wrong side of the board.
+            // The better the read, the harder it committed to the wrong place:
+            // measured, a CPU that remembered the player won 87% where one
+            // that could not learn won 97%. Learning was making it worse, and
+            // this line was why.
             let (pdx, pdy) = predicted_dir.as_delta();
             if open(px + pdx, py + pdy) {
                 pdir = predicted_dir;
             } else {
-                pdir = right_turn(pdir);
+                let prior = game.cpu_brain.opp_brain.turn_prior();
+                let prefer_left = prior[turn_index(Turn::Left)] >= prior[turn_index(Turn::Right)];
+                let (first, second) = if prefer_left {
+                    (left_turn(pdir), right_turn(pdir))
+                } else {
+                    (right_turn(pdir), left_turn(pdir))
+                };
+                let (fdx, fdy) = first.as_delta();
+                pdir = if open(px + fdx, py + fdy) { first } else { second };
             }
         }
 

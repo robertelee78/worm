@@ -1,0 +1,225 @@
+//! Does learning actually make the CPU win MORE?
+//!
+//! The persona suite proves the CPU *reads* a player. That is not the product
+//! claim. The claim is that reading them makes it **beat** them, and a read
+//! that never converts into a win is a statistic, not a game.
+//!
+//! Win rate on its own cannot show this: the CPU beats these scripted
+//! opponents ~90% of the time on survival heuristics alone, so a high number
+//! proves nothing about learning. The only way to isolate the effect is to
+//! hold the opponent, the board and the seeds fixed and vary ONLY whether the
+//! CPU is allowed to remember:
+//!
+//!   COLD — a fresh brain every game. It can never learn you.
+//!   WARM — one brain across all games, exactly as a real session.
+//!
+//! Same seeds, same persona, same everything else. Any difference in the
+//! result is the memory, because nothing else differs.
+//!
+//! Run: `cargo test --test domination -- --nocapture`
+
+use worm::{Direction, WormGame};
+
+struct Rng(u64);
+impl Rng {
+    fn next_f32(&mut self) -> f32 {
+        self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1);
+        ((self.0 >> 33) as f32) / (u32::MAX as f32 / 2.0)
+    }
+}
+
+fn left_of(d: Direction) -> Direction {
+    match d {
+        Direction::Up => Direction::Left,
+        Direction::Left => Direction::Down,
+        Direction::Down => Direction::Right,
+        Direction::Right => Direction::Up,
+    }
+}
+fn right_of(d: Direction) -> Direction {
+    match d {
+        Direction::Up => Direction::Right,
+        Direction::Right => Direction::Down,
+        Direction::Down => Direction::Left,
+        Direction::Left => Direction::Up,
+    }
+}
+
+/// Uses the game's own legality rule — a persona that models the rules
+/// differently from the thing under test measures the disagreement.
+fn can_step(game: &WormGame, d: Direction) -> bool {
+    worm::legal_options_from(game, 0, game.cycles[0].direction).contains(&d)
+}
+
+/// A COMPETENT habitual player.
+///
+/// Survival-aware — it will not drive into a pocket it cannot leave, using the
+/// same flood fill the CPU uses — and it has a habit: it breaks LEFT 85% of the
+/// time when it must turn.
+///
+/// The competence is the point. An earlier version of this test used a player
+/// that only avoided walls, and the CPU beat it 100% of the time WITHOUT
+/// learning anything. You cannot measure "memory helps it win" against an
+/// opponent it already beats every time on survival heuristics alone — the
+/// ceiling hides the entire effect. This opponent has to be good enough that
+/// the CPU needs the read.
+fn habitual(game: &WormGame, rng: &mut Rng) -> Direction {
+    let cur = game.cycles[0].direction;
+    let (l, r) = (left_of(cur), right_of(cur));
+    let own_len = game.cycles[0].positions.len() as f32;
+
+    // Room to keep playing after stepping this way.
+    let survivable = |d: Direction| -> bool {
+        if !can_step(game, d) {
+            return false;
+        }
+        let (dx, dy) = d.as_delta();
+        let nx = (game.cycles[0].head.0 as i16 + dx).max(0) as u16;
+        let ny = (game.cycles[0].head.1 as i16 + dy).max(0) as u16;
+        worm::count_open_space(game, nx, ny) >= own_len * 3.0 + 8.0
+    };
+
+    // Hold the line while that is genuinely safe.
+    if survivable(cur) {
+        return cur;
+    }
+    // Otherwise break — with the habit, but never into a pocket.
+    let (first, second) = if rng.next_f32() < 0.85 { (l, r) } else { (r, l) };
+    for d in [first, second] {
+        if survivable(d) {
+            return d;
+        }
+    }
+    // Cornered: take anything legal rather than driving into a wall.
+    for d in [cur, first, second] {
+        if can_step(game, d) {
+            return d;
+        }
+    }
+    cur
+}
+
+#[derive(Default)]
+struct Record {
+    cpu: u32,
+    player: u32,
+    draw: u32,
+}
+
+impl Record {
+    fn games(&self) -> u32 {
+        (self.cpu + self.player + self.draw).max(1)
+    }
+    fn win_rate(&self) -> f32 {
+        self.cpu as f32 / self.games() as f32
+    }
+}
+
+/// `warm = false` rebuilds the brain every game, so the CPU can never learn.
+fn play(games: u32, seed: u64, warm: bool) -> (Record, f32) {
+    let mut rec = Record::default();
+    let mut game = WormGame::with_size_seed(120, 38, seed);
+    let mut rng = Rng(seed ^ 0xA5A5_1234);
+    let mut lift = 0.0;
+
+    for g in 0..games {
+        if g > 0 {
+            // BOTH arms restart the same way, so both see the same sequence of
+            // boards. Rebuilding the game object for the cold arm would have
+            // replayed the SAME board every round while the warm arm got
+            // varied ones — comparing memory AND board variety at once, which
+            // is how the first version of this test produced a cold arm that
+            // "won" 100%.
+            game.restart();
+            if !warm {
+                // The only difference: wipe what it learned.
+                game.cpu_brain = worm::CpuBrain::new();
+                game.refresh_read_rate();
+            }
+        }
+        let mut frames = 0;
+        while !game.game_over && frames < 4000 {
+            let d = habitual(&game, &mut rng);
+            game.change_direction(d);
+            game.update();
+            frames += 1;
+        }
+        match game.winner {
+            Some(1) => rec.cpu += 1,
+            Some(0) => rec.player += 1,
+            _ => rec.draw += 1,
+        }
+        lift = game.cpu_brain.lifetime_read.lift();
+    }
+    (rec, lift)
+}
+
+/// THE PRODUCT TEST.
+///
+/// If a CPU that remembers you does not beat you more often than one that
+/// cannot, the core objective has not been met — however good the read-rate
+/// numbers look in isolation.
+#[test]
+fn learning_converts_into_winning() {
+    let games = 30;
+    let (cold, cold_lift) = play(games, 20260805, false);
+    let (warm, warm_lift) = play(games, 20260805, true);
+
+    println!(
+        "COLD (cannot learn)  cpu {:>2} player {:>2} draw {:>2}  win {:.0}%  lift {:.0}%",
+        cold.cpu,
+        cold.player,
+        cold.draw,
+        cold.win_rate() * 100.0,
+        cold_lift * 100.0
+    );
+    println!(
+        "WARM (remembers you) cpu {:>2} player {:>2} draw {:>2}  win {:.0}%  lift {:.0}%",
+        warm.cpu,
+        warm.player,
+        warm.draw,
+        warm.win_rate() * 100.0,
+        warm_lift * 100.0
+    );
+
+    assert!(
+        warm_lift > cold_lift,
+        "the warm CPU must actually have learned something the cold one could \
+         not: warm lift {:.2} vs cold {:.2}",
+        warm_lift,
+        cold_lift
+    );
+    assert!(
+        warm.win_rate() >= cold.win_rate(),
+        "remembering the player must never make the CPU WORSE — \
+         warm {:.0}% vs cold {:.0}%",
+        warm.win_rate() * 100.0,
+        cold.win_rate() * 100.0
+    );
+}
+
+/// Domination is the bar, not parity. A CPU that has read a habitual player
+/// and still loses to them a third of the time has not met the objective.
+#[test]
+fn a_learned_habitual_player_is_dominated() {
+    let (rec, lift) = play(40, 4242, true);
+    println!(
+        "WARM vs habitual  cpu {} player {} draw {}  win {:.0}%  lift {:.0}%",
+        rec.cpu,
+        rec.player,
+        rec.draw,
+        rec.win_rate() * 100.0,
+        lift * 100.0
+    );
+
+    assert!(
+        lift > 0.3,
+        "the CPU must genuinely read a habitual player (lift {:.2})",
+        lift
+    );
+    assert!(
+        rec.win_rate() >= 0.75,
+        "a read player must be dominated, not merely beaten — win rate {:.0}%",
+        rec.win_rate() * 100.0
+    );
+}
