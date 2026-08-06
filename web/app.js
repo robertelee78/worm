@@ -4,14 +4,14 @@
 // The ?v= must match BUILD below (and index.html's) — an unversioned glue
 // import could pair a cached old worm.js with a fresh wasm on the next
 // rebuild that changes the bindings.
-import init, { WasmGame } from './pkg/worm.js?v=14';
+import init, { WasmGame } from './pkg/worm.js?v=15';
 import { Sfx } from './audio.js';
 import { computeBoardLayout, VIEWPORT_BLOCK_GUTTER } from './layout.js';
 
 let CELL = 14; // recomputed by applyBoardLayout() to fit the measured stage
 // Bump together with the ?v= in index.html whenever the wasm bundle is
 // rebuilt — it keys the cache-busting query on the .wasm fetch.
-const BUILD = 14;
+const BUILD = 15;
 const MATCH_TARGET = 3;
 const STATE_SCHEMA_VERSION = 2;
 const ROUND_SCHEMA_VERSION = 1;
@@ -194,7 +194,7 @@ async function roundWrite(record) {
 function uploadRound(record) {
   // Fire-and-forget for the game-over moment: sendBeacon survives tab
   // close. Delivery is NOT confirmed here — the ledger is only written by
-  // the confirmed backfill path, and the server dedups (deviceId, id), so
+  // the confirmed backfill path, and ingestion dedups (deviceId, id) offline, so
   // a duplicate costs nothing and a dropped beacon retries next boot.
   try {
     const payload = JSON.stringify(record);
@@ -484,7 +484,9 @@ window.addEventListener('keydown', (e) => {
     game.set_direction(KEYMAP[e.code]);
     e.preventDefault();
   } else if (e.code === 'Space') {
-    game.fire();
+    // Frozen-time laser kills are forbidden in the terminal client for a
+    // reason; the browser now agrees (kimi-k3 #5).
+    if (!paused) game.fire();
     e.preventDefault();
   } else if (e.code === 'KeyR' || e.code === 'Enter') {
     if (game.is_over() && !championVisible()) nextRound();
@@ -505,7 +507,7 @@ document.querySelectorAll('.tbtn[data-dir]').forEach((btn) => {
 });
 document.getElementById('fire-btn').addEventListener('pointerdown', (e) => {
   e.preventDefault();
-  if (!game) return;
+  if (!game || paused) return;
   game.fire();
 });
 // Touch players have no keyboard: without this button a phone/tablet player

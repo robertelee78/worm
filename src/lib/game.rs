@@ -1734,6 +1734,12 @@ impl WormGame {
     }
 
     pub fn change_direction(&mut self, new_dir: Direction) {
+        // Post-mortem turns must not exist: the browser keeps steering for a
+        // beat after a between-frame laser win, and an accepted turn here
+        // would be RECORDED into the finished round's ghost (kimi-k3 #4).
+        if self.game_over {
+            return;
+        }
         // Latch against the direction actually MOVED last tick
         // (prev_direction, snapshotted at the end of every update), not the
         // pending one: two quick inputs between ticks (Up then Left while
@@ -1910,6 +1916,9 @@ impl WormGame {
         self.script = None; // restart() must not consume the incoming script
         self.restart();
         self.script = Some(ReplayScript { events, cursor: 0 });
+        // Structural, not caller-side: a script with autopilot left on would
+        // silently live-steer the CPU and starve the recorded events.
+        self.cpu_autopilot = false;
         // restart() drew its own round seed and spawned food from it; replace
         // both with the recorded stream.
         self.begin_round_replay(Some(seed));

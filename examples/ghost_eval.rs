@@ -21,6 +21,7 @@ struct Round {
     seed: u64,
     w: u16,
     h: u16,
+    winner: Option<usize>,
     events: Vec<(u32, u8, u8)>,
 }
 
@@ -34,15 +35,18 @@ fn parse_round(rec: &serde_json::Value) -> Result<Round, String> {
         .and_then(|s| s.as_str())
         .and_then(|s| s.parse::<u64>().ok())
         .ok_or("bad seed (must be a decimal string)")?;
-    let w = replay.get("w").and_then(|v| v.as_u64()).ok_or("bad w")? as u16;
-    let h = replay.get("h").and_then(|v| v.as_u64()).ok_or("bad h")? as u16;
-    let frames = replay
+    // Range-check the u64 BEFORE narrowing: a truncating cast first let
+    // w=65547 wrap to 11 and walk through the domain check (kimi-k3 #3).
+    let w64 = replay.get("w").and_then(|v| v.as_u64()).ok_or("bad w")?;
+    let h64 = replay.get("h").and_then(|v| v.as_u64()).ok_or("bad h")?;
+    let frames64 = replay
         .get("frames")
         .and_then(|v| v.as_u64())
-        .ok_or("bad frames")? as u32;
-    if !(10..=400).contains(&w) || !(10..=400).contains(&h) || frames > 100_000 {
+        .ok_or("bad frames")?;
+    if !(10..=400).contains(&w64) || !(10..=400).contains(&h64) || frames64 > 100_000 {
         return Err("dimensions/frames out of range".into());
     }
+    let (w, h, frames) = (w64 as u16, h64 as u16, frames64 as u32);
     let mut events = Vec::new();
     let mut last_frame = 0u32;
     for ev in replay
@@ -54,14 +58,14 @@ fn parse_round(rec: &serde_json::Value) -> Result<Round, String> {
         if t.len() != 3 {
             return Err("event arity != 3".into());
         }
-        let f = t[0].as_u64().ok_or("bad event frame")? as u32;
-        let k = t[1].as_u64().ok_or("bad event kind")? as u8;
-        let v = t[2].as_u64().ok_or("bad event value")? as u8;
-        if k > 3 || v > 3 || f > frames + 1 || f < last_frame {
+        let f64v = t[0].as_u64().ok_or("bad event frame")?;
+        let k64 = t[1].as_u64().ok_or("bad event kind")?;
+        let v64 = t[2].as_u64().ok_or("bad event value")?;
+        if k64 > 3 || v64 > 3 || f64v > frames64 + 1 || (f64v as u32) < last_frame {
             return Err("event out of domain or non-monotonic".into());
         }
-        last_frame = f;
-        events.push((f, k, v));
+        last_frame = f64v as u32;
+        events.push((f64v as u32, k64 as u8, v64 as u8));
     }
     Ok(Round {
         ended_at: rec.get("endedAt").and_then(|v| v.as_u64()).unwrap_or(0),
@@ -74,6 +78,7 @@ fn parse_round(rec: &serde_json::Value) -> Result<Round, String> {
         seed,
         w,
         h,
+        winner: rec.get("winner").and_then(|v| v.as_u64()).map(|w| w as usize),
         events,
     })
 }
@@ -130,10 +135,19 @@ fn main() {
 
     for (i, r) in rounds.iter().enumerate() {
         game.start_recorded_round(r.seed, r.w, r.h, r.events.clone());
-        while !game.game_over && game.frame_count < r.frames {
+        // <= frames: an event stamped == frames is a between-frame input
+        // after the last completed frame (the classic fatal player laser) —
+        // update #frames+1's pump is what consumes it. A diverged survivor
+        // still exits one frame later and flags (kimi-k3 #1).
+        while !game.game_over && game.frame_count <= r.frames {
             game.update();
         }
-        let complete = game.frame_count == r.frames
+        // Completeness = every event consumed AND the recorded outcome
+        // reproduced. With an internet-open collector, replay-vs-record
+        // consistency is the only fabrication alarm there is (kimi-k3 #2).
+        let complete = game.game_over
+            && game.frame_count == r.frames
+            && game.winner == r.winner
             && game
                 .script
                 .as_ref()

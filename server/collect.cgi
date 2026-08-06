@@ -36,17 +36,33 @@ def valid(rec) -> bool:
     if not (isinstance(replay, dict) and replay.get("v") == 2):
         return False
     seed = replay.get("seed")
-    if not (isinstance(seed, str) and seed.isdigit() and len(seed) <= 20):
+    if not (isinstance(seed, str) and seed.isascii() and seed.isdigit()
+            and 0 < len(seed) <= 20 and int(seed) <= 0xFFFFFFFFFFFFFFFF):
+        return False
+    # Mirror the evaluator's domain checks server-side so garbage never
+    # lands on disk (kimi-k3 #6): board bounds, frame cap, event
+    # monotonicity within the frame budget.
+    w, h = replay.get("w"), replay.get("h")
+    frames = replay.get("frames")
+    if not (isinstance(w, int) and 10 <= w <= 400
+            and isinstance(h, int) and 10 <= h <= 400
+            and isinstance(frames, int) and 0 <= frames <= 100000):
         return False
     ev = replay.get("ev")
     if not isinstance(ev, list) or len(ev) > 20000:
         return False
+    last = 0
     for item in ev:
         if not (isinstance(item, list) and len(item) == 3
                 and all(isinstance(x, int) and 0 <= x for x in item)
-                and item[1] <= 3 and item[2] <= 3):
+                and item[1] <= 3 and item[2] <= 3
+                and item[0] <= frames + 1 and item[0] >= last):
             return False
+        last = item[0]
     return True
+
+
+MAX_DAY_BYTES = 64 * 1024 * 1024  # disk-fill guard on a public endpoint
 
 
 def main() -> None:
@@ -67,6 +83,12 @@ def main() -> None:
         return respond("400 Bad Request")
     os.makedirs(OUT_DIR, exist_ok=True)
     day = datetime.datetime.utcnow().strftime("%Y%m%d")
+    path_today = os.path.join(OUT_DIR, f"{day}.jsonl")
+    try:
+        if os.path.getsize(path_today) > MAX_DAY_BYTES:
+            return respond("429 Too Many Requests")
+    except OSError:
+        pass
     # O_APPEND single-write: records are far below PIPE_BUF*16; a whole json
     # line per write keeps concurrent CGI appends unsheared in practice.
     with open(os.path.join(OUT_DIR, f"{day}.jsonl"), "a") as f:

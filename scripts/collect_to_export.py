@@ -7,9 +7,8 @@
 Dedups by round id (uploads are at-least-once), groups by deviceId, sorts
 each player's rounds oldest-first, and writes data/players/<id8>.json in
 the exact shape the browser's EXPORT MY ROUNDS produces — so ghost_eval
-consumes real visitors and hand-exports identically. ghost_eval reverses
-its input (browser exports are newest-first), so rounds are written
-newest-first here too.
+consumes real visitors and hand-exports identically (it sorts rounds
+(endedAt, id) ascending itself, so on-disk order is cosmetic).
 """
 import glob
 import hashlib
