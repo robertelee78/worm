@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "description": "Governance posture for MCP execution in this repo (metaharness threat-model contract). Default-deny: tools get only what .claude/settings.json permissions explicitly allow; nothing in this policy grants shell, network, or file-write to MCP servers.",
+  "defaultDeny": true,
+  "auditLog": true,
+  "allowShell": false,
+  "allowNetwork": false,
+  "allowFileWrite": false,
+  "requireApprovalForDangerous": true,
+  "toolTimeoutMs": 120000,
+  "maxToolCallsPerTurn": 200
+}

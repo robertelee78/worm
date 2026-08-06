@@ -1,0 +1,111 @@
+{
+  "schemaVersion": "ruflo.flywheel-anchor/v1",
+  "version": "worm-anchor-v1",
+  "tasks": [
+    {
+      "id": "t01",
+      "q": "what happened when we mixed the ensemble into a vote",
+      "labels": [
+        "worm-rej-mixed-vote"
+      ]
+    },
+    {
+      "id": "t02",
+      "q": "why not use an observed-frame clock for episode retention",
+      "labels": [
+        "worm-rej-honest-clock"
+      ]
+    },
+    {
+      "id": "t03",
+      "q": "turn prior gating on genuine choices",
+      "labels": [
+        "worm-rej-choice-gate"
+      ]
+    },
+    {
+      "id": "t04",
+      "q": "ranked powerup pickup refusal laser famine",
+      "labels": [
+        "worm-rej-pickup-ranking"
+      ]
+    },
+    {
+      "id": "t05",
+      "q": "kind-gated BFS food targeting result",
+      "labels": [
+        "worm-rej-kindgated-bfs"
+      ]
+    },
+    {
+      "id": "t06",
+      "q": "chasing food that ties the race",
+      "labels": [
+        "worm-rej-tie-race"
+      ]
+    },
+    {
+      "id": "t07",
+      "q": "inferring intent targets from trajectory",
+      "labels": [
+        "worm-rej-trajectory-target"
+      ]
+    },
+    {
+      "id": "t08",
+      "q": "scoring models only on discordant frames McNemar",
+      "labels": [
+        "worm-rej-mcnemar-gate"
+      ]
+    },
+    {
+      "id": "t09",
+      "q": "when may tail-aware reachability relax the survival floor",
+      "labels": [
+        "worm-inv-tailaware-relax"
+      ]
+    },
+    {
+      "id": "t10",
+      "q": "model has no prediction on a free frame what happens",
+      "labels": [
+        "worm-inv-abstention"
+      ]
+    },
+    {
+      "id": "t11",
+      "q": "corridor pin cold start protection",
+      "labels": [
+        "worm-inv-coldstart-guards"
+      ]
+    },
+    {
+      "id": "t12",
+      "q": "mine fuse expires does it explode",
+      "labels": [
+        "worm-inv-mine-fizzle"
+      ]
+    },
+    {
+      "id": "t13",
+      "q": "hold the line versus weave travelling style election",
+      "labels": [
+        "worm-inv-twin-election"
+      ]
+    },
+    {
+      "id": "t14",
+      "q": "unexplained deaths policy",
+      "labels": [
+        "worm-inv-death-explains"
+      ]
+    },
+    {
+      "id": "t15",
+      "q": "smart retrieval RRF MMR returns nothing plain cosine works",
+      "labels": [
+        "worm-recall-smart-broken"
+      ]
+    }
+  ]
+}
