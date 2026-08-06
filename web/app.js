@@ -4,14 +4,14 @@
 // The ?v= must match BUILD below (and index.html's) — an unversioned glue
 // import could pair a cached old worm.js with a fresh wasm on the next
 // rebuild that changes the bindings.
-import init, { WasmGame } from './pkg/worm.js?v=11';
+import init, { WasmGame } from './pkg/worm.js?v=12';
 import { Sfx } from './audio.js';
 import { computeBoardLayout, VIEWPORT_BLOCK_GUTTER } from './layout.js';
 
 let CELL = 14; // recomputed by applyBoardLayout() to fit the measured stage
 // Bump together with the ?v= in index.html whenever the wasm bundle is
 // rebuilt — it keys the cache-busting query on the .wasm fetch.
-const BUILD = 11;
+const BUILD = 12;
 const MATCH_TARGET = 3;
 const STATE_SCHEMA_VERSION = 2;
 const ROUND_SCHEMA_VERSION = 1;
@@ -204,6 +204,8 @@ async function backfillUploads() {
     let dirty = false;
     for (const record of rounds) {
       if (sent.has(record.id)) continue;
+      // Pre-ghost records have no replay — nothing evaluable to collect.
+      if (!record.replay) { sent.add(record.id); dirty = true; continue; }
       if (uploadRound(record)) { sent.add(record.id); dirty = true; }
     }
     if (dirty) {
@@ -411,6 +413,14 @@ function showFatal(message) {
     if (mid) mid.textContent = `ERROR: ${message}`;
     setBrainStatus(`boot failed: ${message}`);
   } catch { /* the DOM itself is broken — nothing left to do */ }
+  // A phone has no console and a friend won't file a bug: the page reports
+  // its own death (error text + build + user agent, nothing else).
+  try {
+    navigator.sendBeacon?.('/errors', new Blob([JSON.stringify({
+      v: 1, build: BUILD, error: String(message).slice(0, 500),
+      ua: navigator.userAgent.slice(0, 200), at: Date.now(),
+    })], { type: 'application/json' }));
+  } catch { /* reporting is best-effort */ }
 }
 window.addEventListener('error', (e) => showFatal(e.message || 'script error'));
 window.addEventListener('unhandledrejection', (e) =>
@@ -1005,13 +1015,20 @@ function renderHistory() {
   const aggregateHits = roundHistory.reduce((sum, record) => sum + record.accuracy.hits, 0);
   const aggregateSamples = roundHistory.reduce((sum, record) => sum + record.accuracy.samples, 0);
   const cpuWins = roundHistory.filter((record) => record.winner === 1).length;
-  const modelTotals = MODEL_NAMES.map((key, index) => roundHistory.reduce(
-    (total, record) => {
-      const model = record.models[index];
-      return { key, name: model.name, hits: total.hits + model.hits, samples: total.samples + model.samples };
-    },
-    { hits: 0, samples: 0 },
-  ));
+  // Aggregate BY KEY, never by index: the model roster has changed size
+  // across builds (7 -> 10 -> 13), and saved history spans every era. An
+  // index walk crashed the whole boot for returning visitors ('reading
+  // name' on undefined past a legacy record's end) and silently
+  // misattributed stats even when it didn't. A record simply doesn't vote
+  // for models it never knew about.
+  const modelTotals = MODEL_NAMES.map((key, index) => {
+    let hits = 0, samples = 0;
+    for (const record of roundHistory) {
+      const model = (record.models || []).find((m) => m && m.key === key);
+      if (model) { hits += model.hits || 0; samples += model.samples || 0; }
+    }
+    return { key, name: MODEL_INFO[index]?.name || key, hits, samples };
+  });
   const strongest = modelTotals
     .filter((model) => model.samples > 0)
     .sort((a, b) => (b.hits / b.samples) - (a.hits / a.samples))[0];
