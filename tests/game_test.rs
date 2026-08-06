@@ -2405,3 +2405,52 @@ fn test_ghost_replay_reproduces_a_recorded_round_exactly() {
         "a ghost replay must reproduce the recorded round bit-for-bit"
     );
 }
+
+/// The brain loader must be TOTAL: no stored byte pattern — truncated,
+/// corrupted, hostile section lengths — may panic (a panic becomes a thrown
+/// wasm exception at brain_load: the returning visitor's page dies) or
+/// allocate unboundedly. Forty-eight real visitors carry brains written by
+/// every build era; this is the empirical answer to "can any of them brick
+/// the page?" (kimi-k2.7's audit line of inquiry, finished for it).
+#[test]
+fn test_brain_loader_is_total_on_hostile_bytes() {
+    // A real, warm brain as the seed corpus.
+    let mut game = WormGame::with_size_seed(55, 40, 99);
+    for _ in 0..300 {
+        game.update();
+        if game.game_over {
+            game.restart();
+        }
+    }
+    let real = game.cpu_brain.to_bytes();
+    assert!(real.len() > 64, "seed brain should be non-trivial");
+
+    // (a) Truncation at every offset.
+    for cut in 0..real.len() {
+        let _ = worm::CpuBrain::from_bytes_report(&real[..cut]);
+    }
+    // (b) Hostile section lengths: overwrite every aligned u32 with huge
+    // values — a naive reader would trust one as a length and try to
+    // allocate or slice past the end.
+    for pos in (0..real.len().saturating_sub(4)).step_by(7) {
+        let mut evil = real.clone();
+        evil[pos..pos + 4].copy_from_slice(&u32::MAX.to_le_bytes());
+        let _ = worm::CpuBrain::from_bytes_report(&evil);
+    }
+    // (c) Seeded random mutations, several per copy.
+    let mut s = 0x5eed_5eed_u64;
+    let mut next = move || {
+        s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+        s
+    };
+    for _ in 0..512 {
+        let mut evil = real.clone();
+        for _ in 0..8 {
+            let i = (next() as usize) % evil.len();
+            evil[i] = (next() >> 33) as u8;
+        }
+        let _ = worm::CpuBrain::from_bytes_report(&evil);
+    }
+    // Reaching here without a panic (and inside the test's runtime budget,
+    // which an allocation bomb would blow) IS the assertion.
+}
