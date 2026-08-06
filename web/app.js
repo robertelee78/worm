@@ -8,7 +8,7 @@ import { computeBoardLayout, VIEWPORT_BLOCK_GUTTER } from './layout.js';
 let CELL = 14; // recomputed by applyBoardLayout() to fit the measured stage
 // Bump together with the ?v= in index.html whenever the wasm bundle is
 // rebuilt — it keys the cache-busting query on the .wasm fetch.
-const BUILD = 4;
+const BUILD = 5;
 const MATCH_TARGET = 3;
 const STATE_SCHEMA_VERSION = 2;
 const ROUND_SCHEMA_VERSION = 1;
@@ -462,7 +462,13 @@ function loop(now) {
   }
   let delay = Number(game.frame_delay_ms());
   let steps = 0;
-  while (acc >= delay && steps < 8) {
+  // At most TWO game-steps per painted frame. The old cap of 8 meant a
+  // phone hitch (GC, audio, tab switch) could resolve most of a second of
+  // gameplay between two paints — you could die in a configuration that
+  // never appeared on screen, which play-tested as "killed by a tail that
+  // didn't actually happen". Excess banked time is dropped below: game time
+  // briefly slows instead of teleporting, and what renders is what happened.
+  while (acc >= delay && steps < 2) {
     if (!game.is_over()) {
       game.update();
       playSfx();
@@ -470,6 +476,7 @@ function loop(now) {
     acc -= delay;
     steps++;
     delay = Number(game.frame_delay_ms());
+    if (steps === 2) acc = Math.min(acc, delay); // drop the backlog, don't teleport
     if (game.is_over() && !overHandled) {
       try {
         onGameOver();

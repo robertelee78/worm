@@ -282,6 +282,7 @@ fn test_bomb_never_kills_its_planter() {
     // Force the fuse to detonate next tick while the player is still inside
     // the Chebyshev blast radius (distance 0 — right on top of it).
     game.bombs[0].fuse = 1;
+    game.bombs[0].tripped = true; // forced: only a tripped mine detonates
     game.tick_bombs();
     assert!(game.cycles[0].alive, "planter must survive its own bomb");
     assert!(!game.game_over, "own-bomb blast must not end the game");
@@ -322,6 +323,7 @@ fn test_laser_detonating_own_bomb_does_not_self_kill() {
         disguise: 5,
         armed_in: 0,
         owner: 0,
+        tripped: false,
     });
     game.cycles[0].held_powerup = Some(worm::game::PowerUpKind::Laser);
 
@@ -965,6 +967,7 @@ fn test_death_cause_wall_vs_bomb() {
         disguise: 5,
         armed_in: 0,
         owner: 1,
+        tripped: true, // forced: only a tripped mine detonates
     });
     game.tick_bombs();
     assert!(game.game_over);
@@ -1115,6 +1118,7 @@ fn test_bomb_blast_trims_positions_with_grid() {
         disguise: 5,
         armed_in: 0,
         owner: 1,
+        tripped: true, // forced: only a tripped mine detonates
     });
     game.tick_bombs();
     assert!(
@@ -1201,6 +1205,7 @@ fn test_bomb_blast_breaks_arena_wall_not_frame() {
         disguise: 5,
         armed_in: 0,
         owner: 0,
+        tripped: true, // forced: only a tripped mine detonates
     });
     game.tick_bombs();
     assert_eq!(
@@ -1239,6 +1244,7 @@ fn test_laser_triggered_bomb_kills_its_owner() {
         disguise: 5,
         armed_in: 0,
         owner: 1, // the CPU planted it
+        tripped: false,
     });
     assert!(game.fire_powerup(0));
     assert!(game.game_over);
@@ -1693,6 +1699,7 @@ fn test_mine_is_inert_while_arming() {
         disguise: 5,
         armed_in: worm::game::MINE_ARM_FRAMES,
         owner: 1,
+        tripped: false,
     });
 
     game.tick_bombs();
@@ -1715,6 +1722,7 @@ fn test_armed_mine_fires_when_an_enemy_head_enters_the_ring() {
         disguise: 5,
         armed_in: 0,
         owner: 1,
+        tripped: false,
     });
 
     game.tick_bombs();
@@ -1735,6 +1743,7 @@ fn test_walking_onto_your_own_mine_detonates_it_without_killing_you() {
         disguise: 5,
         armed_in: 0,
         owner: 1,
+        tripped: false,
     });
 
     game.tick_bombs();
@@ -1790,6 +1799,7 @@ fn test_mine_blast_still_breaches_the_arena_wall() {
         disguise: 5,
         armed_in: 0,
         owner: 1,
+        tripped: true, // forced: only a tripped mine detonates
     });
 
     game.tick_bombs();
@@ -2043,4 +2053,42 @@ fn test_intent_twins_disagree_only_on_ties() {
     let (pending, _, _, _) = worm::cpu_ai::compute_ensemble(&game, &game.cpu_brain);
     assert_eq!(pending[7], None, "no errand, no guess");
     assert_eq!(pending[10], None, "no errand, no guess (weave)");
+}
+
+/// An expired fuse must FIZZLE, never detonate. For months the "backstop"
+/// fuse — whose documented job is stopping stale mines accumulating —
+/// spontaneously fired a 10-cell kill cross on a timer the player cannot
+/// see, attached to a thing drawn as food. Play-tested verdict: "randomly
+/// killed by bomb blasts that didn't actually happen".
+#[test]
+fn test_expired_mine_fizzles_instead_of_detonating() {
+    let mut game = mine_board();
+    // Player parked ON the blast axis, well outside the trigger ring but
+    // deep inside where the old cross arms reached.
+    game.cycles[0].head = (66, 20);
+    game.cycles[0].positions = vec![(66, 20)];
+    game.grid[20][66] = worm::CellType::Player;
+    game.bombs.push(worm::game::Bomb {
+        x: 60,
+        y: 20,
+        fuse: 1,
+        disguise: 5,
+        armed_in: 0,
+        owner: 1,
+        tripped: false,
+    });
+
+    game.tick_bombs();
+
+    assert!(game.bombs.is_empty(), "the stale mine is cleaned up");
+    assert!(
+        game.cycles[0].alive,
+        "an untripped expiry must never kill anyone"
+    );
+    assert!(!game.game_over);
+    assert_ne!(
+        game.grid[20][62],
+        worm::CellType::Hole,
+        "no blast: a fizzle must not punch walls or clear cells"
+    );
 }

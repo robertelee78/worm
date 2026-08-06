@@ -3043,7 +3043,6 @@ fn cell_threatened_by_projectile(game: &WormGame, x: u16, y: u16) -> bool {
 /// around a 441-cell region one step at a time, but "don't step in the ring"
 /// needs no pathfinding at all.
 fn cell_threatened_by_bomb(game: &WormGame, x: u16, y: u16, frames_ahead: u8) -> bool {
-    let arm = crate::game::BOMB_RADIUS_CELLS as i32;
     let trigger = crate::game::MINE_TRIGGER_CELLS as i32;
     for b in &game.bombs {
         // Our own mines cannot kill us — detonate() excludes the owner — so
@@ -3067,15 +3066,10 @@ fn cell_threatened_by_bomb(game: &WormGame, x: u16, y: u16, frames_ahead: u8) ->
         {
             return true;
         }
-        // Failsafe fuse: if it times out on its own, anything left inside the
-        // cross dies. Escapability, as before.
-        if crate::game::in_blast(b.x as i32, b.y as i32, x as i32, y as i32, arm) {
-            let moves_to_clear = (arm + 1 - cheb).max(1) as u32;
-            let frames_left = b.fuse.saturating_sub(frames_ahead as u32);
-            if moves_to_clear > frames_left {
-                return true;
-            }
-        }
+        // A fuse that runs out FIZZLES (tick_bombs) — an untripped mine's
+        // cross arms are never dangerous on their own, so the old
+        // failsafe-escape clause here modelled a detonation that no longer
+        // happens. Only the trigger ring (live or about to arm) threatens.
     }
     false
 }
@@ -5048,6 +5042,7 @@ mod tests {
             armed_in: 0,
             disguise: 5,
             owner: 0,
+            tripped: false,
         });
 
         assert!(
@@ -5078,6 +5073,7 @@ mod tests {
             armed_in: crate::game::MINE_ARM_FRAMES,
             disguise: 5,
             owner: 0,
+            tripped: false,
         });
         assert!(
             !cell_threatened_by_bomb(&game, 60, 20, 0),
@@ -5103,6 +5099,7 @@ mod tests {
             armed_in: 0,
             disguise: 5,
             owner: 1,
+            tripped: false,
         });
         assert!(!cell_threatened_by_bomb(&game, 60, 20, 0));
     }
@@ -5524,6 +5521,7 @@ mod tests {
             disguise: 5,
             armed_in: 0,
             owner: 0,
+            tripped: false,
         });
         assert!(
             !free_step(&game, hx, hy, Direction::Right),
@@ -5570,6 +5568,7 @@ mod tests {
             disguise: 5,
             armed_in: 0,
             owner: 1,
+            tripped: false,
         });
         assert!(
             !cell_threatened_by_bomb(&game, hx, hy, 3),
@@ -5583,6 +5582,7 @@ mod tests {
             disguise: 5,
             armed_in: 0,
             owner: 0,
+            tripped: false,
         });
         assert!(
             cell_threatened_by_bomb(&game, hx, hy, 3),

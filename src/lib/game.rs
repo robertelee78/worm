@@ -107,6 +107,14 @@ pub struct Bomb {
     /// real dash-through window.
     pub armed_in: u32,
     pub owner: u8,
+    /// True once the proximity ring (or a chain blast) has set this mine off.
+    /// ONLY a tripped mine detonates. A fuse that simply runs out FIZZLES —
+    /// quiet removal, no blast — because the fuse's documented job is
+    /// stopping stale mines accumulating, and for months it detonated
+    /// instead: a spontaneous 10-cell kill cross, on a timer the player
+    /// cannot see, attached to a thing drawn as food. Play-tested verdict:
+    /// "randomly killed by bomb blasts that didn't actually happen".
+    pub tripped: bool,
 }
 
 /// Reach of each blast arm. Unchanged from the old square's radius — a cross
@@ -342,7 +350,10 @@ impl DeathCause {
             DeathCause::OwnTrail => "hit own trail",
             DeathCause::EnemyTrail => "hit enemy trail",
             DeathCause::HeadOn => "head-on collision",
-            DeathCause::BombBlast => "bomb blast",
+            // Names the mechanic, because the victim never saw a bomb: the
+            // thing that exploded was drawn as food from the moment it was
+            // planted. An unexplained death reads as a cheat (ADR-003).
+            DeathCause::BombBlast => "blown up by a mine disguised as food",
             DeathCause::Laser => "laser beam",
             DeathCause::TriShotBolt => "tri-shot bolt",
         }
@@ -1819,6 +1830,7 @@ impl WormGame {
                     armed_in: MINE_ARM_FRAMES,
                     disguise,
                     owner: who as u8,
+                    tripped: false,
                 });
                 self.add_impact_particles(hx, hy, (255, 120, 40));
                 // Two-beat "thud" — audible countdown cue without blocking.
@@ -1965,6 +1977,31 @@ impl WormGame {
             b.armed_in = b.armed_in.saturating_sub(1);
             b.fuse = b.fuse.saturating_sub(1);
         }
+        // A fuse that runs out FIZZLES. The fuse's only job is to stop stale
+        // mines accumulating over a long round (see the field doc) — it must
+        // never be a weapon: an attentive player can track every plant they
+        // saw, but nobody can track an invisible timer. A tripped mine keeps
+        // its fuse==0 for the drain below and is exempt here.
+        let mut fizzled: Vec<(u16, u16)> = Vec::new();
+        self.bombs.retain(|b| {
+            let expired = b.fuse == 0 && !b.tripped;
+            if expired {
+                fizzled.push((b.x, b.y));
+            }
+            !expired
+        });
+        for (x, y) in fizzled {
+            // A visible little puff, so the disappearing "food" reads as the
+            // dud it was rather than a glitch.
+            self.particles.push(Particle {
+                x: x as f32,
+                y: y as f32,
+                vx: 0.0,
+                vy: 0.0,
+                lifetime: 8,
+                color: (120, 120, 120),
+            });
+        }
         // PROXIMITY. An armed mine fires the instant a head that is not its
         // planter's enters the trigger ring.
         //
@@ -1991,6 +2028,7 @@ impl WormGame {
                         <= t
             });
             if tripped {
+                self.bombs[i].tripped = true;
                 self.bombs[i].fuse = 0;
             }
         }
@@ -2057,6 +2095,7 @@ impl WormGame {
                 // Chain: other armed bombs caught in the blast go off too.
                 for b in &mut self.bombs {
                     if b.x == ux && b.y == uy {
+                        b.tripped = true;
                         b.fuse = 0;
                     }
                 }
