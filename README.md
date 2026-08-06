@@ -34,13 +34,13 @@ nothing:
 Latest measured:
 
 ```
-compass  (POSITIVE)   n=5230    read 99.7%  chance 34.1%  z= +100.1
-coinflip (NULL)       n=9930    read 34.7%  chance 34.8%  z=   -0.3
-lefty    (ACCEPTANCE) n=127     read 81.1%  chance 50.0%  z=   +7.0
+compass  (POSITIVE)   n=10052   read 95.3%  chance 34.3%  z= +128.9
+coinflip (NULL)       n=15292   read 34.8%  chance 35.0%  z=   -0.5
+lefty    (ACCEPTANCE) n=144     read 74.3%  chance 50.0%  z=   +5.8
 ```
 
 The null control is what makes the other two rows evidence: the same CPU that
-reads `lefty` at 81% remains unable to read an opponent with no habit, so the
+reads `lefty` at 74% remains unable to read an opponent with no habit, so the
 suite is not leaking the answer into the forecast.
 
 ## Learning, and then winning
@@ -50,47 +50,46 @@ The claim is not that the CPU predicts you — it is that predicting you makes i
 fixed and varies only whether the CPU may remember:
 
 ```
-COLD (cannot learn)   cpu 28 player 2 draw 0   win  93%
-WARM (remembers you)  cpu 29 player 1 draw 0   win  97%   lift 79%
+COLD (cannot learn)   cpu 26 player 4 draw 0   win  87%
+WARM (remembers you)  cpu 30 player 0 draw 0   win 100%   lift 86%
 ```
 
-(The pre-engagement-gates build measured the project's first zero-death
-sweep — COLD 30-0, WARM 30-0, lift 83% — before three deaths were traded
-deliberately for a measured ~5-point win-rate and engagement gain on the
-browser board; [ADR-012](docs/adrs/012-two-swarm-findings-implemented.md)
-records the trade.)
+An undefeated warm arm against a beaten cold one is the whole product in
+two rows: the only difference between them is memory.
+[ADR-012](docs/adrs/012-two-swarm-findings-implemented.md) and
+[ADR-014](docs/adrs/014-the-codex-corrections.md) record the trades and
+reverts behind these numbers, including the changes that measured worse
+and were rolled back.
 
 That test was failing until recently, with the *warm* CPU winning less — see
 [ADR-009](docs/adrs/009-learning-must-convert-into-winning.md) for the two
 defects that caused it and the two flaws in the experiment itself.
 
 
-A read is only worth something if it reaches the wheel. Against `lefty`, over
-40 games with one persistent brain:
-
-```
-read_rate:  0.569 → 0.676 → 0.760 → 0.779 → 0.788 → 0.804
-tier:            3      4      4      4      4      4
-record:     CPU 37 · player 3
-```
-
-`read_rate` is **lift over the player's own base rate**, and it drives how much
+A read is only worth something if it reaches the wheel. `read_rate` is
+**lift over the player's own base rate** (scaled by which temperament is
+winning — see the Exp3 portfolio in the code), and it drives how much
 survival margin the CPU will spend on an intercept. Confidence buys
-*commitment*, never safety: the survival floor is untouched at every read rate,
-and the dodge, ring-evacuation and wall-follow layers never consult the hunt
-floor. A well-read player faces a CPU that takes intercepts it would otherwise
-decline. They never face one that suicides. See
+*commitment*, never safety: the survival floor is untouched at every read
+rate, and the dodge, ring-evacuation and wall-follow layers never consult
+the hunt floor. A well-read player faces a CPU that takes intercepts it
+would otherwise decline. They never face one that suicides. See
 [ADR-007](docs/adrs/007-difficulty-earned-by-reading-you.md).
 
-### Where it plateaus, and why
+### Where the habit models plateau, and what took over
 
-`read_rate` settles near 0.80 rather than climbing indefinitely. That is the
-model reaching the limit of what its features can express: it holds a single
-global turn prior, so it learns *"this player breaks left"* but not *"this
-player breaks left when the wall is three cells away and the CPU is behind
-them"*. The remaining headroom is richer features, not more data — the corpus
-is full by round three. Compensating with a difficulty multiplier would just
-restore the arbitrary clock ramp ADR-007 deleted.
+The habit family alone settles around 0.80 lift: a single global turn
+prior learns *"this player breaks left"* but not *"…when the wall is three
+cells away"*. The headroom turned out to be **why** the player moves, not
+finer habit features: the ensemble now carries six errand models —
+{food, hunt, weapon} × {holds-their-line, weaves} — each a BFS route step
+toward an observed goal, elected by the same fixed-share weights as
+everything else. Against a committed forager persona the voluntary-turn
+read went from 6% (habit models only) to ~76-85%
+([ADR-012](docs/adrs/012-two-swarm-findings-implemented.md),
+[ADR-014](docs/adrs/014-the-codex-corrections.md)). Compensating with a
+difficulty multiplier would just restore the arbitrary clock ramp ADR-007
+deleted.
 
 ## The metric, and why the obvious version is wrong
 
@@ -128,10 +127,11 @@ with `WORM_BRAIN`).
 **Browser**
 
 ```bash
-wasm-pack build --target web --features wasm
-cp pkg/worm.js pkg/worm.d.ts pkg/worm_bg.wasm pkg/worm_bg.wasm.d.ts web/pkg/
+wasm-pack build --target web --out-dir web/pkg --features wasm
 # Deployed: https://worm.robertgpt.ai (Apache, DocumentRoot symlinked to
-# web/ — a `wasm-pack build` into web/pkg goes live immediately).
+# web/ — the build above goes live immediately). After a rebuild, bump the
+# cache-bust version in THREE places: index.html's app.js?v=, and app.js's
+# BUILD const + pkg/worm.js?v= import.
 # Local dev without Apache:
 python3 scripts/serve.py 8080   # no-store headers, so rebuilds never serve stale
 ```
@@ -144,15 +144,25 @@ that mattered.
 ## Development
 
 ```bash
+scripts/eval.sh                                       # THE GAUNTLET — run before every merge
 cargo test                                            # unit + integration
 cargo test --test persona_learning -- --nocapture     # the claim, ~45s
-cargo test -- --include-ignored                       # including the acceptance test
+cargo run --release --example engagement_probe -- browser   # engagement + death census
+cargo run --release --example intent_probe -- 24 1500 20260805  # errand-model reads
+node scripts/page_probe.mjs                           # the SERVED page, headless (needs playwright)
 cargo bench --bench cpu_ai_bench                      # CPU benchmarks
 ```
 
+The gauntlet is the improvement flywheel
+([ADR-013](docs/adrs/013-the-improvement-flywheel.md)): champion = `main`,
+candidates prove themselves against the fixed seeds, and the measured
+numbers go in the commit message — the receipts are the ledger.
+
 Layout: `src/lib/game.rs` (rules, board, power-ups), `src/lib/cpu_ai.rs`
 (opponent model, decision layers, brain persistence), `src/lib/web_state.rs`
-(browser wire format), `src/main.rs` (terminal client), `web/` (canvas client).
+(browser wire format), `src/main.rs` (terminal client), `web/` (canvas
+client), `examples/` (the eval probes), `scripts/` (gauntlet, dev server,
+page probe).
 
 The brain is serialized in a sectioned format so that a schema change costs
 only the section it invalidates. What the CPU has learned about *you* — habit
