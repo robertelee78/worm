@@ -17,3 +17,4 @@ ruvector.db
 .codex/
 # Claude Flow runtime data
 # Environment variables
+.darwin/

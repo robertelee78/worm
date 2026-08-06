@@ -1,5 +1,6 @@
 pub mod cpu_ai;
 pub mod game;
+pub mod tuning;
 #[cfg(feature = "wasm")]
 pub mod wasm_api;
 pub mod web_state;

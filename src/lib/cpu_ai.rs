@@ -53,7 +53,7 @@ const MEMORY_VOTE_MIN_OPEN: f32 = 0.05; // destination must keep >=5% of the are
 fn escape_floor_cells(game: &WormGame, who: usize) -> f32 {
     let c = &game.cycles[who];
     let own_len = c.positions.len() as f32 + c.pending_growth as f32;
-    own_len * ESCAPE_LENGTH_MULTIPLE + ESCAPE_MARGIN_CELLS
+    own_len * crate::tuning::tuning().escape_multiple + crate::tuning::tuning().escape_margin
 }
 
 /// Leave a sudden-death ring this many frames before it seals, rather than at
@@ -101,10 +101,10 @@ fn evacuate_ring(
 /// chasing food the same spend meant hunting from exposure instead of from
 /// cover — the warm arm died MORE than the cold one (87% vs 90%), the exact
 /// inversion ADR-009 exists to forbid.
-const HUNT_MARGIN_SPEND: f32 = 0.35;
+pub(crate) const HUNT_MARGIN_SPEND: f32 = 0.35;
 /// Superlinear, so a strong read bites noticeably harder than a middling one
 /// rather than the whole range feeling the same.
-const HUNT_MARGIN_CURVE: f32 = 0.7;
+pub(crate) const HUNT_MARGIN_CURVE: f32 = 0.7;
 
 /// The floor a HUNT deviation must clear, given how well the CPU reads this
 /// player.
@@ -116,14 +116,15 @@ const HUNT_MARGIN_CURVE: f32 = 0.7;
 /// otherwise decline; they never face one that suicides. Never drops below the
 /// flat manoeuvring allowance, so it cannot be tuned into recklessness.
 pub fn hunt_floor_cells(game: &WormGame, who: usize, read_rate: f32) -> f32 {
-    let spend = HUNT_MARGIN_SPEND * read_rate.clamp(0.0, 1.0).powf(HUNT_MARGIN_CURVE);
-    (escape_floor_cells(game, who) * (1.0 - spend)).max(ESCAPE_MARGIN_CELLS)
+    let t = crate::tuning::tuning();
+    let spend = t.hunt_spend * read_rate.clamp(0.0, 1.0).powf(t.hunt_curve);
+    (escape_floor_cells(game, who) * (1.0 - spend)).max(t.escape_margin)
 }
 
 /// How many times its own length a cycle wants reachable before committing.
-const ESCAPE_LENGTH_MULTIPLE: f32 = 3.0;
+pub(crate) const ESCAPE_LENGTH_MULTIPLE: f32 = 3.0;
 /// Flat manoeuvring allowance on top, so a very short cycle still needs room.
-const ESCAPE_MARGIN_CELLS: f32 = 8.0;
+pub(crate) const ESCAPE_MARGIN_CELLS: f32 = 8.0;
 /// Survival floor for hunt-layer deviations: the destination must keep at
 /// least this much of the arena reachable (and at least half of wall-follow's
 /// space) — the anti-kamikaze gate.
@@ -3209,7 +3210,7 @@ pub const MODEL_NAMES: [&str; ENSEMBLE_MODELS] = [
     "armW",
 ];
 /// Score bonus for the sophisticated model once warm (rps-ai's +0.15).
-const KNN_SCORE_BONUS: f32 = 0.15;
+pub(crate) const KNN_SCORE_BONUS: f32 = 0.15;
 
 /// Live per-model state. `num`/`den` accumulate ±j² / j² per game;
 /// `hits`/`total` are plain per-game counters for the HUD hit-rates.
@@ -3291,10 +3292,9 @@ impl Ensemble {
         // of decisions. Slow horizon: gentle updates, light share — holds the
         // session-long picture. Multiplicative-weights with a fixed-share
         // mixing step after each loss.
-        const ETA_FAST: f32 = 1.2;
-        const ETA_SLOW: f32 = 0.3;
-        const SHARE_FAST: f32 = 0.08;
-        const SHARE_SLOW: f32 = 0.01;
+        let t = crate::tuning::tuning();
+        let (eta_fast, eta_slow) = (t.eta_fast, t.eta_slow);
+        let (share_fast, share_slow) = (t.share_fast, t.share_slow);
         let mut awake_loss = 0.0f32;
         let mut awake = 0u32;
         let mut slept = [false; ENSEMBLE_MODELS];
@@ -3310,8 +3310,8 @@ impl Ensemble {
                 let loss = if hit { 0.0 } else { 1.0 };
                 awake_loss += loss;
                 awake += 1;
-                self.w_fast[i] *= (-ETA_FAST * loss).exp();
-                self.w_slow[i] *= (-ETA_SLOW * loss).exp();
+                self.w_fast[i] *= (-eta_fast * loss).exp();
+                self.w_slow[i] *= (-eta_slow * loss).exp();
             } else {
                 slept[i] = true;
             }
@@ -3329,8 +3329,8 @@ impl Ensemble {
         // sleeper can hold its weight yet never drive while silent.
         let _ = (awake_loss, awake, slept);
         for (weights, share) in [
-            (&mut self.w_fast, SHARE_FAST),
-            (&mut self.w_slow, SHARE_SLOW),
+            (&mut self.w_fast, share_fast),
+            (&mut self.w_slow, share_slow),
         ] {
             let sum: f32 = weights.iter().sum();
             if sum > 0.0 && sum.is_finite() {
@@ -3792,7 +3792,7 @@ pub fn compute_ensemble(
         }
         let mut w = e.w_fast[i] + e.w_slow[i];
         if i == KNN_MODEL && brain.opp_brain.episodes.len() >= COLD_START_EPISODES {
-            w *= 1.0 + KNN_SCORE_BONUS;
+            w *= 1.0 + crate::tuning::tuning().knn_bonus;
         }
         if w > best_score {
             best_score = w;
@@ -3824,7 +3824,7 @@ pub fn select_active(brain: &CpuBrain, masked: &[Option<Direction>]) -> (usize, 
     let rank = |i: usize| -> f32 {
         let mut w = e.w_fast[i] + e.w_slow[i];
         if i == KNN_MODEL && warm {
-            w *= 1.0 + KNN_SCORE_BONUS;
+            w *= 1.0 + crate::tuning::tuning().knn_bonus;
         }
         w
     };
@@ -3864,7 +3864,7 @@ pub fn ensemble_rank_score(brain: &CpuBrain, model: usize) -> f32 {
     let e = &brain.ensemble;
     let mut w = e.w_fast[model] + e.w_slow[model];
     if model == KNN_MODEL && brain.opp_brain.episodes.len() >= COLD_START_EPISODES {
-        w *= 1.0 + KNN_SCORE_BONUS;
+        w *= 1.0 + crate::tuning::tuning().knn_bonus;
     }
     w
 }
@@ -4398,7 +4398,7 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
     // so this cannot open before ~10 observed real choices regardless; the
     // hunt floor still vets every destination. Lowered to buy engagement
     // without touching a survival floor.
-    if player_pred_conf >= 0.35 {
+    if player_pred_conf >= crate::tuning::tuning().corner_gate {
         // Predict the corner the player will reach next.
         // Wall-followers turn right at corners. We predict their path to the next corner.
         let corner_target = predict_next_corner(game, &game.cycles[0], player_pred_dir);
@@ -4470,7 +4470,7 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
     // triggers at the corners where both cycles converge; against chasers it
     // triggers constantly because the player is always approaching.
     // Gate lowered 0.6 -> 0.45 with the corner gate above (same rationale).
-    if player_pred_conf >= 0.45 {
+    if player_pred_conf >= crate::tuning::tuning().direct_gate {
         // Target: where the player will be in 2-5 frames (from iterative prediction).
         let mut best_intercept: Option<(u16, u16, f32)> = None;
         for (i, &(px, py)) in predicted_positions.iter().enumerate() {
