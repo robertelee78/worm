@@ -291,3 +291,8 @@ table.history td.cpu { color: var(--magenta); }
   font-size: 16px;
 }
 .footer .dim { color: #777; }
+.over-notebook {
+  max-width: 46em; margin: 8px auto; padding: 8px 12px; text-align: left;
+  font-size: 15px; line-height: 1.45; color: #9fe89f;
+  border: 1px solid #1c4; background: rgba(0, 24, 8, 0.85);
+}

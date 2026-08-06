@@ -4,14 +4,14 @@
 // The ?v= must match BUILD below (and index.html's) — an unversioned glue
 // import could pair a cached old worm.js with a fresh wasm on the next
 // rebuild that changes the bindings.
-import init, { WasmGame } from './pkg/worm.js?v=15';
+import init, { WasmGame } from './pkg/worm.js?v=16';
 import { Sfx } from './audio.js';
 import { computeBoardLayout, VIEWPORT_BLOCK_GUTTER } from './layout.js';
 
 let CELL = 14; // recomputed by applyBoardLayout() to fit the measured stage
 // Bump together with the ?v= in index.html whenever the wasm bundle is
 // rebuilt — it keys the cache-busting query on the .wasm fetch.
-const BUILD = 15;
+const BUILD = 16;
 const MATCH_TARGET = 3;
 const STATE_SCHEMA_VERSION = 2;
 const ROUND_SCHEMA_VERSION = 1;
@@ -185,6 +185,25 @@ async function roundWrite(record) {
   } catch { /* persistence is best-effort */ }
 }
 
+/* ---------------- the CPU's notebook (ADR-019): on-request deep explains ---------------- */
+document.getElementById('tell-more-btn')?.addEventListener('click', async () => {
+  const btn = document.getElementById('tell-more-btn');
+  const notebook = document.getElementById('over-notebook');
+  if (!lastRoundRecord || !btn || !notebook) return;
+  btn.disabled = true;
+  notebook.hidden = false;
+  notebook.textContent = 'the CPU is opening its notebook… (about 15 seconds — it writes from this round\u2019s real measurements)';
+  try {
+    const res = await fetch('/explain', { method: 'POST', body: JSON.stringify(lastRoundRecord) });
+    notebook.textContent = res.ok
+      ? await res.text()
+      : 'the notebook is unavailable right now — the instant summary above is the measured truth anyway';
+  } catch {
+    notebook.textContent = 'the notebook is unavailable right now — the instant summary above is the measured truth anyway';
+  }
+  btn.textContent = '📓 notebook read';
+});
+
 /* ---------------- round collection (ADR-017, disclosed in the footer) ----------------
    Finished rounds send their ghost logs to the arcade owner's /collect
    endpoint — the moves of both worms and the round seed, nothing else.
@@ -270,6 +289,7 @@ let cols = 0, rows = 0;
 let state = null;
 let overHandled = false;
 let roundMemoryStart = null;
+let lastRoundRecord = null;
 let roundHistory = [];
 const bombMaxFuse = new Map(); // "x,y" → max fuse seen (fuse arc countdown)
 
@@ -699,6 +719,11 @@ function onGameOver() {
   renderHistory();
   roundWrite(record);
   uploadRound(record); // ledger updates only on CONFIRMED backfill delivery
+  lastRoundRecord = record;
+  const notebook = document.getElementById('over-notebook');
+  const moreBtn = document.getElementById('tell-more-btn');
+  if (notebook) { notebook.hidden = true; notebook.textContent = ''; }
+  if (moreBtn) { moreBtn.disabled = false; moreBtn.textContent = '📓 TELL ME MORE'; }
 
   const youWon = state.winner === 0;
   const cpuWon = state.winner === 1;

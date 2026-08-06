@@ -198,6 +198,7 @@ living documents — if one disagrees with the code, the ADR is the bug.
 - [ADR-016](docs/adrs/016-ghost-replay.md) — ghost replay: the real human becomes the benchmark
 - [ADR-017](docs/adrs/017-automatic-round-collection.md) — automatic round collection: every visitor feeds the flywheel
 - [ADR-018](docs/adrs/018-the-beatable-opening.md) — the beatable opening: wits are earned, not given
+- [ADR-019](docs/adrs/019-the-cpus-notebook.md) — the CPU's notebook: LLM depth, on request only
 
 ### A note on the numbers in this repo
 
