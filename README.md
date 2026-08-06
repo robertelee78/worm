@@ -50,9 +50,15 @@ The claim is not that the CPU predicts you — it is that predicting you makes i
 fixed and varies only whether the CPU may remember:
 
 ```
-COLD (cannot learn)   cpu 27 player 3 draw 0   win  90%
-WARM (remembers you)  cpu 30 player 0 draw 0   win 100%   lift 78%
+COLD (cannot learn)   cpu 28 player 2 draw 0   win  93%
+WARM (remembers you)  cpu 29 player 1 draw 0   win  97%   lift 79%
 ```
+
+(The pre-engagement-gates build measured the project's first zero-death
+sweep — COLD 30-0, WARM 30-0, lift 83% — before three deaths were traded
+deliberately for a measured ~5-point win-rate and engagement gain on the
+browser board; [ADR-012](docs/adrs/012-two-swarm-findings-implemented.md)
+records the trade.)
 
 That test was failing until recently, with the *warm* CPU winning less — see
 [ADR-009](docs/adrs/009-learning-must-convert-into-winning.md) for the two
@@ -168,6 +174,7 @@ living documents — if one disagrees with the code, the ADR is the bug.
 - [ADR-009](docs/adrs/009-learning-must-convert-into-winning.md) — learning must convert into winning
 - [ADR-010](docs/adrs/010-what-the-cpu-learns-from.md) — what the CPU learns from, and what it may know
 - [ADR-011](docs/adrs/011-intent-inference-and-engagement.md) — intent inference and an engaged CPU
+- [ADR-012](docs/adrs/012-two-swarm-findings-implemented.md) — errand twins, kinematic traps, and honest silence
 
 ### A note on the numbers in this repo
 
