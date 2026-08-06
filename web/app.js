@@ -8,7 +8,7 @@ import { computeBoardLayout, VIEWPORT_BLOCK_GUTTER } from './layout.js';
 let CELL = 14; // recomputed by applyBoardLayout() to fit the measured stage
 // Bump together with the ?v= in index.html whenever the wasm bundle is
 // rebuilt — it keys the cache-busting query on the .wasm fetch.
-const BUILD = 3;
+const BUILD = 4;
 const MATCH_TARGET = 3;
 const STATE_SCHEMA_VERSION = 2;
 const ROUND_SCHEMA_VERSION = 1;
@@ -613,6 +613,10 @@ function onGameOver() {
 
 /* ---------------- CPU BRAIN panel (plain-language learning display) ---------------- */
 
+// Every key in MODEL_NAMES MUST have a row here. The `??` fallback is
+// load-bearing: this table missing a key made `m.name` throw during panel
+// build, which killed the module before the first frame — a completely
+// frozen cabinet on every device, with the error handlers never installed.
 const MODEL_INFO = MODEL_NAMES.map((key) => ({
   rep: { name: 'Streak reader', blurb: 'spots your repeats & turns' },
   pat: { name: 'Pattern hunter', blurb: 'spots your move patterns' },
@@ -621,7 +625,13 @@ const MODEL_INFO = MODEL_NAMES.map((key) => ({
   wlR: { name: 'Wall reader · R', blurb: 'right-hand wall habit' },
   wlL: { name: 'Wall reader · L', blurb: 'left-hand wall habit' },
   knn: { name: 'Deep memory', blurb: 'remembers similar situations' },
-}[key]));
+  eat: { name: 'Food-seeker', blurb: 'you\'re going for that food' },
+  hunt: { name: 'Hunter', blurb: 'you\'re coming for me' },
+  arm: { name: 'Arming-up', blurb: 'you\'re going for that weapon' },
+  eatW: { name: 'Food-seeker · weaving', blurb: 'same errand, weaving there' },
+  huntW: { name: 'Hunter · weaving', blurb: 'same hunt, weaving in' },
+  armW: { name: 'Arming-up · weaving', blurb: 'same errand, weaving there' },
+}[key] ?? { name: key, blurb: '' }));
 
 let modelRows = null;
 let lastDriver = -1;
