@@ -202,3 +202,12 @@ recorded as measurement-neutral rather than credited with a delta — several
 fixes in ADR-004 are exactly that, kept because a test proves them rather than
 because a number moved. Where a claim has been withdrawn, the withdrawal sits
 in the ADR next to the original claim.
+
+Human-derived numbers are a separate class. Since the v9 build every
+round played in the browser records a ghost log — the complete input
+streams of both worms plus the round seed
+([ADR-016](docs/adrs/016-ghost-replay.md)) — captured locally in the
+player's own browser and exported only by their hand (EXPORT MY ROUNDS).
+No such number appears in this repo yet; when one does it will be quoted
+with the export's date and round count, and marked as measured against a
+real player rather than a scripted persona.
