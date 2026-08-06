@@ -50,12 +50,15 @@ The claim is not that the CPU predicts you — it is that predicting you makes i
 fixed and varies only whether the CPU may remember:
 
 ```
-COLD (cannot learn)   cpu 26 player 4 draw 0   win  87%
-WARM (remembers you)  cpu 30 player 0 draw 0   win 100%   lift 86%
+COLD (cannot learn)   cpu 19 player 11 draw 0   win  63%
+WARM (remembers you)  cpu 28 player  2 draw 0   win  93%   lift 81%
 ```
 
-An undefeated warm arm against a beaten cold one is the whole product in
-two rows: the only difference between them is memory.
+A thirty-point gap whose only cause is memory — and the cold row is LOW
+on purpose: since [ADR-018](docs/adrs/018-the-beatable-opening.md) an
+unread CPU opens slow-witted and genuinely beatable (a casual-novice
+fixture wins 3 of its first 5 rounds), and wits are earned by reading
+you or by the scoreboard pressure of losing to you.
 [ADR-012](docs/adrs/012-two-swarm-findings-implemented.md) and
 [ADR-014](docs/adrs/014-the-codex-corrections.md) record the trades and
 reverts behind these numbers, including the changes that measured worse
@@ -194,6 +197,7 @@ living documents — if one disagrees with the code, the ADR is the bug.
 - [ADR-015](docs/adrs/015-nightly-darwin.md) — nightly Darwin: continual improvement with human promotion
 - [ADR-016](docs/adrs/016-ghost-replay.md) — ghost replay: the real human becomes the benchmark
 - [ADR-017](docs/adrs/017-automatic-round-collection.md) — automatic round collection: every visitor feeds the flywheel
+- [ADR-018](docs/adrs/018-the-beatable-opening.md) — the beatable opening: wits are earned, not given
 
 ### A note on the numbers in this repo
 

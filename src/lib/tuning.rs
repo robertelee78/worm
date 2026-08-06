@@ -40,6 +40,22 @@ pub struct Tuning {
     pub share_slow: f32,
     /// Warm-corpus multiplier bonus for the k-NN model.
     pub knn_bonus: f32,
+    /// THE BEATABLE OPENING (ADR-018). Survival-floor multiplier at zero
+    /// read — the unread CPU keeps only this fraction of its escape floor,
+    /// playing bold enough to make killable mistakes. Reading the player
+    /// linearly restores full discipline.
+    pub discipline_floor: f32,
+    /// Extra hunt-margin spend at zero read (reckless dives), decaying to
+    /// zero as the read grows and the champion hunt economics take over.
+    pub bold_spend: f32,
+    /// Fraction of raw forecast confidence the hunt gates may use at zero
+    /// read (extrapolation-chasing), decaying as the real read takes over.
+    pub bold_drive: f32,
+    /// Decision latency at zero read, in frames: the unread CPU re-decides
+    /// only every Nth frame — casual-human attention, not tick-perfect
+    /// play — reaching every-frame wits as the read grows. THE lever that
+    /// makes the opening genuinely losable: held headings meet walls.
+    pub open_latency: f32,
 }
 
 fn env_f32(name: &str, default: f32) -> f32 {
@@ -64,5 +80,9 @@ pub fn tuning() -> &'static Tuning {
         share_fast: env_f32("WORM_TUNE_SHARE_FAST", 0.08),
         share_slow: env_f32("WORM_TUNE_SHARE_SLOW", 0.01),
         knn_bonus: env_f32("WORM_TUNE_KNN_BONUS", cpu_ai::KNN_SCORE_BONUS),
+        discipline_floor: env_f32("WORM_TUNE_DISCIPLINE_FLOOR", 0.35),
+        bold_spend: env_f32("WORM_TUNE_BOLD_SPEND", 0.40),
+        bold_drive: env_f32("WORM_TUNE_BOLD_DRIVE", 1.0),
+        open_latency: env_f32("WORM_TUNE_OPEN_LATENCY", 6.0),
     })
 }

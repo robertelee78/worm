@@ -449,6 +449,7 @@ fn test_prev_direction_snapshots_each_frame() {
 #[test]
 fn test_cpu_survival_reward_accumulates_on_straights() {
     let mut game = WormGame::with_size(120, 38);
+    game.read_rate = 1.0; // tick-perfect CPU under test — ADR-018 opens dozy
     // Clean arena, then wall off above/below the CPU's row so wall-follow
     // (cold-start policy) drives straight Right without turning.
     for row in &mut game.grid {
@@ -882,6 +883,7 @@ fn test_cpu_seeks_distant_powerup() {
 #[test]
 fn test_cpu_dodges_head_on() {
     let mut game = WormGame::with_size(120, 38);
+    game.read_rate = 1.0; // tick-perfect CPU under test — ADR-018 opens dozy
     for row in &mut game.grid {
         for cell in row.iter_mut() {
             if *cell != worm::CellType::Wall {
@@ -1360,6 +1362,7 @@ fn test_cpu_laser_charges_before_firing() {
     // The CPU's laser telegraphs for LASER_TELEGRAPH_FRAMES before firing —
     // it must NOT kill the moment the player crosses the firing line.
     let mut game = WormGame::with_size(120, 38);
+    game.read_rate = 1.0; // tick-perfect CPU under test — ADR-018 opens dozy
     game.food_items.clear();
     // Corridor walls force the CPU straight (ForcedMove) so the setup is
     // deterministic: CPU chases the player along row 20.

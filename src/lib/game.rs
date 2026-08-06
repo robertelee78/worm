@@ -612,6 +612,18 @@ impl WormGame {
         game
     }
 
+    /// How awake the CPU is, 0..1 (ADR-018, the beatable opening). Sharpness
+    /// comes from EITHER the read (it knows you) OR scoreboard pressure
+    /// (you are beating it — losing focuses anyone). Both inputs are public
+    /// information; at 0.6+ the CPU is fully tick-perfect. An unread,
+    /// unpressured CPU plays slow and loose — and is genuinely losable.
+    pub fn sharpness(&self) -> f32 {
+        let read = self.read_rate.clamp(0.0, 1.0);
+        let wins = self.displayed_wins();
+        let deficit = (wins[0] as f32 - wins[1] as f32) / 4.0;
+        (read.max(deficit.clamp(0.0, 1.0)) / 0.6).min(1.0)
+    }
+
     /// Reseed the round RNG from a fresh per-round seed and start the ghost
     /// log. `forced` replays a recorded round; `None` derives the seed from
     /// the current stream, so an entire session stays a pure function of the
@@ -1296,7 +1308,22 @@ impl WormGame {
         // (cpu_autopilot = false) keep their externally-steered heading and
         // leave no episodes in the learner's brain.
         let mut cpu_obs = None;
-        let cpu_dir = if self.cpu_autopilot {
+        // THE BEATABLE OPENING (ADR-018): an unread CPU is slow-witted — it
+        // re-decides only every Nth frame, like the casual human it hasn't
+        // read yet, and reading the player restores tick-perfect wits.
+        // Held headings + thinned floors = genuine, killable mistakes.
+        // Explainable in one line: "it starts slow and sloppy; learning you
+        // is what makes it sharp." Never applies to replays (scripted).
+        let open_k = {
+            let t = crate::tuning::tuning();
+            1 + ((t.open_latency - 1.0).max(0.0) * (1.0 - self.sharpness())).round() as u32
+        };
+        let cpu_dozing =
+            self.cpu_autopilot && open_k > 1 && self.frame_count % open_k != 0;
+        let cpu_dir = if self.cpu_autopilot && cpu_dozing {
+            // Attention lapse: hold the heading, no decisions, no firing.
+            self.cycles[1].direction
+        } else if self.cpu_autopilot {
             // The CPU fires a held power-up when the heuristic sees a good
             // shot. The laser is special-cased: it kills the same frame it
             // fires, so it charges visibly for LASER_TELEGRAPH_FRAMES first

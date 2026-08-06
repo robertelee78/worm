@@ -53,7 +53,15 @@ const MEMORY_VOTE_MIN_OPEN: f32 = 0.05; // destination must keep >=5% of the are
 fn escape_floor_cells(game: &WormGame, who: usize) -> f32 {
     let c = &game.cycles[who];
     let own_len = c.positions.len() as f32 + c.pending_growth as f32;
-    own_len * crate::tuning::tuning().escape_multiple + crate::tuning::tuning().escape_margin
+    {
+        let t = crate::tuning::tuning();
+        // THE BEATABLE OPENING: an unread CPU keeps only discipline_floor of
+        // its survival margin — bold enough to genuinely die to its own
+        // dives. Reading the player restores the champion floor. "Before it
+        // knows you it plays reckless; reading you makes it careful."
+        let discipline = t.discipline_floor + (1.0 - t.discipline_floor) * game.sharpness();
+        (own_len * t.escape_multiple + t.escape_margin) * discipline
+    }
 }
 
 /// Leave a sudden-death ring this many frames before it seals, rather than at
@@ -117,7 +125,12 @@ pub(crate) const HUNT_MARGIN_CURVE: f32 = 0.7;
 /// flat manoeuvring allowance, so it cannot be tuned into recklessness.
 pub fn hunt_floor_cells(game: &WormGame, who: usize, read_rate: f32) -> f32 {
     let t = crate::tuning::tuning();
-    let spend = t.hunt_spend * read_rate.clamp(0.0, 1.0).powf(t.hunt_curve);
+    let read = read_rate.clamp(0.0, 1.0);
+    // Read-driven spend (champion economics) PLUS opening recklessness that
+    // decays as the CPU sharpens — a U over the learning arc: bold at first
+    // contact, tight while consolidating, committed once it knows you.
+    let spend =
+        (t.hunt_spend * read.powf(t.hunt_curve) + t.bold_spend * (1.0 - game.sharpness())).min(0.85);
     (escape_floor_cells(game, who) * (1.0 - spend)).max(t.escape_margin)
 }
 
@@ -4086,6 +4099,12 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
     // Explainable as: "it doesn't act on a read until it has watched you make
     // about ten real choices."
     let read_conf = (game.cpu_brain.opp_brain.turn_observations() / 10.0).min(1.0);
+    // THE BEATABLE OPENING's second half: before there is a read, the hunt
+    // gates may run on RAW forecast confidence (straight-line extrapolation
+    // chasing) — eager, imperfect, killable. The DBR observation ramp takes
+    // over as real choices accumulate, and boldness fades with the read.
+    let read_conf =
+        read_conf.max(crate::tuning::tuning().bold_drive * (1.0 - game.sharpness()));
     // Two confidences, split on purpose (codex silent-model finding, then
     // measured):
     //  - track_conf gates DEFENSIVE use of the projected path. When the
@@ -5330,6 +5349,9 @@ mod tests {
     #[test]
     fn escape_floor_scales_with_length_not_arena() {
         let mut game = WormGame::with_size(120, 38);
+        // The formula under test is the FULLY SHARP floor; an unread,
+        // unpressured CPU keeps only discipline_floor of it (ADR-018).
+        game.read_rate = 1.0;
 
         game.cycles[1].positions = vec![(10, 10); 3];
         let short = escape_floor_cells(&game, 1);
@@ -5358,6 +5380,7 @@ mod tests {
     #[test]
     fn escape_floor_counts_owed_growth() {
         let mut game = WormGame::with_size(120, 38);
+        game.read_rate = 1.0; // sharp floor — see ADR-018
         game.cycles[1].positions = vec![(10, 10); 5];
 
         game.cycles[1].pending_growth = 0;
