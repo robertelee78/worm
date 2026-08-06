@@ -1884,3 +1884,65 @@ fn test_sealing_does_not_disturb_the_game_rng() {
     };
     assert_eq!(run(), run(), "seeded play must be reproducible");
 }
+
+/// The corridor pin — the one deterministic loss a player could execute at
+/// will. Escorting parallel one row inside a wall lane, diagonally abeam at
+/// equal speed, left the CPU exactly one legal move per frame until the
+/// facing wall killed it (traced dying at the identical frame on every
+/// replay of multiple seeds).
+#[test]
+fn test_escorted_wall_lane_is_refused_before_the_lock_forms() {
+    let mut game = WormGame::with_size(55, 40);
+    // Sweep both worms' spawn cells, then build the traced geometry by hand.
+    for row in game.grid.iter_mut() {
+        for cell in row.iter_mut() {
+            if matches!(*cell, worm::CellType::Player | worm::CellType::CPU) {
+                *cell = worm::CellType::Empty;
+            }
+        }
+    }
+    // CPU in the top lane (row 3, arena wall ring at y=2), heading Left.
+    game.cycles[1].head = (30, 3);
+    game.cycles[1].direction = worm::Direction::Left;
+    game.cycles[1].prev_direction = worm::Direction::Left;
+    game.cycles[1].positions = vec![(30, 3), (31, 3)];
+    for &(x, y) in &game.cycles[1].positions {
+        game.grid[y as usize][x as usize] = worm::CellType::CPU;
+    }
+    // Player escorting abeam: one row below, one column behind, same heading.
+    game.cycles[0].head = (31, 4);
+    game.cycles[0].direction = worm::Direction::Left;
+    game.cycles[0].prev_direction = worm::Direction::Left;
+    game.cycles[0].positions = vec![(31, 4), (32, 4), (33, 4), (34, 4)];
+    for &(x, y) in &game.cycles[0].positions {
+        game.grid[y as usize][x as usize] = worm::CellType::Player;
+    }
+
+    // The geometry itself is recognised…
+    assert!(
+        worm::escorted_lane_step(&game, (30, 3), worm::Direction::Left),
+        "continuing straight in an escorted wall lane must read as escorted"
+    );
+    // …and a perpendicular exit is not tarred with the same brush.
+    assert!(
+        !worm::escorted_lane_step(&game, (30, 3), worm::Direction::Down),
+        "leaving the lane is the escape, not part of the trap"
+    );
+
+    // Play it out: the player holds the escort line, exactly as the exploit
+    // prescribes. Before the fix the CPU was marched into the left wall and
+    // died the moment the player ran out of corridor.
+    let mut frames = 0;
+    while !game.game_over && game.cycles[0].head.0 > 6 && frames < 60 {
+        game.change_direction(worm::Direction::Left);
+        game.update();
+        frames += 1;
+    }
+    assert!(
+        game.cycles[1].alive || game.winner == Some(1),
+        "the CPU must escape the escort (or win outright), never be marched \
+         into the wall — died at frame {} with cause {:?}",
+        game.frame_count,
+        game.death_cause,
+    );
+}

@@ -150,6 +150,7 @@ pub enum CpuDecisionReason {
     WarmingUp,
     ThreatDodge,
     EscapeFloor,
+    LaneRefusal,
     CloseEvasion,
     ItemPickup,
     ItemPath,
@@ -172,6 +173,7 @@ impl CpuDecisionReason {
             // player can catch out, which is fatal to a HUD whose whole job
             // is being believed (ADR-003/ADR-006).
             Self::EscapeFloor => "backing out of a dead end",
+            Self::LaneRefusal => "refusing to be pinned along the wall",
             Self::CloseEvasion => "evading your predicted path",
             Self::ItemPickup => "taking a nearby item",
             Self::ItemPath => "routing to an item",
@@ -1884,6 +1886,73 @@ pub fn count_open_space_excluding(
         }
     }
     count
+}
+
+/// The corridor pin: the player runs parallel one row inside a wall lane,
+/// diagonally abeam of the CPU, matching its heading at equal speed. From
+/// that instant the CPU has exactly one legal move per frame — straight —
+/// until the facing wall kills it. Traced live on multiple seeds (death at
+/// the same frame every replay), and 100% reproducible by a human who
+/// notices it: a deterministic loss condition.
+///
+/// No flood fill can see it. The sealed region is only "unreachable" under
+/// the no-reversal rule — undirected reachability says the whole arena is
+/// open, and it is, for anything that could turn around. The trap is
+/// kinematic, so the defence is geometric: this predicate answers "would
+/// stepping `d` put me in a wall lane whose open side the player is
+/// escorting abeam?" — the position from which the lock forms. Refusing the
+/// step while alternatives exist is the entire fix; once the lock exists
+/// there is nothing left to decide.
+///
+/// Information parity: uses only the player's visible position and heading.
+pub fn escorted_lane_step(game: &WormGame, from: (u16, u16), d: Direction) -> bool {
+    let (dx, dy) = d.as_delta();
+    let nx = from.0 as i16 + dx;
+    let ny = from.1 as i16 + dy;
+    if nx < 0 || ny < 0 || nx >= game.width as i16 || ny >= game.height as i16 {
+        return false;
+    }
+    // Escort requires matched velocity — a player heading any other way
+    // cannot hold the lane shut.
+    let player = &game.cycles[0];
+    if player.direction != d {
+        return false;
+    }
+    let (px, py) = player.head;
+    let sides: [(i16, i16); 2] = match d {
+        Direction::Left | Direction::Right => [(0, -1), (0, 1)],
+        Direction::Up | Direction::Down => [(-1, 0), (1, 0)],
+    };
+    for (sx, sy) in sides {
+        let wx = nx + sx;
+        let wy = ny + sy;
+        let wall_side = wx < 0
+            || wy < 0
+            || wx >= game.width as i16
+            || wy >= game.height as i16
+            || game.grid[wy as usize][wx as usize] == CellType::Wall
+            || game.is_arena_wall(wx as u16, wy as u16);
+        if !wall_side {
+            continue;
+        }
+        // Player abeam (within 2 cells longitudinally) on the OPEN side of
+        // the lane, within 2 cells laterally. Lateral 1 abeam is the lock
+        // itself; lateral 2 is one manoeuvre away from it. A player further
+        // behind can never catch up at equal speed, and one further to the
+        // side cannot close the lane before the CPU leaves it.
+        let (lat, lon) = match d {
+            Direction::Left | Direction::Right => (py as i16 - ny, (px as i16 - nx).abs()),
+            Direction::Up | Direction::Down => (px as i16 - nx, (py as i16 - ny).abs()),
+        };
+        let open_sign = match d {
+            Direction::Left | Direction::Right => -sy,
+            Direction::Up | Direction::Down => -sx,
+        };
+        if lat.signum() == open_sign.signum() && (1..=2).contains(&lat.abs()) && lon <= 2 {
+            return true;
+        }
+    }
+    false
 }
 
 /// Timed flood fill from `from`: own-body cells become enterable at the time
@@ -3650,6 +3719,31 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
         // Still subject to sudden death — see `evacuate_ring`.
         let head = game.cycles[1].head;
         let warm = wall_follow_decide(game, &game.cycles[1]);
+        // The corridor pin bites HERE, not just in the memory-driven path:
+        // every traced pin death was at length 1-2 with read 0.00 — a
+        // cold-start CPU wall-following into an escorted lane. A guard that
+        // only protects the smart path protects the CPU only after it has
+        // survived the phase where the exploit actually kills it.
+        if escorted_lane_step(game, head, warm) {
+            if let Some(exit) = legal
+                .iter()
+                .copied()
+                .filter(|&d| {
+                    !escorted_lane_step(game, head, d) && !ring_doomed_step(game, head, d)
+                })
+                .max_by(|a, b| {
+                    let open = |d: Direction| {
+                        let (ddx, ddy) = d.as_delta();
+                        let ex = (head.0 as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
+                        let ey = (head.1 as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
+                        count_open_space(game, ex, ey)
+                    };
+                    open(*a).partial_cmp(&open(*b)).unwrap_or(std::cmp::Ordering::Equal)
+                })
+            {
+                choose!(exit, CpuDecisionReason::LaneRefusal);
+            }
+        }
         choose!(
             evacuate_ring(game, head, warm, &legal),
             CpuDecisionReason::WarmingUp
@@ -3755,10 +3849,18 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
     // A cell on a sudden-death ring that is about to seal is also excluded:
     // `close_ring` kills any head standing on the ring it closes, and nothing
     // in this file previously knew sudden death existed.
+    // An escorted wall-lane step is filtered exactly like a projectile cell:
+    // it is a move the player has already made fatal, just on a longer fuse
+    // (see `escorted_lane_step` — the corridor pin). The filter prunes it
+    // from every layer below whenever any alternative exists.
     let safe_legal: Vec<Direction> = legal
         .iter()
         .copied()
-        .filter(|d| !threatened_dirs.contains(d) && !ring_doomed_step(game, (cx, cy), *d))
+        .filter(|d| {
+            !threatened_dirs.contains(d)
+                && !ring_doomed_step(game, (cx, cy), *d)
+                && !escorted_lane_step(game, (cx, cy), *d)
+        })
         .collect();
     // Never empty the candidate set — when every move is threatened or doomed
     // the layers below still have to pick the least-bad one.
@@ -4189,6 +4291,30 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
     // next cell cannot reach enough space to outrun our own length, take the
     // candidate that can.
     let followed = evacuate_ring(game, (cx, cy), wall_dir, candidates);
+    // The candidate filter cannot reach wall-follow itself — `followed` comes
+    // from `wall_dir` directly. If the base policy is about to run an
+    // escorted lane and any candidate is not escorted, leave the lane NOW:
+    // by the time the lock forms there is exactly one legal move per frame
+    // and nothing below this line ever runs again.
+    if escorted_lane_step(game, (cx, cy), followed) {
+        if let Some(&exit) = candidates
+            .iter()
+            .filter(|&&d| !escorted_lane_step(game, (cx, cy), d) && !ring_doomed_step(game, (cx, cy), d))
+            .max_by(|a, b| {
+                let open = |d: Direction| {
+                    let (ddx, ddy) = d.as_delta();
+                    let ex = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
+                    let ey = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
+                    count_open_space(game, ex, ey)
+                };
+                open(**a)
+                    .partial_cmp(&open(**b))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            })
+        {
+            choose!(exit, CpuDecisionReason::LaneRefusal);
+        }
+    }
     let step_open = |d: Direction| -> f32 {
         let (ddx, ddy) = d.as_delta();
         let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
