@@ -158,4 +158,12 @@ impl WasmGame {
     pub fn rounds_remembered(&self) -> u32 {
         self.game.cpu_brain.portfolio.rounds
     }
+
+    /// The finished round's ghost log — seed, board size, and both worms'
+    /// input streams. Enough to replay the round bit-identically offline,
+    /// which is how a real player's games become evaluation data (ADR-016).
+    /// Read at game over, before the next restart wipes it.
+    pub fn replay_json(&self) -> String {
+        self.game.replay.to_json()
+    }
 }

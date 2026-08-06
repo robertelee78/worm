@@ -2306,3 +2306,102 @@ fn test_errand_commitment_survives_while_closing() {
         committed_seen
     );
 }
+
+/* ---------------- ghost replay (ADR-016) ---------------- */
+
+/// THE REPLAY CONTRACT: a recorded round replays bit-for-bit from its
+/// (seed, size, input log) triple alone — winner, length, item stream,
+/// both worms' final bodies. This is what turns a real player's saved
+/// rounds into offline evaluation data, so it must hold exactly.
+#[test]
+fn test_ghost_replay_reproduces_a_recorded_round_exactly() {
+    // ---- RECORD: seeded game, CPU on autopilot, player scripted. ----
+    let mut game = WormGame::with_size_seed(55, 40, 20260806);
+    let mut tick = 0u32;
+    while !game.game_over && game.frame_count < 900 {
+        tick += 1;
+        // Deterministic player: try a turn every 7th frame, prefer right of
+        // current heading, else left; fire anything held.
+        if tick % 7 == 0 {
+            let cur = game.cycles[0].direction;
+            let right = match cur {
+                worm::Direction::Up => worm::Direction::Right,
+                worm::Direction::Right => worm::Direction::Down,
+                worm::Direction::Down => worm::Direction::Left,
+                worm::Direction::Left => worm::Direction::Up,
+            };
+            let left = match cur {
+                worm::Direction::Up => worm::Direction::Left,
+                worm::Direction::Left => worm::Direction::Down,
+                worm::Direction::Down => worm::Direction::Right,
+                worm::Direction::Right => worm::Direction::Up,
+            };
+            let legal = worm::legal_options_from(&game, 0, cur);
+            if legal.contains(&right) {
+                game.change_direction(right);
+            } else if legal.contains(&left) {
+                game.change_direction(left);
+            }
+        }
+        if game.cycles[0].held_powerup.is_some() {
+            game.fire_powerup(0);
+        }
+        game.update();
+    }
+    let log = game.replay.clone();
+    let recorded = (
+        game.winner,
+        game.frame_count,
+        game.food_items.clone(),
+        game.cycles[0].positions.clone(),
+        game.cycles[1].positions.clone(),
+        game.bombs.iter().map(|b| (b.x, b.y)).collect::<Vec<_>>(),
+    );
+    assert!(
+        !log.dirs.is_empty(),
+        "the recorder must have captured direction changes"
+    );
+
+    // ---- REPLAY: both worms driven purely from the log. ----
+    let mut ghost = WormGame::with_size_seed(55, 40, 999); // seed irrelevant
+    ghost.cpu_autopilot = false;
+    ghost.start_recorded_round(log.round_seed, log.width, log.height);
+    let dir_of = |d: u8| match d {
+        0 => worm::Direction::Up,
+        1 => worm::Direction::Down,
+        2 => worm::Direction::Left,
+        _ => worm::Direction::Right,
+    };
+    let (mut di, mut fi) = (0usize, 0usize);
+    while !ghost.game_over && ghost.frame_count < 900 {
+        // Fires recorded at the just-completed frame come first…
+        while fi < log.fires.len() && log.fires[fi].0 == ghost.frame_count {
+            ghost.fire_powerup(log.fires[fi].1 as usize);
+            fi += 1;
+        }
+        // …then the directions the coming frame executed.
+        let next = ghost.frame_count + 1;
+        while di < log.dirs.len() && log.dirs[di].0 == next {
+            let (_, who, d) = log.dirs[di];
+            if who == 0 {
+                ghost.change_direction(dir_of(d));
+            } else {
+                ghost.cycles[1].direction = dir_of(d);
+            }
+            di += 1;
+        }
+        ghost.update();
+    }
+    let replayed = (
+        ghost.winner,
+        ghost.frame_count,
+        ghost.food_items.clone(),
+        ghost.cycles[0].positions.clone(),
+        ghost.cycles[1].positions.clone(),
+        ghost.bombs.iter().map(|b| (b.x, b.y)).collect::<Vec<_>>(),
+    );
+    assert_eq!(
+        recorded, replayed,
+        "a ghost replay must reproduce the recorded round bit-for-bit"
+    );
+}

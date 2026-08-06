@@ -4,14 +4,14 @@
 // The ?v= must match BUILD below (and index.html's) — an unversioned glue
 // import could pair a cached old worm.js with a fresh wasm on the next
 // rebuild that changes the bindings.
-import init, { WasmGame } from './pkg/worm.js?v=8';
+import init, { WasmGame } from './pkg/worm.js?v=9';
 import { Sfx } from './audio.js';
 import { computeBoardLayout, VIEWPORT_BLOCK_GUTTER } from './layout.js';
 
 let CELL = 14; // recomputed by applyBoardLayout() to fit the measured stage
 // Bump together with the ?v= in index.html whenever the wasm bundle is
 // rebuilt — it keys the cache-busting query on the .wasm fetch.
-const BUILD = 8;
+const BUILD = 9;
 const MATCH_TARGET = 3;
 const STATE_SCHEMA_VERSION = 2;
 const ROUND_SCHEMA_VERSION = 1;
@@ -904,8 +904,29 @@ function roundRecord(s) {
       hits: model.hits,
       samples: model.samples,
     })),
+    // The ghost log (ADR-016): seed + both worms' input streams — enough to
+    // replay this round bit-for-bit offline. This is how YOUR games become
+    // the evaluation data future CPU candidates are measured against.
+    replay: (() => {
+      try { return JSON.parse(game.replay_json()); } catch { return null; }
+    })(),
   };
 }
+
+// EXPORT MY ROUNDS — downloads every saved round (with ghost logs) as JSON
+// for the offline evaluator (cargo run --release --example ghost_eval).
+document.getElementById('export-rounds-btn')?.addEventListener('click', async () => {
+  const rounds = await roundsRead();
+  const blob = new Blob(
+    [JSON.stringify({ v: 1, deviceId, exportedAt: Date.now(), rounds }, null, 1)],
+    { type: 'application/json' },
+  );
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `worm-rounds-${new Date().toISOString().slice(0, 10)}.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+});
 
 function appendCell(row, value, className = '') {
   const cell = document.createElement('td');

@@ -38,6 +38,13 @@ export class WasmGame {
     is_over(): boolean;
     constructor(width: number, height: number, seed: bigint);
     /**
+     * The finished round's ghost log — seed, board size, and both worms'
+     * input streams. Enough to replay the round bit-identically offline,
+     * which is how a real player's games become evaluation data (ADR-016).
+     * Read at game over, before the next restart wipes it.
+     */
+    replay_json(): string;
+    /**
      * New match: wipe the scoreboard too (the brain still persists — rps-ai
      * keeps its corpus across everything). The current winner is cleared
      * first so restart() doesn't bank the finished game into the fresh match.
@@ -93,6 +100,7 @@ export interface InitOutput {
     readonly wasmgame_grid: (a: number) => [number, number];
     readonly wasmgame_is_over: (a: number) => number;
     readonly wasmgame_new: (a: number, b: number, c: bigint) => number;
+    readonly wasmgame_replay_json: (a: number) => [number, number];
     readonly wasmgame_reset_match: (a: number) => void;
     readonly wasmgame_reset_match_with_size: (a: number, b: number, c: number) => void;
     readonly wasmgame_restart: (a: number) => void;

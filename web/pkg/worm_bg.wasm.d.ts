@@ -11,6 +11,7 @@ export const wasmgame_frame_delay_ms: (a: number) => bigint;
 export const wasmgame_grid: (a: number) => [number, number];
 export const wasmgame_is_over: (a: number) => number;
 export const wasmgame_new: (a: number, b: number, c: bigint) => number;
+export const wasmgame_replay_json: (a: number) => [number, number];
 export const wasmgame_reset_match: (a: number) => void;
 export const wasmgame_reset_match_with_size: (a: number, b: number, c: number) => void;
 export const wasmgame_restart: (a: number) => void;

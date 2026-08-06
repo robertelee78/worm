@@ -4299,12 +4299,12 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
                     best_dir = d;
                 }
             }
-            if game.rng_f32(0.0, 1.0) < EXPLORE_RATE {
+            if game.rng_cpu_f32(0.0, 1.0) < EXPLORE_RATE {
                 // Draw from the floor-clearing pool, not raw candidates —
                 // exploration must not dive into the pocket the dodge logic
                 // just steered around.
                 choose!(
-                    pool[(game.rng_f32(0.0, pool.len() as f32) as usize).min(pool.len() - 1)],
+                    pool[(game.rng_cpu_f32(0.0, pool.len() as f32) as usize).min(pool.len() - 1)],
                     CpuDecisionReason::CloseEvasion
                 );
             }

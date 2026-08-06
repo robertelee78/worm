@@ -108,6 +108,25 @@ export class WasmGame {
         return this;
     }
     /**
+     * The finished round's ghost log — seed, board size, and both worms'
+     * input streams. Enough to replay the round bit-identically offline,
+     * which is how a real player's games become evaluation data (ADR-016).
+     * Read at game over, before the next restart wipes it.
+     * @returns {string}
+     */
+    replay_json() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.wasmgame_replay_json(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
+    }
+    /**
      * New match: wipe the scoreboard too (the brain still persists — rps-ai
      * keeps its corpus across everything). The current winner is cleared
      * first so restart() doesn't bank the finished game into the fresh match.

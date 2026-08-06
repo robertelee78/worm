@@ -150,6 +150,7 @@ cargo test --test persona_learning -- --nocapture     # the claim, ~45s
 cargo run --release --example engagement_probe -- browser   # engagement + death census
 cargo run --release --example intent_probe -- 24 1500 20260805  # errand-model reads
 node scripts/page_probe.mjs                           # the SERVED page, headless (needs playwright)
+cargo run --release --example ghost_eval -- rounds.json  # read of the REAL player (EXPORT MY ROUNDS)
 cargo bench --bench cpu_ai_bench                      # CPU benchmarks
 ```
 
@@ -191,6 +192,7 @@ living documents — if one disagrees with the code, the ADR is the bug.
 - [ADR-013](docs/adrs/013-the-improvement-flywheel.md) — the improvement flywheel
 - [ADR-014](docs/adrs/014-the-codex-corrections.md) — the codex corrections: what survived measurement
 - [ADR-015](docs/adrs/015-nightly-darwin.md) — nightly Darwin: continual improvement with human promotion
+- [ADR-016](docs/adrs/016-ghost-replay.md) — ghost replay: the real human becomes the benchmark
 
 ### A note on the numbers in this repo
 

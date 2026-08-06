@@ -271,13 +271,31 @@ pub struct WormGame {
     pub bombs: Vec<Bomb>,
     /// Frames until the next power-up spawn attempt.
     pub powerup_timer: u32,
-    /// Seeded RNG for deterministic benchmarks. None = thread RNG.
+    /// Seeded WORLD RNG (food/power-up spawns, mine disguises, particles) —
+    /// deterministic per round from the recorded round seed. None = thread RNG.
     pub rng: Option<StdRng>,
+    /// Separate CPU-DECISION stream (explore rolls). Split from the world
+    /// stream so a ghost replay — which re-drives the CPU from the log and
+    /// never calls cpu_decide — consumes the world stream identically and
+    /// reproduces the round's item spawns bit-for-bit.
+    pub cpu_rng: Option<StdRng>,
+    /// Ghost recorder: everything needed to replay THIS round exactly —
+    /// the per-round seed the RNG was reseeded from, board size, and both
+    /// worms' direction changes and fire frames. A recorded round replays
+    /// bit-identically from (seed, size, log) alone, which is what lets a
+    /// real player's games become evaluation data (ADR-016).
+    pub replay: ReplayLog,
     /// When false, the CPU is driven externally (benchmark scripted opponents)
     /// and update() neither calls cpu_decide/should_fire nor records CPU
     /// episodes — the "naive" bench row is then a genuinely naive wall
     /// follower instead of a fresh-brain adaptive CPU in disguise.
     pub cpu_autopilot: bool,
+    /// Ghost-eval mode: run the full learning + forecasting pipeline (episode
+    /// recording, ensemble scoring, sealed forecasts) WITHOUT cpu_decide —
+    /// both worms are driven externally from a replay log, and the brain
+    /// under evaluation watches the recorded human exactly as it would have
+    /// watched them live (ADR-016).
+    pub shadow_learning: bool,
     /// Session scoreboard (rps-ai's You-vs-Computer bar): games won by
     /// [player, cpu] since process start. Banked in restart(), never reset
     /// in-session.
@@ -368,6 +386,47 @@ pub struct CPUPlayRecord {
     pub seq: u32,
 }
 
+/// The ghost log — a round's complete input record. ~1-3 KB per round.
+#[derive(Clone, Debug, Default)]
+pub struct ReplayLog {
+    /// Seed the round's RNG was (re)seeded from at round start.
+    pub round_seed: u64,
+    pub width: u16,
+    pub height: u16,
+    /// (frame, who, direction as u8) — logged whenever a worm's ACTUAL
+    /// movement direction changed that frame. Initial directions are the
+    /// spawn constants (player Right, CPU Left) and are not logged.
+    pub dirs: Vec<(u32, u8, u8)>,
+    /// (frame_count at fire time, who) for every successful fire.
+    pub fires: Vec<(u32, u8)>,
+    /// Movement directions actually taken last frame, per cycle — the
+    /// change detector's memory, not part of the export.
+    pub last_dirs: [Option<Direction>; 2],
+}
+
+impl ReplayLog {
+    pub fn to_json(&self) -> String {
+        let dirs: Vec<String> = self
+            .dirs
+            .iter()
+            .map(|&(f, w, d)| format!("[{},{},{}]", f, w, d))
+            .collect();
+        let fires: Vec<String> = self
+            .fires
+            .iter()
+            .map(|&(f, w)| format!("[{},{}]", f, w))
+            .collect();
+        format!(
+            "{{\"v\":1,\"seed\":{},\"w\":{},\"h\":{},\"dirs\":[{}],\"fires\":[{}]}}",
+            self.round_seed,
+            self.width,
+            self.height,
+            dirs.join(","),
+            fires.join(",")
+        )
+    }
+}
+
 impl Default for WormGame {
     fn default() -> Self {
         Self::new()
@@ -388,6 +447,18 @@ impl WormGame {
             Some(rng) => rng.random_range(range),
             #[cfg(not(target_arch = "wasm32"))]
             None => rand::rng().random_range(range),
+            #[cfg(target_arch = "wasm32")]
+            None => unimplemented!("worm: unseeded RNG on wasm — pass a seed"),
+        }
+    }
+
+    /// CPU-decision stream: random float in [a, b). See `cpu_rng`.
+    pub fn rng_cpu_f32(&mut self, a: f32, b: f32) -> f32 {
+        use rand::RngExt;
+        match self.cpu_rng.as_mut() {
+            Some(rng) => rng.random_range(a..b),
+            #[cfg(not(target_arch = "wasm32"))]
+            None => rand::rng().random_range(a..b),
             #[cfg(target_arch = "wasm32")]
             None => unimplemented!("worm: unseeded RNG on wasm — pass a seed"),
         }
@@ -472,7 +543,9 @@ impl WormGame {
             bombs: Vec::new(),
             powerup_timer: 60,
             rng: seed.map(StdRng::seed_from_u64),
+            cpu_rng: seed.map(|s| StdRng::seed_from_u64(s ^ 0xC0FF_EE00_D15E_A5E5)),
             cpu_autopilot: true,
+            shadow_learning: false,
             session_wins: [0, 0],
             fixed_dims,
             food_eaten_total: 0,
@@ -489,9 +562,34 @@ impl WormGame {
             death_cause: None,
             cpu_laser_charge: 0,
             shrink_level: 0,
+            replay: ReplayLog::default(),
         };
+        // Round 1 goes through the same reseed as every later round, so the
+        // first game is ghost-replayable too. Deterministic: the round seed
+        // is drawn from the launch-seeded stream.
+        game.begin_round_replay(None);
         game.generate_food_items();
         game
+    }
+
+    /// Reseed the round RNG from a fresh per-round seed and start the ghost
+    /// log. `forced` replays a recorded round; `None` derives the seed from
+    /// the current stream, so an entire session stays a pure function of the
+    /// launch seed while every round becomes independently reproducible from
+    /// its own (seed, size, input log) triple.
+    pub fn begin_round_replay(&mut self, forced: Option<u64>) {
+        let round_seed = match forced {
+            Some(s) => s,
+            None => self.rng_range(0..u64::MAX),
+        };
+        self.rng = Some(StdRng::seed_from_u64(round_seed));
+        self.cpu_rng = Some(StdRng::seed_from_u64(round_seed ^ 0xC0FF_EE00_D15E_A5E5));
+        self.replay = ReplayLog {
+            round_seed,
+            width: self.width,
+            height: self.height,
+            ..Default::default()
+        };
     }
 
     /// Build the arena grid. Ring 0 (screen frame) is always Wall. When the
@@ -683,7 +781,7 @@ impl WormGame {
 
         // Last frame's forecasts targeted this input, even when this move is
         // lethal. Score them before collision early-returns can end the game.
-        if self.cpu_autopilot {
+        if self.cpu_autopilot || self.shadow_learning {
             // The choice the player actually faced this frame, read before
             // anything moves. `prev_direction` is the heading they were
             // travelling, so the turn is relative to that — the same anchor
@@ -1042,7 +1140,7 @@ impl WormGame {
         // --- The rps-ai ensemble: score last frame's predictions against the
         // actual move, then refresh every model's prediction for next frame
         // (counterfactual recording — rps-ai stores model0..5 every round).
-        if self.cpu_autopilot {
+        if self.cpu_autopilot || self.shadow_learning {
             let (pending, _premask_active, _premask_conf, intent_targets) =
                 crate::cpu_ai::compute_ensemble(self, &self.cpu_brain);
             // Errand hysteresis for the eat/arm intent models — see
@@ -1324,6 +1422,18 @@ impl WormGame {
         // snapshot; corner/transition features read prev_direction).
         self.cycles[0].snapshot_direction();
         self.cycles[1].snapshot_direction();
+
+        // Ghost recorder: log the movement direction each worm ACTUALLY took
+        // this frame, on change. Recording executed movement (not raw input)
+        // means a replay that re-applies these via change_direction is legal
+        // by construction and reproduces the round bit-for-bit.
+        for who in 0..2usize {
+            let d = self.cycles[who].direction;
+            if self.replay.last_dirs[who] != Some(d) {
+                self.replay.last_dirs[who] = Some(d);
+                self.replay.dirs.push((self.frame_count, who as u8, d as u8));
+            }
+        }
 
         // Live projectiles and planted bombs (can end the game).
         self.advance_projectiles();
@@ -1622,6 +1732,10 @@ impl WormGame {
         self.cpu_telemetry = crate::cpu_ai::CpuFrameTelemetry::default();
         self.round_last_cpu_decision = None;
         self.death_cause = None;
+        // Fresh per-round seed + ghost log — see `begin_round_replay`. Placed
+        // before food generation so the round's entire item stream derives
+        // from the recorded seed.
+        self.begin_round_replay(None);
         self.generate_food_items();
     }
 
@@ -1631,6 +1745,28 @@ impl WormGame {
     pub fn restart_with_size(&mut self, width: u16, height: u16) {
         self.fixed_dims = Some((width, height));
         self.restart();
+    }
+
+    /// Reset into the EXACT starting state of a recorded round: same size,
+    /// same round seed, same item stream. The caller then re-drives both
+    /// worms from the ghost log (`cpu_autopilot` off) and the round replays
+    /// bit-for-bit — the world stream is untouched by CPU decisions, which
+    /// draw from their own `cpu_rng`.
+    pub fn start_recorded_round(&mut self, seed: u64, width: u16, height: u16) {
+        self.fixed_dims = Some((width, height));
+        // Never bank a stale winner into the session scoreboard mid-harness.
+        self.winner = None;
+        self.restart();
+        // restart() drew its own round seed and spawned food from it; replace
+        // both with the recorded stream.
+        self.begin_round_replay(Some(seed));
+        for (x, y, _) in self.food_items.clone() {
+            if self.grid[y as usize][x as usize] == CellType::Food {
+                self.grid[y as usize][x as usize] = CellType::Empty;
+            }
+        }
+        self.food_items.clear();
+        self.generate_food_items();
     }
 
     pub fn frame_delay(&self) -> Duration {
@@ -1683,6 +1819,10 @@ impl WormGame {
             Some(k) => k,
             None => return false,
         };
+        // Ghost recorder: a successful fire is an input, and inputs are the
+        // replay. frame_count here is the last COMPLETED frame — the replay
+        // driver re-fires after that frame's update, before the next.
+        self.replay.fires.push((self.frame_count, who as u8));
         let (hx, hy) = self.cycles[who].head;
         let dir = self.cycles[who].direction;
         let (dx, dy) = dir.as_delta();
