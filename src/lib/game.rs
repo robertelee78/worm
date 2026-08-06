@@ -1032,8 +1032,11 @@ impl WormGame {
         // actual move, then refresh every model's prediction for next frame
         // (counterfactual recording — rps-ai stores model0..5 every round).
         if self.cpu_autopilot {
-            let (pending, active, confidence) =
+            let (pending, active, confidence, intent_targets) =
                 crate::cpu_ai::compute_ensemble(self, &self.cpu_brain);
+            // Errand hysteresis for the eat/arm intent models — see
+            // `CpuBrain::intent_targets`.
+            self.cpu_brain.intent_targets = intent_targets;
 
             // The heading the player will be travelling when they choose next.
             // `snapshot_direction` has not run yet, so this frame's move lives

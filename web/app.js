@@ -13,7 +13,7 @@ const MATCH_TARGET = 3;
 const STATE_SCHEMA_VERSION = 2;
 const ROUND_SCHEMA_VERSION = 1;
 const MAX_ROUND_HISTORY = 200;
-const MODEL_NAMES = ['rep', 'pat', 'frq', 'due', 'wlR', 'wlL', 'knn', 'eat', 'hunt', 'arm'];
+const MODEL_NAMES = ['rep', 'pat', 'frq', 'due', 'wlR', 'wlL', 'knn', 'eat', 'hunt', 'arm', 'eatW', 'huntW', 'armW'];
 const DIR_GLYPH = ['▲', '▼', '◀', '▶'];
 const CELL_EMPTY = 0, CELL_WALL = 1, CELL_PLAYER = 2, CELL_CPU = 3, CELL_FOOD = 4, CELL_HOLE = 5, CELL_POWERUP = 6;
 
@@ -787,12 +787,19 @@ function hud(s) {
         forced turns, and the moves that got you killed — with the situation you
         were in. Routine corridor frames are mostly skipped: they describe the
         board, not you. ${b.memory.opponentRetained} situations held.</p>`,
-      `<p><b>How it guesses.</b> Seven simple assumptions about you all guess at
-        once; whichever has been right most lately drives (currently
+      `<p><b>How it guesses.</b> A panel of simple assumptions about you all
+        guess at once; whichever has been right most lately drives (currently
         ${b.nextForecast?.sourceName || '—'}) — except when you are forced to
         turn, where it bets directly on your measured turning habit. Guesses
         you could not actually make are corrected to your likeliest legal
-        move.</p>`,
+        move; an assumption with nothing to say stays silent rather than
+        being scored on a guess it never made.</p>`,
+      `<p><b>Why you move.</b> Three of those assumptions are about your
+        errand, not your habits: you're going for that food, you're coming
+        for me, you're going for that weapon. Each comes in two travelling
+        styles — you hold your line on the way, or you weave — and the
+        weights work out which style is yours purely by watching which one
+        keeps being right.</p>`,
       `<p><b>What the read rate means.</b> It is measured against <i>your own
         habits</i>, not against random: a rival that always guesses your
         commonest move would score ${rr.ready ? pct(rr.baseRate) : '—'}, and

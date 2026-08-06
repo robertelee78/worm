@@ -1204,6 +1204,14 @@ pub struct CpuBrain {
     /// Which temperaments beat THIS human — knowledge about them, persisted.
     #[serde(skip)]
     pub portfolio: Portfolio,
+    /// Hysteresis for the eat/arm intent models: the target cell each family
+    /// is currently committed to ([0] = eat, [1] = arm). A human on an errand
+    /// does not re-shop for a marginally nearer morsel mid-run; the models
+    /// keep predicting toward the committed target while the player's own
+    /// observed moves keep shortening the route to it. Transient by design —
+    /// an errand does not survive a session.
+    #[serde(skip)]
+    pub intent_targets: [Option<(u16, u16)>; 2],
 }
 
 impl Default for CpuBrain {
@@ -1222,6 +1230,7 @@ impl Default for CpuBrain {
             lifetime_read: ReadRate::default(),
             turn_pattern: TurnPattern::default(),
             portfolio: Portfolio::default(),
+            intent_targets: [None; 2],
         }
     }
 }
@@ -3181,14 +3190,22 @@ fn left_turn(dir: Direction) -> Direction {
  * rps-ai's per-game record); the k-NN memory beneath persists as the corpus.
  */
 
-pub const ENSEMBLE_MODELS: usize = 10;
+pub const ENSEMBLE_MODELS: usize = 13;
 /// Index of the k-NN model — the warm-corpus score bonus attaches here, not
 /// to "the last model", which stopped being the k-NN when the intent models
 /// joined.
 pub const KNN_MODEL: usize = 6;
-/// Short names for the HUD brain panel, in model order.
-pub const MODEL_NAMES: [&str; ENSEMBLE_MODELS] =
-    ["rep", "pat", "frq", "due", "wlR", "wlL", "knn", "eat", "hunt", "arm"];
+/// Short names for the HUD brain panel, in model order. The intent models
+/// come in TWINS — the same errand hypothesis in two travelling styles.
+/// `eat`/`hunt`/`arm` hold the line (a human on an errand keeps their heading
+/// while it still shortens the route); the `…W` twins weave (turn the moment
+/// any turn is equally short — the router's habit). The fixed-share weights
+/// elect whichever style THIS human actually travels with, which is the
+/// product claim in one mechanism. Slots 7-9 keep their historical indices.
+pub const MODEL_NAMES: [&str; ENSEMBLE_MODELS] = [
+    "rep", "pat", "frq", "due", "wlR", "wlL", "knn", "eat", "hunt", "arm", "eatW", "huntW",
+    "armW",
+];
 /// Score bonus for the sophisticated model once warm (rps-ai's +0.15).
 const KNN_SCORE_BONUS: f32 = 0.15;
 
@@ -3444,8 +3461,153 @@ fn player_steps(game: &WormGame) -> Vec<Direction> {
     legal_options_from(game, 0, game.cycles[0].direction)
 }
 
-/// M7 `eat`: the player is HEADED FOR FOOD. Predicts the step that most
-/// shortens the way to their nearest apparent morsel — where "apparent"
+/// Multi-source BFS distance field to the nearest of `targets`, over the
+/// board the PLAYER faces. field[y*w + x] = steps to the nearest target, -1
+/// unreachable. Targets are seeds at distance 0 whether or not their own
+/// cell is passable (a disguised mine reads as food to the player — the
+/// errand ends ON it).
+///
+/// Routing, not crow-flies: the greedy Manhattan step the old intent models
+/// used agreed with real routing on ~93% of frames — and the disagreement
+/// landed almost entirely on the voluntary-turn frames, the only ones that
+/// carry a decision. A model that is wrong exactly when the player chooses
+/// is worse than no model.
+fn target_field(game: &WormGame, targets: &[(u16, u16)]) -> Vec<i32> {
+    let w = game.width as usize;
+    let mut field = vec![-1i32; w * game.height as usize];
+    let mut q: VecDeque<(u16, u16)> = VecDeque::new();
+    for &(tx, ty) in targets {
+        if tx < game.width && ty < game.height {
+            let idx = ty as usize * w + tx as usize;
+            if field[idx] == -1 {
+                field[idx] = 0;
+                q.push_back((tx, ty));
+            }
+        }
+    }
+    while let Some((x, y)) = q.pop_front() {
+        let d = field[y as usize * w + x as usize];
+        for (dx, dy) in [(0i16, -1i16), (0, 1), (-1, 0), (1, 0)] {
+            let nx = x as i16 + dx;
+            let ny = y as i16 + dy;
+            if nx < 0 || ny < 0 || nx >= game.width as i16 || ny >= game.height as i16 {
+                continue;
+            }
+            let (nx, ny) = (nx as u16, ny as u16);
+            let idx = ny as usize * w + nx as usize;
+            if field[idx] == -1 && game.passable(nx, ny) {
+                field[idx] = d + 1;
+                q.push_back((nx, ny));
+            }
+        }
+    }
+    field
+}
+
+/// The step an errand-running player takes given a distance field: the legal
+/// move that most shortens the route. `hold` selects the travelling style —
+/// the ONE free parameter the twins differ in:
+///
+///   hold  — ties go to the current heading. In an open arena both axis
+///           moves shorten the route equally for most of the trip; a human
+///           holds their line. Measured on a committed human forager, the
+///           strict minimiser read 12.2% of their voluntary turns and this
+///           read 93.7% — same field, opposite tie-break.
+///   weave — strict minimiser (deterministic enum-order tie-break): the
+///           style of a router, or a human who corrects course every cell.
+///
+/// Abstains (None) when there is no field, the target is unreachable, or no
+/// legal step shortens anything — silence, not a manufactured guess.
+fn intent_step(game: &WormGame, field: &[i32], hold: bool) -> Option<Direction> {
+    let (px, py) = game.cycles[0].head;
+    let w = game.width as usize;
+    let steps = player_steps(game);
+    let val = |d: Direction| -> i32 {
+        let (dx, dy) = d.as_delta();
+        let nx = px as i16 + dx;
+        let ny = py as i16 + dy;
+        if nx < 0 || ny < 0 || nx >= game.width as i16 || ny >= game.height as i16 {
+            return i32::MAX;
+        }
+        match field[ny as usize * w + nx as usize] {
+            -1 => i32::MAX,
+            v => v,
+        }
+    };
+    let best = steps.iter().map(|&d| val(d)).min()?;
+    if best == i32::MAX {
+        return None; // target unreachable from every legal step
+    }
+    let heading = game.cycles[0].direction;
+    if hold && steps.contains(&heading) && val(heading) == best {
+        return Some(heading);
+    }
+    steps.into_iter().find(|&d| val(d) == best)
+}
+
+/// One errand family (eat or arm): commit to a target with hysteresis, build
+/// its field, and predict both travelling styles from it.
+///
+/// Commitment is OBSERVATION-DRIVEN, which keeps information parity: the
+/// model keeps its target only while the player's own last move shortened
+/// the route to it (they are demonstrably still on that errand); it re-shops
+/// for the nearest target the moment they stop closing, or the target is
+/// gone. A human mid-errand does not re-shop for a marginally nearer morsel;
+/// a model that does predicts turns the human never makes.
+fn intent_family(
+    game: &WormGame,
+    targets: &[(u16, u16)],
+    committed: Option<(u16, u16)>,
+) -> (Option<Direction>, Option<Direction>, Option<(u16, u16)>) {
+    if targets.is_empty() {
+        return (None, None, None);
+    }
+    let (px, py) = game.cycles[0].head;
+    let w = game.width as usize;
+
+    let mut commit = committed.filter(|t| targets.contains(t));
+    if let Some(t) = commit {
+        let f = target_field(game, &[t]);
+        let here = f[py as usize * w + px as usize];
+        // The previous head is the neck — observable by anyone watching.
+        let still_closing = match game.cycles[0].positions.get(1) {
+            Some(&(qx, qy)) if here >= 0 => {
+                let prev = f[qy as usize * w + qx as usize];
+                prev < 0 || here < prev
+            }
+            _ => here >= 0,
+        };
+        if still_closing {
+            return (
+                intent_step(game, &f, true),
+                intent_step(game, &f, false),
+                Some(t),
+            );
+        }
+        commit = None;
+    }
+    debug_assert!(commit.is_none());
+    // Re-shop: nearest target by ROUTING (multi-source field), then commit
+    // to the specific one the player's best step actually approaches.
+    let f = target_field(game, targets);
+    let hold = intent_step(game, &f, true);
+    let weave = intent_step(game, &f, false);
+    // Commit to the Manhattan-nearest target. The multi-source field knows
+    // only the distance to the nearest target, not WHICH one; per-target
+    // routed distance would cost a BFS each. Manhattan is a fine first
+    // guess, and the closing test above evicts a wrong commitment on the
+    // very next observed move.
+    let new_commit = hold.map(|_| {
+        targets
+            .iter()
+            .copied()
+            .min_by_key(|&(tx, ty)| (tx as i32 - px as i32).abs() + (ty as i32 - py as i32).abs())
+            .unwrap_or((px, py))
+    });
+    (hold, weave, new_commit)
+}
+
+/// M7/M10 `eat`/`eatW`: the player is HEADED FOR FOOD — where "food"
 /// includes the CPU's own disguised mines, because to the player those ARE
 /// food. When this model is driving, the panel is literally saying "I think
 /// you're going for that food" — and if the food is bait, so much the better.
@@ -3454,9 +3616,11 @@ fn player_steps(game: &WormGame) -> Vec<Direction> {
 /// crossing an open arena in a straight line is not expressing a turning
 /// habit, they are executing an errand — and predicting the errand is what
 /// makes the read feel like being understood rather than being tallied.
-fn m_goal(game: &WormGame) -> Option<Direction> {
-    let (px, py) = game.cycles[0].head;
-    let target = game
+fn m_eat_family(
+    game: &WormGame,
+    committed: Option<(u16, u16)>,
+) -> (Option<Direction>, Option<Direction>, Option<(u16, u16)>) {
+    let targets: Vec<(u16, u16)> = game
         .food_items
         .iter()
         .map(|&(x, y, _)| (x, y))
@@ -3466,59 +3630,63 @@ fn m_goal(game: &WormGame) -> Option<Direction> {
                 .filter(|b| b.owner == 1)
                 .map(|b| (b.x, b.y)),
         )
-        .min_by_key(|&(x, y)| {
-            (x as i32 - px as i32).abs() + (y as i32 - py as i32).abs()
-        })?;
-    player_steps(game).into_iter().min_by_key(|d| {
-        let (dx, dy) = d.as_delta();
-        let nx = px as i32 + dx as i32;
-        let ny = py as i32 + dy as i32;
-        (nx - target.0 as i32).abs() + (ny - target.1 as i32).abs()
-    })
+        .collect();
+    intent_family(game, &targets, committed)
 }
 
-/// M8 `hunt`: the player is COMING FOR US. Predicts the step that closes on
-/// the CPU's head — the opening move of every wall-in. When this hypothesis
-/// carries the weight, the human is not foraging or habit-walking; they are
-/// hunting, and the CPU should expect to be cut off, not followed.
-fn m_hunt(game: &WormGame) -> Option<Direction> {
-    let (px, py) = game.cycles[0].head;
+/// M8/M11 `hunt`/`huntW`: the player is COMING FOR US — the opening move of
+/// every wall-in. Routes to the cells ADJACENT to the CPU's head: the head
+/// cell itself is impassable (usually backed by our own trail), and aiming
+/// at it read a genuine hunter at 65.5% raw. A hunter's destination is
+/// beside us, never inside us. No hysteresis — the target moves every frame.
+fn m_hunt_family(game: &WormGame) -> (Option<Direction>, Option<Direction>) {
     let (cx, cy) = game.cycles[1].head;
-    player_steps(game).into_iter().min_by_key(|d| {
-        let (dx, dy) = d.as_delta();
-        let nx = px as i32 + dx as i32;
-        let ny = py as i32 + dy as i32;
-        (nx - cx as i32).abs() + (ny - cy as i32).abs()
-    })
+    let mut targets: Vec<(u16, u16)> = Vec::with_capacity(4);
+    for (dx, dy) in [(0i16, -1i16), (0, 1), (-1, 0), (1, 0)] {
+        let nx = cx as i16 + dx;
+        let ny = cy as i16 + dy;
+        if nx >= 0
+            && ny >= 0
+            && nx < game.width as i16
+            && ny < game.height as i16
+            && game.passable(nx as u16, ny as u16)
+        {
+            targets.push((nx as u16, ny as u16));
+        }
+    }
+    if targets.is_empty() {
+        return (None, None);
+    }
+    let f = target_field(game, &targets);
+    (intent_step(game, &f, true), intent_step(game, &f, false))
 }
 
-/// M9 `arm`: the player is GOING FOR A POWER-UP. Same shape as `eat`, but
-/// power-ups only — they are visually distinct icons, worth a longer detour,
-/// and a player heading for one is about to become dangerous. "Why are you
-/// moving" has at least three answers a habit tally can never give: food,
-/// weapon, or me. This is the weapon one.
-fn m_arm(game: &WormGame) -> Option<Direction> {
-    let (px, py) = game.cycles[0].head;
-    let target = game
-        .powerups
-        .iter()
-        .map(|&(x, y, _)| (x, y))
-        .min_by_key(|&(x, y)| {
-            (x as i32 - px as i32).abs() + (y as i32 - py as i32).abs()
-        })?;
-    player_steps(game).into_iter().min_by_key(|d| {
-        let (dx, dy) = d.as_delta();
-        let nx = px as i32 + dx as i32;
-        let ny = py as i32 + dy as i32;
-        (nx - target.0 as i32).abs() + (ny - target.1 as i32).abs()
-    })
+/// M9/M12 `arm`/`armW`: the player is GOING FOR A POWER-UP. Same shape as
+/// `eat`, but power-ups only — they are visually distinct icons, worth a
+/// longer detour, and a player heading for one is about to become dangerous.
+/// "Why are you moving" has at least three answers a habit tally can never
+/// give: food, weapon, or me. This is the weapon one.
+fn m_arm_family(
+    game: &WormGame,
+    committed: Option<(u16, u16)>,
+) -> (Option<Direction>, Option<Direction>, Option<(u16, u16)>) {
+    let targets: Vec<(u16, u16)> = game.powerups.iter().map(|&(x, y, _)| (x, y)).collect();
+    intent_family(game, &targets, committed)
 }
 
 pub fn compute_ensemble(
     game: &WormGame,
     brain: &CpuBrain,
-) -> ([Option<Direction>; ENSEMBLE_MODELS], usize, f32) {
+) -> (
+    [Option<Direction>; ENSEMBLE_MODELS],
+    usize,
+    f32,
+    [Option<(u16, u16)>; 2],
+) {
     let tail = &brain.player_tail;
+    let (eat, eat_w, eat_commit) = m_eat_family(game, brain.intent_targets[0]);
+    let (hunt, hunt_w) = m_hunt_family(game);
+    let (arm, arm_w, arm_commit) = m_arm_family(game, brain.intent_targets[1]);
     let pending = [
         m_repeat(tail),
         m_pattern(tail),
@@ -3527,9 +3695,12 @@ pub fn compute_ensemble(
         m_wall(game, true),
         m_wall(game, false),
         m_knn(game, brain),
-        m_goal(game),
-        m_hunt(game),
-        m_arm(game),
+        eat,
+        hunt,
+        arm,
+        eat_w,
+        hunt_w,
+        arm_w,
     ];
 
     let e = &brain.ensemble;
@@ -3566,7 +3737,7 @@ pub fn compute_ensemble(
     } else {
         0.0
     };
-    (pending, active, confidence)
+    (pending, active, confidence, [eat_commit, arm_commit])
 }
 
 /// Effective score used by ensemble selection. The UI exports this alongside

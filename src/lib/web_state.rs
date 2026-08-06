@@ -24,6 +24,9 @@ const MODEL_DISPLAY_NAMES: [&str; ENSEMBLE_MODELS] = [
     "Food-seeker",
     "Hunter",
     "Arming-up",
+    "Food-seeker · weaving",
+    "Hunter · weaving",
+    "Arming-up · weaving",
 ];
 
 #[derive(Serialize)]

@@ -792,14 +792,14 @@ fn test_round_boundary_resize_preserves_brain_and_banks_winner_once() {
 #[test]
 fn test_knn_model_abstains_cold_joins_warm() {
     let mut game = WormGame::with_size(120, 38);
-    let (pending, _, _) = worm::cpu_ai::compute_ensemble(&game, &game.cpu_brain);
+    let (pending, _, _, _) = worm::cpu_ai::compute_ensemble(&game, &game.cpu_brain);
     assert_eq!(pending[6], None, "knn abstains with an empty memory");
 
     let ctx = [0.1f32; worm::cpu_ai::PLAYER_FEATURE_DIM];
     for _ in 0..60 {
         worm::record_player_episode(&mut game.cpu_brain, ctx, worm::Direction::Right, true);
     }
-    let (pending, _, _) = worm::cpu_ai::compute_ensemble(&game, &game.cpu_brain);
+    let (pending, _, _, _) = worm::cpu_ai::compute_ensemble(&game, &game.cpu_brain);
     assert!(pending[6].is_some(), "knn predicts once warm");
 }
 
@@ -1945,4 +1945,102 @@ fn test_escorted_wall_lane_is_refused_before_the_lock_forms() {
         game.frame_count,
         game.death_cause,
     );
+}
+
+/// The intent models ROUTE, they do not crow-fly. A greedy Manhattan step
+/// walks the player's prediction into a wall; the disagreement with real
+/// routing lands almost entirely on voluntary-turn frames — the only frames
+/// that carry a decision.
+#[test]
+fn test_eat_model_routes_around_a_wall() {
+    let mut game = WormGame::with_size(55, 40);
+    for row in &mut game.grid {
+        for cell in row.iter_mut() {
+            if *cell != worm::CellType::Wall {
+                *cell = worm::CellType::Empty;
+            }
+        }
+    }
+    game.food_items.clear();
+    game.powerups.clear();
+    game.cycles[0].head = (10, 8);
+    game.cycles[0].direction = worm::Direction::Right;
+    game.cycles[0].positions = vec![(10, 8), (9, 8)];
+    game.grid[8][10] = worm::CellType::Player;
+    game.grid[8][9] = worm::CellType::Player;
+    game.cycles[1].head = (40, 30);
+    game.cycles[1].positions = vec![(40, 30)];
+    game.grid[30][40] = worm::CellType::CPU;
+    // A comb tooth: the player sits inside a cul-de-sac open only behind
+    // them, and the food is on the far side of the tooth. Every step deeper
+    // into the pocket (Right, toward the food as the crow flies) is a STRICT
+    // detour on the actual route, not a tie the hold-the-line rule could
+    // mask.
+    for y in 3..=15 {
+        game.grid[y][12] = worm::CellType::Wall;
+    }
+    for x in 9..=12 {
+        game.grid[15][x] = worm::CellType::Wall;
+    }
+    game.food_items.push((14, 8, 1));
+    game.grid[8][14] = worm::CellType::Food;
+
+    let (pending, _, _, _) = worm::cpu_ai::compute_ensemble(&game, &game.cpu_brain);
+    // Greedy Manhattan says Right — deeper into the pocket. Routing says out.
+    assert!(
+        pending[7].is_some(),
+        "food is reachable, so the errand model must speak"
+    );
+    assert_ne!(
+        pending[7],
+        Some(worm::Direction::Right),
+        "eat must predict the step that shortens the ROUTE, not the crow-fly \
+         step deeper into a cul-de-sac"
+    );
+}
+
+/// The twins differ in exactly one thing: what a player does when two steps
+/// shorten the errand equally. `eat` holds the line; `eatW` weaves.
+#[test]
+fn test_intent_twins_disagree_only_on_ties() {
+    let mut game = WormGame::with_size(55, 40);
+    for row in &mut game.grid {
+        for cell in row.iter_mut() {
+            if *cell != worm::CellType::Wall {
+                *cell = worm::CellType::Empty;
+            }
+        }
+    }
+    game.food_items.clear();
+    game.powerups.clear();
+    game.cycles[0].head = (10, 10);
+    game.cycles[0].direction = worm::Direction::Right;
+    game.cycles[0].positions = vec![(10, 10), (9, 10)];
+    game.grid[10][10] = worm::CellType::Player;
+    game.grid[10][9] = worm::CellType::Player;
+    game.cycles[1].head = (40, 30);
+    game.cycles[1].positions = vec![(40, 30)];
+    game.grid[30][40] = worm::CellType::CPU;
+    // Food diagonally away: Right and Down shorten the route equally the
+    // whole way along the L.
+    game.food_items.push((15, 15, 1));
+    game.grid[15][15] = worm::CellType::Food;
+
+    let (pending, _, _, _) = worm::cpu_ai::compute_ensemble(&game, &game.cpu_brain);
+    assert_eq!(
+        pending[7],
+        Some(worm::Direction::Right),
+        "the hold-the-line twin keeps the current heading on a tie"
+    );
+    assert_eq!(
+        pending[10],
+        Some(worm::Direction::Down),
+        "the weaving twin takes the strict minimiser's turn on the same tie"
+    );
+    // And with no food at all, both abstain rather than guess.
+    game.food_items.clear();
+    game.grid[15][15] = worm::CellType::Empty;
+    let (pending, _, _, _) = worm::cpu_ai::compute_ensemble(&game, &game.cpu_brain);
+    assert_eq!(pending[7], None, "no errand, no guess");
+    assert_eq!(pending[10], None, "no errand, no guess (weave)");
 }
