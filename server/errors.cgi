@@ -19,8 +19,9 @@ def main() -> None:
         return
     try:
         rec = json.loads(sys.stdin.buffer.read(length))
-        assert isinstance(rec, dict) and rec.get("v") == 1
     except Exception:
+        return
+    if not (isinstance(rec, dict) and rec.get("v") == 1):
         return
     os.makedirs(OUT_DIR, exist_ok=True)
     day = datetime.datetime.utcnow().strftime("%Y%m%d")

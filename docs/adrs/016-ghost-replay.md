@@ -1,10 +1,22 @@
 # ADR-016: Ghost Replay — The Real Human Becomes the Benchmark
 
 ## Status
-Implemented
+Implemented (wire v2 — ordered event stream)
 
 ## Date
 2026-08-06
+
+## Updated
+2026-08-06 — external review (codex gpt-5.6-sol) found three divergence
+classes the v1 two-array wire could not represent: fatal-frame turns were
+recorded after the collision early-returns (never logged), turn-then-fire
+ordering was lost (the bolt flew along the wrong heading), and CPU fires
+replayed at the wrong phase inside the frame. v2 is ONE totally-ordered
+event stream recorded at the live input sites and re-injected at those
+same sites, so phase fidelity holds by construction; replay runs exactly
+the recorded frame count, collision policy is live-equivalent during
+replay, and the shadow path no longer trains the portfolio off-policy.
+v1 ghosts are skipped loudly by the evaluator, not guessed at.
 
 ## Context
 

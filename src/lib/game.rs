@@ -280,11 +280,15 @@ pub struct WormGame {
     /// reproduces the round's item spawns bit-for-bit.
     pub cpu_rng: Option<StdRng>,
     /// Ghost recorder: everything needed to replay THIS round exactly —
-    /// the per-round seed the RNG was reseeded from, board size, and both
-    /// worms' direction changes and fire frames. A recorded round replays
-    /// bit-identically from (seed, size, log) alone, which is what lets a
-    /// real player's games become evaluation data (ADR-016).
+    /// the per-round seed the RNG was reseeded from, board size, and the
+    /// ordered input-event stream. A recorded round replays bit-identically
+    /// from (seed, size, log) alone, which is what lets a real player's
+    /// games become evaluation data (ADR-016).
     pub replay: ReplayLog,
+    /// When Some, this round is a GHOST REPLAY: inputs come from the script
+    /// at the same engine sites that recorded them, cpu_decide/should_fire
+    /// never run, and physics uses live-equivalent collision policy.
+    pub script: Option<ReplayScript>,
     /// When false, the CPU is driven externally (benchmark scripted opponents)
     /// and update() neither calls cpu_decide/should_fire nor records CPU
     /// episodes — the "naive" bench row is then a genuinely naive wall
@@ -386,48 +390,79 @@ pub struct CPUPlayRecord {
     pub seq: u32,
 }
 
-/// The ghost log — a round's complete input record. ~1-3 KB per round.
+/// The ghost log — a round's complete input record as ONE totally-ordered
+/// event stream (~2-6 KB per round). v1 kept directions and fires in
+/// separate arrays and lost their relative order and phase; external
+/// review found three divergence classes ordering alone causes
+/// (fatal-frame turns unrecorded, turn-then-fire firing along the wrong
+/// heading, CPU fires replayed at the wrong phase inside the frame). v2
+/// events are recorded AT the live input sites and re-injected at those
+/// same sites, so phase fidelity holds by construction.
+///
+/// Event kinds — the site IS the phase:
+///   0 player direction (change_direction, between frames)
+///   1 player fire      (fire_powerup,     between frames)
+///   2 CPU direction    (the cpu_decide site, inside update, pre-move)
+///   3 CPU fire         (the should_fire site, inside update, pre-move)
 #[derive(Clone, Debug, Default)]
 pub struct ReplayLog {
     /// Seed the round's RNG was (re)seeded from at round start.
     pub round_seed: u64,
     pub width: u16,
     pub height: u16,
-    /// (frame, who, direction as u8) — logged whenever a worm's ACTUAL
-    /// movement direction changed that frame. Initial directions are the
-    /// spawn constants (player Right, CPU Left) and are not logged.
-    pub dirs: Vec<(u32, u8, u8)>,
-    /// (frame_count at fire time, who) for every successful fire.
-    pub fires: Vec<(u32, u8)>,
-    /// Movement directions actually taken last frame, per cycle — the
-    /// change detector's memory, not part of the export.
-    pub last_dirs: [Option<Direction>; 2],
+    /// (frame stamp at the site, kind, value). Between-frame events carry
+    /// the last COMPLETED frame; in-update events carry the current one.
+    pub events: Vec<(u32, u8, u8)>,
+    /// Last recorded CPU direction — kind-2 events log changes only.
+    pub last_cpu_dir: Option<Direction>,
 }
 
 impl ReplayLog {
-    pub fn to_json(&self) -> String {
-        let dirs: Vec<String> = self
-            .dirs
+    pub fn to_json(&self, frames: u32) -> String {
+        let ev: Vec<String> = self
+            .events
             .iter()
-            .map(|&(f, w, d)| format!("[{},{},{}]", f, w, d))
-            .collect();
-        let fires: Vec<String> = self
-            .fires
-            .iter()
-            .map(|&(f, w)| format!("[{},{}]", f, w))
+            .map(|&(f, k, v)| format!("[{},{},{}]", f, k, v))
             .collect();
         // The seed is a STRING on the wire: it is a u64, and JavaScript's
         // JSON.parse coerces bare numbers to f64 — seeds above 2^53 came
-        // back mangled and the replay diverged (caught by the first real
-        // collected round, whose seed printed as ...996000).
+        // back mangled and the replay diverged.
         format!(
-            "{{\"v\":1,\"seed\":\"{}\",\"w\":{},\"h\":{},\"dirs\":[{}],\"fires\":[{}]}}",
+            "{{\"v\":2,\"seed\":\"{}\",\"w\":{},\"h\":{},\"frames\":{},\"ev\":[{}]}}",
             self.round_seed,
             self.width,
             self.height,
-            dirs.join(","),
-            fires.join(",")
+            frames,
+            ev.join(",")
         )
+    }
+}
+
+/// A recorded event stream being replayed — consumed strictly in order at
+/// the same engine sites that recorded it.
+#[derive(Clone, Debug, Default)]
+pub struct ReplayScript {
+    pub events: Vec<(u32, u8, u8)>,
+    pub cursor: usize,
+}
+
+impl ReplayScript {
+    /// Consume the next event if it matches (frame, kind).
+    fn take(&mut self, frame: u32, kind: u8) -> Option<u8> {
+        match self.events.get(self.cursor) {
+            Some(&(f, k, v)) if f == frame && k == kind => {
+                self.cursor += 1;
+                Some(v)
+            }
+            _ => None,
+        }
+    }
+    /// Peek the next event when it matches (frame, any of kinds).
+    fn next_is(&self, frame: u32, kinds: &[u8]) -> Option<(u8, u8)> {
+        match self.events.get(self.cursor) {
+            Some(&(f, k, v)) if f == frame && kinds.contains(&k) => Some((k, v)),
+            _ => None,
+        }
     }
 }
 
@@ -567,6 +602,7 @@ impl WormGame {
             cpu_laser_charge: 0,
             shrink_level: 0,
             replay: ReplayLog::default(),
+            script: None,
         };
         // Round 1 goes through the same reseed as every later round, so the
         // first game is ghost-replayable too. Deterministic: the round seed
@@ -727,6 +763,43 @@ impl WormGame {
     pub fn update(&mut self) -> bool {
         if self.game_over {
             return false;
+        }
+
+        // GHOST REPLAY pump: re-apply the player's between-frame inputs in
+        // their exact recorded order (turn-then-fire and fire-then-turn are
+        // different weapons discharges) through the same public entry points
+        // that recorded them.
+        if self.script.is_some() {
+            let frame = self.frame_count;
+            loop {
+                let next = self
+                    .script
+                    .as_ref()
+                    .and_then(|script| script.next_is(frame, &[0, 1]));
+                match next {
+                    Some((0, d)) => {
+                        if let Some(script) = self.script.as_mut() {
+                            script.cursor += 1;
+                        }
+                        self.change_direction(match d {
+                            0 => Direction::Up,
+                            1 => Direction::Down,
+                            2 => Direction::Left,
+                            _ => Direction::Right,
+                        });
+                    }
+                    Some((1, _)) => {
+                        if let Some(script) = self.script.as_mut() {
+                            script.cursor += 1;
+                        }
+                        self.fire_powerup(self.player);
+                        if self.game_over {
+                            return false;
+                        }
+                    }
+                    _ => break,
+                }
+            }
         }
 
         self.frame_count += 1;
@@ -963,6 +1036,7 @@ impl WormGame {
             // the win). The CPU's intended move is taken from its current
             // direction; cpu_decide preserves it in every non-turn frame.
             let cpu_rams_back = self.cycles[1].alive && player_new == self.cycles[1].head && {
+                // (see below: the autopilot branch decides escape simulation)
                 let cy = &self.cycles[1];
                 let (dx, dy) = cy.direction.as_delta();
                 let nx = (cy.head.0 as i16 + dx).max(0).min((self.width - 1) as i16) as u16;
@@ -980,7 +1054,10 @@ impl WormGame {
             // for them the straight-ahead probe remains the accurate test.
             let cpu_would_crash = self.cycles[1].alive && {
                 let cy = &self.cycles[1];
-                if self.cpu_autopilot {
+                // A ghost replay of a live (autopilot) round must resolve
+                // simultaneous crashes with the SAME policy the live round
+                // used — physics must not depend on who is steering.
+                if self.cpu_autopilot || self.script.is_some() {
                     let vacating = if cy.positions.len() > 1 && cy.pending_growth == 0 {
                         cy.positions.last().copied()
                     } else {
@@ -1274,6 +1351,39 @@ impl WormGame {
             if turned {
                 self.frames_since_cpu_move = 0;
             }
+            // Ghost recorder, kind 2: the CPU's decided direction, at the
+            // decision site (pre-move, so fatal turns are captured), change
+            // events only.
+            if self.script.is_none() && self.replay.last_cpu_dir != Some(dir) {
+                self.replay.last_cpu_dir = Some(dir);
+                self.replay.events.push((self.frame_count, 2, dir as u8));
+            }
+            dir
+        } else if self.script.is_some() {
+            // GHOST REPLAY: consume this frame's recorded CPU events at the
+            // exact site the live path produced them — fire first if the
+            // stream says the CPU fired this frame, then its direction.
+            let frame = self.frame_count;
+            if let Some(script) = self.script.as_mut() {
+                if script.take(frame, 3).is_some() {
+                    self.fire_powerup(1);
+                    if self.game_over {
+                        return false;
+                    }
+                }
+            }
+            let dir = self
+                .script
+                .as_mut()
+                .and_then(|script| script.take(frame, 2))
+                .map(|d| match d {
+                    0 => Direction::Up,
+                    1 => Direction::Down,
+                    2 => Direction::Left,
+                    _ => Direction::Right,
+                })
+                .unwrap_or(self.cycles[1].direction);
+            self.cycles[1].change_direction(dir);
             dir
         } else {
             self.cycles[1].direction
@@ -1427,17 +1537,6 @@ impl WormGame {
         self.cycles[0].snapshot_direction();
         self.cycles[1].snapshot_direction();
 
-        // Ghost recorder: log the movement direction each worm ACTUALLY took
-        // this frame, on change. Recording executed movement (not raw input)
-        // means a replay that re-applies these via change_direction is legal
-        // by construction and reproduces the round bit-for-bit.
-        for who in 0..2usize {
-            let d = self.cycles[who].direction;
-            if self.replay.last_dirs[who] != Some(d) {
-                self.replay.last_dirs[who] = Some(d);
-                self.replay.dirs.push((self.frame_count, who as u8, d as u8));
-            }
-        }
 
         // Live projectiles and planted bombs (can end the game).
         self.advance_projectiles();
@@ -1617,7 +1716,16 @@ impl WormGame {
         match (moved_dir, new_dir) {
             (Direction::Up, Direction::Down) | (Direction::Down, Direction::Up) => {}
             (Direction::Left, Direction::Right) | (Direction::Right, Direction::Left) => {}
-            _ => self.cycles[self.player].direction = new_dir,
+            _ => {
+                self.cycles[self.player].direction = new_dir;
+                // Ghost recorder, kind 0: an accepted player turn, in input
+                // order, stamped with the last completed frame. Fatal turns
+                // are captured here BY CONSTRUCTION — recording happens at
+                // acceptance, before any collision can end the frame.
+                if self.script.is_none() {
+                    self.replay.events.push((self.frame_count, 0, new_dir as u8));
+                }
+            }
         }
     }
 
@@ -1700,8 +1808,14 @@ impl WormGame {
             None => 0.5,
             _ => 0.0,
         };
-        let draw = self.seal_seed ^ ((self.cpu_brain.portfolio.rounds as u64 + 1) << 17);
-        self.cpu_brain.portfolio.end_round(reward, draw);
+        // Shadow/ghost evaluation is OFF-POLICY: the CPU never steered, so
+        // crediting a temperament with these outcomes (including a phantom
+        // draw before round one) would train the portfolio on games it
+        // never played (external review finding).
+        if !self.shadow_learning {
+            let draw = self.seal_seed ^ ((self.cpu_brain.portfolio.rounds as u64 + 1) << 17);
+            self.cpu_brain.portfolio.end_round(reward, draw);
+        }
 
         self.winner = None;
         self.frame_count = 0;
@@ -1756,11 +1870,19 @@ impl WormGame {
     /// worms from the ghost log (`cpu_autopilot` off) and the round replays
     /// bit-for-bit — the world stream is untouched by CPU decisions, which
     /// draw from their own `cpu_rng`.
-    pub fn start_recorded_round(&mut self, seed: u64, width: u16, height: u16) {
+    pub fn start_recorded_round(
+        &mut self,
+        seed: u64,
+        width: u16,
+        height: u16,
+        events: Vec<(u32, u8, u8)>,
+    ) {
         self.fixed_dims = Some((width, height));
         // Never bank a stale winner into the session scoreboard mid-harness.
         self.winner = None;
+        self.script = None; // restart() must not consume the incoming script
         self.restart();
+        self.script = Some(ReplayScript { events, cursor: 0 });
         // restart() drew its own round seed and spawned food from it; replace
         // both with the recorded stream.
         self.begin_round_replay(Some(seed));
@@ -1824,9 +1946,13 @@ impl WormGame {
             None => return false,
         };
         // Ghost recorder: a successful fire is an input, and inputs are the
-        // replay. frame_count here is the last COMPLETED frame — the replay
-        // driver re-fires after that frame's update, before the next.
-        self.replay.fires.push((self.frame_count, who as u8));
+        // replay. Kind 1 = player (between frames, stamped with the last
+        // completed frame); kind 3 = CPU (inside update, stamped with the
+        // current frame). The site is the phase.
+        if self.script.is_none() {
+            let kind = if who == self.player { 1 } else { 3 };
+            self.replay.events.push((self.frame_count, kind, who as u8));
+        }
         let (hx, hy) = self.cycles[who].head;
         let dir = self.cycles[who].direction;
         let (dx, dy) = dir.as_delta();

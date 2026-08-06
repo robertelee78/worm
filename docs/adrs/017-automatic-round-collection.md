@@ -1,10 +1,21 @@
 # ADR-017: Automatic Round Collection — Every Visitor Feeds the Flywheel
 
 ## Status
-Implemented
+Implemented (hardened)
 
 ## Date
 2026-08-06
+
+## Updated
+2026-08-06 — external review hardening: the collector validates the full
+record shape including the v2 event stream with explicit conditions (no
+assert), enforces an Origin allowlist, and ingestion derives filenames
+from a hash (a hostile deviceId was a path-traversal write primitive) and
+dedups on (deviceId, id). The browser marks a round uploaded only on a
+CONFIRMED 2xx from the sequential backfill — sendBeacon "true" means
+queued, not delivered, and Safari's in-flight quota silently drops bulk
+beacons — with the ledger merged in a single transaction. Legacy records
+are normalized on read so old eras can never put NaN in the DOM.
 
 ## Context
 

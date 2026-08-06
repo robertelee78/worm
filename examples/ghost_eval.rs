@@ -1,149 +1,151 @@
-//! Ghost evaluator (ADR-016): score the CURRENT brain against a REAL
+//! Ghost evaluator (ADR-016/017): score the CURRENT brain against a REAL
 //! player's recorded rounds.
 //!
-//!     cargo run --release --example ghost_eval -- worm-rounds.json
+//!     cargo run --release --example ghost_eval -- <export.json | rounds.jsonl>
 //!
-//! Input: the browser's "EXPORT MY ROUNDS" download. Every round that
-//! carries a ghost log is replayed bit-for-bit (both worms driven from the
-//! log, `shadow_learning` on), so the brain under evaluation watches the
-//! recorded human exactly as it would have watched them live — same
-//! learning, same sealed forecasts, same scoring — while never steering.
-//! One persistent brain across all rounds, chronologically: the output IS
-//! the learning curve this codebase would have had against this human.
-//!
-//! This closes the loop ADR-013 left open: candidate CPUs are no longer
-//! measured only against scripted personas but against the one opponent the
-//! product is actually about. Tune with WORM_TUNE_* env for candidates.
+//! Accepts the browser's EXPORT MY ROUNDS download, a per-player file from
+//! scripts/collect_to_export.py, or a raw collected JSONL file. Rounds are
+//! replayed OLDEST-FIRST with one persistent brain and `shadow_learning`
+//! on: the real pipeline — episodes, ensemble, sealed forecasts, the
+//! McNemar-gated read — watches the recorded human exactly as it would
+//! have live, while never steering. Ghost v2 logs only (the ordered event
+//! stream); v1 logs are skipped loudly, not guessed at.
+//! Candidates evaluate identically via WORM_TUNE_* env knobs.
 
-use worm::{Direction, WormGame};
+use worm::WormGame;
 
-fn dir_of(d: u8) -> Direction {
-    match d {
-        0 => Direction::Up,
-        1 => Direction::Down,
-        2 => Direction::Left,
-        _ => Direction::Right,
+struct Round {
+    ended_at: u64,
+    id: String,
+    frames: u32,
+    seed: u64,
+    w: u16,
+    h: u16,
+    events: Vec<(u32, u8, u8)>,
+}
+
+fn parse_round(rec: &serde_json::Value) -> Result<Round, String> {
+    let replay = rec.get("replay").ok_or("no replay")?;
+    if replay.get("v").and_then(|v| v.as_u64()) != Some(2) {
+        return Err("ghost v1 (pre event-stream) — skipped".into());
     }
-}
-
-/// Minimal JSON scraping — the export format is ours, flat, and versioned.
-fn field_u64(obj: &str, key: &str) -> Option<u64> {
-    let pat = format!("\"{}\":", key);
-    let i = obj.find(&pat)? + pat.len();
-    // The seed travels as a quoted string (u64 > 2^53 does not survive
-    // JavaScript's number type); other numeric fields are bare. Accept both.
-    let rest = obj[i..].trim_start().trim_start_matches('"');
-    let end = rest
-        .find(|c: char| !c.is_ascii_digit())
-        .unwrap_or(rest.len());
-    rest[..end].parse().ok()
-}
-
-fn pairs_u32(obj: &str, key: &str) -> Vec<Vec<u32>> {
-    let pat = format!("\"{}\":[", key);
-    let Some(i) = obj.find(&pat) else {
-        return Vec::new();
-    };
-    let rest = &obj[i + pat.len()..];
-    // The array ends at the first ']' not inside a nested '[' pair-array.
-    let mut depth = 1;
-    let mut end = 0;
-    for (j, c) in rest.char_indices() {
-        match c {
-            '[' => depth += 1,
-            ']' => {
-                depth -= 1;
-                if depth == 0 {
-                    end = j;
-                    break;
-                }
-            }
-            _ => {}
+    let seed = replay
+        .get("seed")
+        .and_then(|s| s.as_str())
+        .and_then(|s| s.parse::<u64>().ok())
+        .ok_or("bad seed (must be a decimal string)")?;
+    let w = replay.get("w").and_then(|v| v.as_u64()).ok_or("bad w")? as u16;
+    let h = replay.get("h").and_then(|v| v.as_u64()).ok_or("bad h")? as u16;
+    let frames = replay
+        .get("frames")
+        .and_then(|v| v.as_u64())
+        .ok_or("bad frames")? as u32;
+    if !(10..=400).contains(&w) || !(10..=400).contains(&h) || frames > 100_000 {
+        return Err("dimensions/frames out of range".into());
+    }
+    let mut events = Vec::new();
+    let mut last_frame = 0u32;
+    for ev in replay
+        .get("ev")
+        .and_then(|v| v.as_array())
+        .ok_or("bad ev")?
+    {
+        let t = ev.as_array().ok_or("event not an array")?;
+        if t.len() != 3 {
+            return Err("event arity != 3".into());
         }
+        let f = t[0].as_u64().ok_or("bad event frame")? as u32;
+        let k = t[1].as_u64().ok_or("bad event kind")? as u8;
+        let v = t[2].as_u64().ok_or("bad event value")? as u8;
+        if k > 3 || v > 3 || f > frames + 1 || f < last_frame {
+            return Err("event out of domain or non-monotonic".into());
+        }
+        last_frame = f;
+        events.push((f, k, v));
     }
-    rest[..end]
-        .split('[')
-        .filter(|s| !s.trim().is_empty())
-        .map(|s| {
-            s.trim_end_matches(|c| c == ']' || c == ',')
-                .split(',')
-                .filter_map(|n| n.trim().parse().ok())
-                .collect()
-        })
-        .collect()
+    Ok(Round {
+        ended_at: rec.get("endedAt").and_then(|v| v.as_u64()).unwrap_or(0),
+        id: rec
+            .get("id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_string(),
+        frames,
+        seed,
+        w,
+        h,
+        events,
+    })
 }
 
 fn main() {
     let path = std::env::args()
         .nth(1)
-        .expect("usage: ghost_eval <worm-rounds.json>");
-    let text = std::fs::read_to_string(&path).expect("read export file");
+        .expect("usage: ghost_eval <export.json | rounds.jsonl>");
+    let text = std::fs::read_to_string(&path).expect("read input file");
 
-    // Split into round objects on the replay marker; ordering in the export
-    // is newest-first, so reverse into play order for an honest curve.
-    let mut replays: Vec<(u64, u16, u16, Vec<Vec<u32>>, Vec<Vec<u32>>, u64)> = Vec::new();
-    for chunk in text.split("\"replay\":").skip(1) {
-        let Some(seed) = field_u64(chunk, "seed") else {
-            continue;
-        };
-        let (Some(w), Some(h)) = (field_u64(chunk, "w"), field_u64(chunk, "h")) else {
-            continue;
-        };
-        // endedAt appears BEFORE replay in each record; grab it from the
-        // preceding chunk boundary is fragile — sort key falls back to file
-        // order when absent, which the reverse below already handles.
-        let ended = field_u64(chunk, "endedAt").unwrap_or(0);
-        replays.push((
-            seed,
-            w as u16,
-            h as u16,
-            pairs_u32(chunk, "dirs"),
-            pairs_u32(chunk, "fires"),
-            ended,
-        ));
+    // Export wrapper {rounds:[...]} or raw JSONL — both typed, no scraping.
+    let mut records: Vec<serde_json::Value> = Vec::new();
+    if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+        if let Some(rounds) = v.get("rounds").and_then(|r| r.as_array()) {
+            records = rounds.clone();
+        } else {
+            records = vec![v];
+        }
+    } else {
+        for line in text.lines().filter(|l| !l.trim().is_empty()) {
+            if let Ok(v) = serde_json::from_str(line) {
+                records.push(v);
+            }
+        }
     }
-    replays.reverse(); // export is newest-first → replay in play order
-    if replays.is_empty() {
-        eprintln!("no rounds with ghost logs in {path} — play some rounds on the v9+ build first");
+
+    let mut rounds = Vec::new();
+    let mut skipped = 0;
+    for rec in &records {
+        match parse_round(rec) {
+            Ok(r) => rounds.push(r),
+            Err(e) => {
+                skipped += 1;
+                eprintln!("skipped round ({e})");
+            }
+        }
+    }
+    // Oldest first, stable: (endedAt, id).
+    rounds.sort_by(|a, b| (a.ended_at, &a.id).cmp(&(b.ended_at, &b.id)));
+    if rounds.is_empty() {
+        eprintln!("no usable ghost-v2 rounds in {path} ({skipped} skipped)");
         std::process::exit(1);
     }
-    println!("{} recorded round(s) — replaying chronologically…\n", replays.len());
+    println!(
+        "{} recorded round(s) ({} skipped) — replaying chronologically…\n",
+        rounds.len(),
+        skipped
+    );
 
     // ONE persistent brain across all rounds, exactly like a live session.
     let mut game = WormGame::with_size_seed(55, 40, 1);
     game.cpu_autopilot = false;
     game.shadow_learning = true;
 
-    let mut round_no = 0;
-    for (seed, w, h, dirs, fires, _ended) in &replays {
-        round_no += 1;
-        game.start_recorded_round(*seed, *w, *h);
-        let (mut di, mut fi) = (0usize, 0usize);
-        while !game.game_over && game.frame_count < 20_000 {
-            while fi < fires.len() && fires[fi][0] == game.frame_count {
-                game.fire_powerup(fires[fi][1] as usize);
-                fi += 1;
-            }
-            let next = game.frame_count + 1;
-            while di < dirs.len() && dirs[di][0] == next {
-                let (who, d) = (dirs[di][1] as usize, dirs[di][2] as u8);
-                if who == 0 {
-                    game.change_direction(dir_of(d));
-                } else {
-                    game.cycles[1].direction = dir_of(d);
-                }
-                di += 1;
-            }
+    for (i, r) in rounds.iter().enumerate() {
+        game.start_recorded_round(r.seed, r.w, r.h, r.events.clone());
+        while !game.game_over && game.frame_count < r.frames {
             game.update();
-            if di >= dirs.len() && game.frame_count > dirs.last().map(|p| p[0]).unwrap_or(0) + 4 {
-                break; // log exhausted — recorded round ended here
-            }
         }
+        let complete = game.frame_count == r.frames
+            && game
+                .script
+                .as_ref()
+                .map(|s| s.cursor == s.events.len())
+                .unwrap_or(false);
         let rr = &game.round_read;
         println!(
-            "round {:>3}: {:>4} frames · read {:>5.1}% vs your-usual {:>5.1}% · lift {:>+5.1}% · cum lift {:>+5.1}%",
-            round_no,
+            "round {:>3}: {:>5}/{:<5} frames{} · read {:>5.1}% vs your-usual {:>5.1}% · lift {:>+5.1}% · cum {:>+5.1}%",
+            i + 1,
             game.frame_count,
+            r.frames,
+            if complete { "" } else { " (INCOMPLETE — replay diverged?)" },
             rr.rate() * 100.0,
             rr.base_rate() * 100.0,
             rr.lift() * 100.0,
@@ -161,8 +163,5 @@ fn main() {
         } else {
             "not yet significant — more rounds needed"
         }
-    );
-    println!(
-        "(evaluate a candidate: WORM_TUNE_<KNOB>=x cargo run --release --example ghost_eval -- {path})"
     );
 }

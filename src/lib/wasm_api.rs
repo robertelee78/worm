@@ -164,6 +164,6 @@ impl WasmGame {
     /// which is how a real player's games become evaluation data (ADR-016).
     /// Read at game over, before the next restart wipes it.
     pub fn replay_json(&self) -> String {
-        self.game.replay.to_json()
+        self.game.replay.to_json(self.game.frame_count)
     }
 }

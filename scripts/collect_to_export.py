@@ -12,6 +12,7 @@ its input (browser exports are newest-first), so rounds are written
 newest-first here too.
 """
 import glob
+import hashlib
 import json
 import os
 
@@ -31,19 +32,27 @@ def main():
                 rec = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            rid = rec.get("id") or f"anon:{hash(line)}"
-            if rid in seen or not isinstance(rec.get("replay"), dict):
+            try:
+                device = str(rec.get("deviceId", "unknown"))
+                rid = (device, str(rec.get("id") or f"anon:{hash(line)}"))
+                replay = rec.get("replay")
+                if rid in seen or not isinstance(replay, dict) or replay.get("v") != 2:
+                    continue
+                seen.add(rid)
+                players.setdefault(device, []).append(rec)
+            except Exception:
                 continue
-            seen.add(rid)
-            players.setdefault(rec.get("deviceId", "unknown"), []).append(rec)
 
     os.makedirs(OUT_DIR, exist_ok=True)
     for device, rounds in players.items():
-        rounds.sort(key=lambda r: r.get("endedAt", 0), reverse=True)  # newest-first
-        out = os.path.join(OUT_DIR, f"{device[:8]}.json")
+        rounds.sort(key=lambda r: (r.get("endedAt", 0) or 0, str(r.get("id", ""))), reverse=True)  # newest-first
+        # Filename from a hash, never from client input: a hostile deviceId
+        # was a path-traversal write primitive (external review), and 8-char
+        # prefixes collided.
+        out = os.path.join(OUT_DIR, hashlib.sha256(device.encode()).hexdigest()[:16] + ".json")
         with open(out, "w") as f:
             json.dump({"v": 1, "deviceId": device, "rounds": rounds}, f, separators=(",", ":"))
-        frames = sum(r.get("frames", 0) for r in rounds)
+        frames = sum(r.get("frames") or 0 for r in rounds)
         print(f"{out}: {len(rounds)} round(s), {frames} frames")
     if not players:
         print("no collected rounds yet — data/rounds/ is empty")

@@ -4,14 +4,14 @@
 // The ?v= must match BUILD below (and index.html's) — an unversioned glue
 // import could pair a cached old worm.js with a fresh wasm on the next
 // rebuild that changes the bindings.
-import init, { WasmGame } from './pkg/worm.js?v=12';
+import init, { WasmGame } from './pkg/worm.js?v=13';
 import { Sfx } from './audio.js';
 import { computeBoardLayout, VIEWPORT_BLOCK_GUTTER } from './layout.js';
 
 let CELL = 14; // recomputed by applyBoardLayout() to fit the measured stage
 // Bump together with the ?v= in index.html whenever the wasm bundle is
 // rebuilt — it keys the cache-busting query on the .wasm fetch.
-const BUILD = 12;
+const BUILD = 13;
 const MATCH_TARGET = 3;
 const STATE_SCHEMA_VERSION = 2;
 const ROUND_SCHEMA_VERSION = 1;
@@ -151,6 +151,17 @@ async function roundsRead() {
     });
     return records
       .filter(validRound)
+      .map((record) => ({
+        // Legacy normalization (review #13): old eras lack fields newer
+        // render math assumes; NaN%/+undefined must never reach the DOM.
+        ...record,
+        memoryDelta: Number.isFinite(record.memoryDelta) ? record.memoryDelta : 0,
+        accuracy: {
+          rate: Number.isFinite(record.accuracy?.rate) ? record.accuracy.rate : 0,
+          hits: Number.isFinite(record.accuracy?.hits) ? record.accuracy.hits : 0,
+          samples: Number.isFinite(record.accuracy?.samples) ? record.accuracy.samples : 0,
+        },
+      }))
       .sort((a, b) => b.endedAt - a.endedAt)
       .slice(0, MAX_ROUND_HISTORY);
   } catch { return []; }
@@ -181,18 +192,44 @@ async function roundWrite(record) {
    simply skips. Returning visitors backfill rounds saved by older builds
    once, tracked by id in the same database. */
 function uploadRound(record) {
+  // Fire-and-forget for the game-over moment: sendBeacon survives tab
+  // close. Delivery is NOT confirmed here — the ledger is only written by
+  // the confirmed backfill path, and the server dedups (deviceId, id), so
+  // a duplicate costs nothing and a dropped beacon retries next boot.
   try {
     const payload = JSON.stringify(record);
-    if (navigator.sendBeacon &&
-        navigator.sendBeacon('/collect', new Blob([payload], { type: 'application/json' }))) {
-      return true;
+    if (!(navigator.sendBeacon &&
+        navigator.sendBeacon('/collect', new Blob([payload], { type: 'application/json' })))) {
+      fetch('/collect', { method: 'POST', body: payload, keepalive: true }).catch(() => {});
     }
-    fetch('/collect', { method: 'POST', body: payload, keepalive: true }).catch(() => {});
-    return true;
-  } catch { return false; }
+  } catch { /* offline is fine */ }
+}
+
+// Merge ids into the uploaded-ledger inside ONE read-modify-write
+// transaction — a plain get→put lost concurrent additions (review #12).
+async function markUploaded(ids) {
+  if (!ids.length) return;
+  const db = await dbPromise;
+  await new Promise((resolve) => {
+    const tx = db.transaction('meta', 'readwrite');
+    const store = tx.objectStore('meta');
+    const rq = store.get('uploadedRounds');
+    rq.onsuccess = () => {
+      const merged = new Set(rq.result || []);
+      ids.forEach((id) => merged.add(id));
+      store.put([...merged].slice(-MAX_ROUND_HISTORY * 2), 'uploadedRounds');
+    };
+    tx.oncomplete = resolve;
+    tx.onerror = resolve;
+    tx.onabort = resolve;
+  });
 }
 
 async function backfillUploads() {
+  // Sequential, awaited, delivery-CONFIRMED: only a 2xx marks a round sent
+  // (sendBeacon "true" means queued, and Safari's ~64KB in-flight quota
+  // silently drops bulk beacons — review #9). One at a time also keeps a
+  // 200-round history from flooding the collector.
   try {
     const db = await dbPromise;
     const sent = await new Promise((resolve) => {
@@ -200,18 +237,19 @@ async function backfillUploads() {
       rq.onsuccess = () => resolve(new Set(rq.result || []));
       rq.onerror = () => resolve(new Set());
     });
-    const rounds = await roundsRead();
-    let dirty = false;
-    for (const record of rounds) {
+    const confirmed = [];
+    for (const record of await roundsRead()) {
       if (sent.has(record.id)) continue;
       // Pre-ghost records have no replay — nothing evaluable to collect.
-      if (!record.replay) { sent.add(record.id); dirty = true; continue; }
-      if (uploadRound(record)) { sent.add(record.id); dirty = true; }
+      if (!record.replay) { confirmed.push(record.id); continue; }
+      try {
+        const res = await fetch('/collect', {
+          method: 'POST', body: JSON.stringify(record),
+        });
+        if (res.ok) confirmed.push(record.id);
+      } catch { break; /* offline — retry whole tail next boot */ }
     }
-    if (dirty) {
-      db.transaction('meta', 'readwrite').objectStore('meta')
-        .put([...sent].slice(-MAX_ROUND_HISTORY * 2), 'uploadedRounds');
-    }
+    await markUploaded(confirmed);
   } catch { /* collection is best-effort, always */ }
 }
 
@@ -658,14 +696,7 @@ function onGameOver() {
   roundHistory = roundHistory.slice(0, MAX_ROUND_HISTORY);
   renderHistory();
   roundWrite(record);
-  if (uploadRound(record)) {
-    // Remember it as sent so the boot-time backfill never duplicates it.
-    dbPromise.then((db) => {
-      const store = db.transaction('meta', 'readwrite').objectStore('meta');
-      const rq = store.get('uploadedRounds');
-      rq.onsuccess = () => store.put([...(rq.result || []), record.id].slice(-MAX_ROUND_HISTORY * 2), 'uploadedRounds');
-    }).catch(() => {});
-  }
+  uploadRound(record); // ledger updates only on CONFIRMED backfill delivery
 
   const youWon = state.winner === 0;
   const cpuWon = state.winner === 1;
