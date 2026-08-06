@@ -296,3 +296,18 @@ table.history td.cpu { color: var(--magenta); }
   font-size: 15px; line-height: 1.45; color: #9fe89f;
   border: 1px solid #1c4; background: rgba(0, 24, 8, 0.85);
 }
+
+/* Frame-stable panel geometry (play-tested): volatile telemetry lines used
+   to wrap between 1 and 2 lines as their numbers changed width, reflowing
+   the whole right panel every few frames and visibly nudging the canvas
+   box (the "phasing" direction indicator). Volatile lines never wrap and
+   reserve their height; long values ellipsize instead of reflowing. */
+.bp-driver, .bp-last, .bp-warm, .bp-mem, .bp-habit, .bp-lifetime,
+.bp-conflabel, .bp-acclabel, .bp-action, .bp-predrow, .bp-seal {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bp-last { min-height: 1.35em; }
+.bp-warm, .bp-mem, .bp-habit, .bp-lifetime { min-height: 1.3em; }
+.score-mid { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }

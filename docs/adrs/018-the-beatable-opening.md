@@ -1,7 +1,23 @@
 # ADR-018: The Beatable Opening — Wits Are Earned, Not Given
 
 ## Status
-Implemented
+Implemented (refined after owner play-test)
+
+## Updated
+2026-08-06 — the raw doze failed the look-and-feel test: a CPU holding
+heading into a static wall reads as broken, not casual ("kind of
+retarded. Runs into walls... doesn't play like it's trying"). Refined:
+dozy frames keep WALL and sudden-death-ring reflexes (basics always on)
+but stay TRAIL-BLIND — a fixated casual player rams trails mid-chase,
+and dying into the trail YOU laid is the earned Tron kill the opening
+exists to offer. A new low-sharpness Curiosity layer ("drawn to you")
+closes distance while unsharp, manufacturing the encounters the
+trail-blind doze converts into player wins, and fades out entirely with
+sharpness. Novice fixture now ~25% wins + draws (instrument target 40-60%
+stands open; the opening knobs are in the nightly Darwin's search space,
+and novice win-rate is a candidate second fitness axis). Gates after
+refinement: WARM 29-1 (97%) lift 84 vs COLD 28-0-2 (93%), habitual 36-3-1
+(90%) lift 83.
 
 ## Date
 2026-08-06

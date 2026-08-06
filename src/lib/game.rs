@@ -1318,8 +1318,25 @@ impl WormGame {
             let t = crate::tuning::tuning();
             1 + ((t.open_latency - 1.0).max(0.0) * (1.0 - self.sharpness())).round() as u32
         };
-        let cpu_dozing =
-            self.cpu_autopilot && open_k > 1 && self.frame_count % open_k != 0;
+        // A doze never overrides WALL reflexes — play-tested, a CPU that
+        // holds heading into a static wall reads as broken, not casual (the
+        // contract is "solid basics that hasn't read you yet"). But trails
+        // deliberately do NOT wake it: a fixated casual player rams trails
+        // mid-chase, and an unsharp CPU dying into the trail YOU laid is the
+        // classic earned Tron kill — beatable through play, never through
+        // watching it faceplant scenery.
+        let cpu_dozing = self.cpu_autopilot && open_k > 1 && self.frame_count % open_k != 0 && {
+            let cy = &self.cycles[1];
+            let (dx, dy) = cy.direction.as_delta();
+            let nx = cy.head.0 as i16 + dx;
+            let ny = cy.head.1 as i16 + dy;
+            let wall_ahead = nx < 0
+                || ny < 0
+                || nx >= self.width as i16
+                || ny >= self.height as i16
+                || self.grid[ny as usize][nx as usize] == CellType::Wall;
+            !wall_ahead && !crate::cpu_ai::ring_doomed_step(self, cy.head, cy.direction)
+        };
         let cpu_dir = if self.cpu_autopilot && cpu_dozing {
             // Attention lapse: hold the heading, no decisions, no firing.
             self.cycles[1].direction

@@ -71,7 +71,7 @@ const RING_EVACUATE_FRAMES: u32 = 3;
 
 /// Would stepping `d` from `from` land on a sudden-death ring about to seal?
 /// `close_ring` kills any head standing on the ring it closes.
-fn ring_doomed_step(game: &WormGame, from: (u16, u16), d: Direction) -> bool {
+pub(crate) fn ring_doomed_step(game: &WormGame, from: (u16, u16), d: Direction) -> bool {
     let (ddx, ddy) = d.as_delta();
     let nx = (from.0 as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
     let ny = (from.1 as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
@@ -170,6 +170,7 @@ pub enum CpuDecisionReason {
     ThreatDodge,
     EscapeFloor,
     LaneRefusal,
+    Curiosity,
     CloseEvasion,
     ItemPickup,
     ItemPath,
@@ -193,6 +194,7 @@ impl CpuDecisionReason {
             // is being believed (ADR-003/ADR-006).
             Self::EscapeFloor => "backing out of a dead end",
             Self::LaneRefusal => "refusing to be pinned along the wall",
+            Self::Curiosity => "drawn to you",
             Self::CloseEvasion => "evading your predicted path",
             Self::ItemPickup => "taking a nearby item",
             Self::ItemPath => "routing to an item",
@@ -4405,6 +4407,41 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
                     CpuDecisionReason::ItemPath
                 };
                 choose!(food_dir, reason);
+            }
+        }
+    }
+
+    // --- CURIOSITY: an unsharp CPU drifts toward the player ---
+    // Casual players are drawn to each other; a fresh CPU that orbits the
+    // far wall never meets the human at all, which reads as "not trying"
+    // and gives the beatable opening nothing to be beaten AT. While the CPU
+    // is unsharp and far away, prefer the candidate that closes distance —
+    // survival floors still vet every step, and the trail-blind doze means
+    // an over-eager approach can die into the trail you laid: the earned
+    // kill the opening exists to offer. Fades out entirely with sharpness.
+    if game.sharpness() < 0.5 {
+        let (px, py) = game.cycles[0].head;
+        let dist_now = (cx as i16 - px as i16).abs() + (cy as i16 - py as i16).abs();
+        if dist_now > 10 {
+            let toward = candidates
+                .iter()
+                .copied()
+                .filter(|&d| {
+                    let (ddx, ddy) = d.as_delta();
+                    let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
+                    let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
+                    let closer = (nx as i16 - px as i16).abs() + (ny as i16 - py as i16).abs()
+                        < dist_now;
+                    closer && count_open_space(game, nx, ny) >= escape_cells
+                })
+                .max_by_key(|&d| {
+                    let (ddx, ddy) = d.as_delta();
+                    let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
+                    let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
+                    -((nx as i16 - px as i16).abs() + (ny as i16 - py as i16).abs())
+                });
+            if let Some(d) = toward {
+                choose!(d, CpuDecisionReason::Curiosity);
             }
         }
     }
