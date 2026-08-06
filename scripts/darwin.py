@@ -30,20 +30,39 @@ import time
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, ".darwin")
 
-# knob -> (default, [candidate values])
-KNOBS = {
-    "ESCAPE_MULTIPLE": (3.0, [2.5, 3.5]),
-    "ESCAPE_MARGIN": (8.0, [6.0, 10.0]),
-    "HUNT_SPEND": (0.35, [0.25, 0.45]),
-    "HUNT_CURVE": (0.7, [0.5, 0.9]),
-    "CORNER_GATE": (0.35, [0.28, 0.42]),
-    "DIRECT_GATE": (0.45, [0.38, 0.52]),
-    "ETA_FAST": (1.2, [0.9, 1.5]),
-    "ETA_SLOW": (0.3, [0.2, 0.4]),
-    "SHARE_FAST": (0.08, [0.05, 0.12]),
-    "SHARE_SLOW": (0.01, [0.005, 0.02]),
-    "KNN_BONUS": (0.15, [0.08, 0.25]),
-}
+# Knob names only — the DEFAULTS come from the live binary (examples/
+# print_tuning.rs), so the sweep always explores around the CURRENT
+# champion. Candidates are one step below and one above the champion,
+# with the step drawn from a DATE-SEEDED rng: reproducible within a day,
+# different offsets across days. Nightly runs therefore hill-climb
+# continually instead of re-testing one stale grid.
+KNOB_NAMES = [
+    "ESCAPE_MULTIPLE", "ESCAPE_MARGIN", "HUNT_SPEND", "HUNT_CURVE",
+    "CORNER_GATE", "DIRECT_GATE", "ETA_FAST", "ETA_SLOW",
+    "SHARE_FAST", "SHARE_SLOW", "KNN_BONUS",
+]
+
+
+def champion_defaults():
+    p = subprocess.run(
+        ["cargo", "run", "--release", "--example", "print_tuning"],
+        cwd=ROOT, capture_output=True, text=True, timeout=300,
+        env=dict(os.environ, TERM="dumb", CARGO_TERM_COLOR="never"),
+    )
+    return json.loads(p.stdout.strip().splitlines()[-1])
+
+
+def make_knobs(seed):
+    import random
+    rng = random.Random(seed)
+    defaults = champion_defaults()
+    knobs = {}
+    for name in KNOB_NAMES:
+        d = defaults[name]
+        lo = round(d * rng.uniform(0.70, 0.92), 4)
+        hi = round(d * rng.uniform(1.08, 1.40), 4)
+        knobs[name] = (d, [lo, hi])
+    return knobs
 
 LINE = re.compile(
     r"(COLD \(cannot learn\)|WARM \(remembers you\)|WARM vs habitual)\s+cpu\s+(\d+)\s+player\s+(\d+).*?win\s+(\d+)%(?:.*?lift\s+(-?\d+)%)?"
@@ -76,6 +95,7 @@ def fitness(r):
 
 
 def main():
+    KNOBS = make_knobs(seed=time.strftime("%Y-%m-%d"))
     knobs = sys.argv[1:] or list(KNOBS)
     for k in knobs:
         if k not in KNOBS:

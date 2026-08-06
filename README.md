@@ -190,6 +190,7 @@ living documents — if one disagrees with the code, the ADR is the bug.
 - [ADR-012](docs/adrs/012-two-swarm-findings-implemented.md) — errand twins, kinematic traps, and honest silence
 - [ADR-013](docs/adrs/013-the-improvement-flywheel.md) — the improvement flywheel
 - [ADR-014](docs/adrs/014-the-codex-corrections.md) — the codex corrections: what survived measurement
+- [ADR-015](docs/adrs/015-nightly-darwin.md) — nightly Darwin: continual improvement with human promotion
 
 ### A note on the numbers in this repo
 
