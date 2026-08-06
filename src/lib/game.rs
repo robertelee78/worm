@@ -416,8 +416,12 @@ impl ReplayLog {
             .iter()
             .map(|&(f, w)| format!("[{},{}]", f, w))
             .collect();
+        // The seed is a STRING on the wire: it is a u64, and JavaScript's
+        // JSON.parse coerces bare numbers to f64 — seeds above 2^53 came
+        // back mangled and the replay diverged (caught by the first real
+        // collected round, whose seed printed as ...996000).
         format!(
-            "{{\"v\":1,\"seed\":{},\"w\":{},\"h\":{},\"dirs\":[{}],\"fires\":[{}]}}",
+            "{{\"v\":1,\"seed\":\"{}\",\"w\":{},\"h\":{},\"dirs\":[{}],\"fires\":[{}]}}",
             self.round_seed,
             self.width,
             self.height,

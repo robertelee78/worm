@@ -18,3 +18,4 @@ ruvector.db
 # Claude Flow runtime data
 # Environment variables
 .darwin/
+data/

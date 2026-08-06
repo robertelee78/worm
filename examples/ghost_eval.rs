@@ -30,7 +30,9 @@ fn dir_of(d: u8) -> Direction {
 fn field_u64(obj: &str, key: &str) -> Option<u64> {
     let pat = format!("\"{}\":", key);
     let i = obj.find(&pat)? + pat.len();
-    let rest = &obj[i..];
+    // The seed travels as a quoted string (u64 > 2^53 does not survive
+    // JavaScript's number type); other numeric fields are bare. Accept both.
+    let rest = obj[i..].trim_start().trim_start_matches('"');
     let end = rest
         .find(|c: char| !c.is_ascii_digit())
         .unwrap_or(rest.len());

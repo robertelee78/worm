@@ -193,6 +193,7 @@ living documents — if one disagrees with the code, the ADR is the bug.
 - [ADR-014](docs/adrs/014-the-codex-corrections.md) — the codex corrections: what survived measurement
 - [ADR-015](docs/adrs/015-nightly-darwin.md) — nightly Darwin: continual improvement with human promotion
 - [ADR-016](docs/adrs/016-ghost-replay.md) — ghost replay: the real human becomes the benchmark
+- [ADR-017](docs/adrs/017-automatic-round-collection.md) — automatic round collection: every visitor feeds the flywheel
 
 ### A note on the numbers in this repo
 

@@ -4,14 +4,14 @@
 // The ?v= must match BUILD below (and index.html's) — an unversioned glue
 // import could pair a cached old worm.js with a fresh wasm on the next
 // rebuild that changes the bindings.
-import init, { WasmGame } from './pkg/worm.js?v=9';
+import init, { WasmGame } from './pkg/worm.js?v=11';
 import { Sfx } from './audio.js';
 import { computeBoardLayout, VIEWPORT_BLOCK_GUTTER } from './layout.js';
 
 let CELL = 14; // recomputed by applyBoardLayout() to fit the measured stage
 // Bump together with the ?v= in index.html whenever the wasm bundle is
 // rebuilt — it keys the cache-busting query on the .wasm fetch.
-const BUILD = 9;
+const BUILD = 11;
 const MATCH_TARGET = 3;
 const STATE_SCHEMA_VERSION = 2;
 const ROUND_SCHEMA_VERSION = 1;
@@ -172,6 +172,45 @@ async function roundWrite(record) {
         .forEach((candidate) => store.delete(candidate.id));
     };
   } catch { /* persistence is best-effort */ }
+}
+
+/* ---------------- round collection (ADR-017, disclosed in the footer) ----------------
+   Finished rounds send their ghost logs to the arcade owner's /collect
+   endpoint — the moves of both worms and the round seed, nothing else.
+   sendBeacon survives tab-close; fetch(keepalive) is the fallback; offline
+   simply skips. Returning visitors backfill rounds saved by older builds
+   once, tracked by id in the same database. */
+function uploadRound(record) {
+  try {
+    const payload = JSON.stringify(record);
+    if (navigator.sendBeacon &&
+        navigator.sendBeacon('/collect', new Blob([payload], { type: 'application/json' }))) {
+      return true;
+    }
+    fetch('/collect', { method: 'POST', body: payload, keepalive: true }).catch(() => {});
+    return true;
+  } catch { return false; }
+}
+
+async function backfillUploads() {
+  try {
+    const db = await dbPromise;
+    const sent = await new Promise((resolve) => {
+      const rq = db.transaction('meta', 'readonly').objectStore('meta').get('uploadedRounds');
+      rq.onsuccess = () => resolve(new Set(rq.result || []));
+      rq.onerror = () => resolve(new Set());
+    });
+    const rounds = await roundsRead();
+    let dirty = false;
+    for (const record of rounds) {
+      if (sent.has(record.id)) continue;
+      if (uploadRound(record)) { sent.add(record.id); dirty = true; }
+    }
+    if (dirty) {
+      db.transaction('meta', 'readwrite').objectStore('meta')
+        .put([...sent].slice(-MAX_ROUND_HISTORY * 2), 'uploadedRounds');
+    }
+  } catch { /* collection is best-effort, always */ }
 }
 
 /* ---------------- boot ---------------- */
@@ -355,6 +394,7 @@ async function boot() {
   }
   roundHistory = await roundsRead();
   renderHistory();
+  backfillUploads();
   scheduleArenaFocus();
 
   sfx.insertCoin(); // no-op pre-gesture; tryCoin() replays it after unlock
@@ -608,6 +648,14 @@ function onGameOver() {
   roundHistory = roundHistory.slice(0, MAX_ROUND_HISTORY);
   renderHistory();
   roundWrite(record);
+  if (uploadRound(record)) {
+    // Remember it as sent so the boot-time backfill never duplicates it.
+    dbPromise.then((db) => {
+      const store = db.transaction('meta', 'readwrite').objectStore('meta');
+      const rq = store.get('uploadedRounds');
+      rq.onsuccess = () => store.put([...(rq.result || []), record.id].slice(-MAX_ROUND_HISTORY * 2), 'uploadedRounds');
+    }).catch(() => {});
+  }
 
   const youWon = state.winner === 0;
   const cpuWon = state.winner === 1;
