@@ -124,7 +124,12 @@ pub fn hunt_floor_cells(game: &WormGame, who: usize, read_rate: f32) -> f32 {
 /// How many times its own length a cycle wants reachable before committing.
 pub(crate) const ESCAPE_LENGTH_MULTIPLE: f32 = 3.0;
 /// Flat manoeuvring allowance on top, so a very short cycle still needs room.
-pub(crate) const ESCAPE_MARGIN_CELLS: f32 = 8.0;
+// 8.0 until the first worm-native Darwin sweep (2026-08-06): of 22
+// single-knob candidates, margin 10 was the top winner — habitual record
+// 92% -> 98% on the fixed seeds with warm domination (30-0, lift 86%) and
+// the browser-board probe byte-identical. Receipts in .darwin/ and the
+// promoting commit.
+pub(crate) const ESCAPE_MARGIN_CELLS: f32 = 10.0;
 /// Survival floor for hunt-layer deviations: the destination must keep at
 /// least this much of the arena reachable (and at least half of wall-follow's
 /// space) — the anti-kamikaze gate.
