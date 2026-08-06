@@ -1043,7 +1043,7 @@ impl WormGame {
         // actual move, then refresh every model's prediction for next frame
         // (counterfactual recording — rps-ai stores model0..5 every round).
         if self.cpu_autopilot {
-            let (pending, active, confidence, intent_targets) =
+            let (pending, _premask_active, _premask_conf, intent_targets) =
                 crate::cpu_ai::compute_ensemble(self, &self.cpu_brain);
             // Errand hysteresis for the eat/arm intent models — see
             // `CpuBrain::intent_targets`.
@@ -1082,6 +1082,10 @@ impl WormGame {
                 })
                 .collect();
 
+            // Selection happens AFTER masking, among models that actually
+            // speak this frame — a silent model must never drive with its
+            // historical hit-rate as phantom confidence (codex finding).
+            let (active, confidence) = crate::cpu_ai::select_active(&self.cpu_brain, &masked);
             let e = &mut self.cpu_brain.ensemble;
             for (slot, m) in e.pending.iter_mut().zip(masked.iter()) {
                 *slot = *m;

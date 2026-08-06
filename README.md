@@ -179,6 +179,7 @@ living documents — if one disagrees with the code, the ADR is the bug.
 - [ADR-011](docs/adrs/011-intent-inference-and-engagement.md) — intent inference and an engaged CPU
 - [ADR-012](docs/adrs/012-two-swarm-findings-implemented.md) — errand twins, kinematic traps, and honest silence
 - [ADR-013](docs/adrs/013-the-improvement-flywheel.md) — the improvement flywheel
+- [ADR-014](docs/adrs/014-the-codex-corrections.md) — the codex corrections: what survived measurement
 
 ### A note on the numbers in this repo
 

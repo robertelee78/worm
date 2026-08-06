@@ -1,14 +1,17 @@
 // TRON Light Cycles — browser driver.
 // wasm game loop (fixed-timestep), canvas render + phosphor bloom, WebAudio
 // sfx, IndexedDB per-player brain keyed by a long-lived deviceId cookie.
-import init, { WasmGame } from './pkg/worm.js';
+// The ?v= must match BUILD below (and index.html's) — an unversioned glue
+// import could pair a cached old worm.js with a fresh wasm on the next
+// rebuild that changes the bindings.
+import init, { WasmGame } from './pkg/worm.js?v=7';
 import { Sfx } from './audio.js';
 import { computeBoardLayout, VIEWPORT_BLOCK_GUTTER } from './layout.js';
 
 let CELL = 14; // recomputed by applyBoardLayout() to fit the measured stage
 // Bump together with the ?v= in index.html whenever the wasm bundle is
 // rebuilt — it keys the cache-busting query on the .wasm fetch.
-const BUILD = 6;
+const BUILD = 7;
 const MATCH_TARGET = 3;
 const STATE_SCHEMA_VERSION = 2;
 const ROUND_SCHEMA_VERSION = 1;
@@ -35,10 +38,18 @@ const dbPromise = new Promise((resolve, reject) => {
     // v3: identity moves in here, beside the data it keys.
     if (!db.objectStoreNames.contains('meta')) db.createObjectStore('meta');
   };
+  let timedOut = false;
   rq.onsuccess = () => {
     // If a LATER build bumps the version while this tab is open, close so the
     // other tab's upgrade isn't blocked forever.
     rq.result.onversionchange = () => rq.result.close();
+    if (timedOut) {
+      // The 3s timeout already rejected this promise: no consumer can ever
+      // reach this connection, so holding it open would only block future
+      // upgrades from other tabs.
+      rq.result.close();
+      return;
+    }
     resolve(rq.result);
   };
   rq.onerror = () => reject(rq.error);
@@ -47,12 +58,15 @@ const dbPromise = new Promise((resolve, reject) => {
   // prior-session tabs on launch, so a phone hits this where a desktop never
   // does — and without these two handlers the promise never settles and
   // boot() awaits forever: a silent black cabinet.
-  rq.onblocked = () => reject(new Error('brain store blocked by another open tab — close other Worm tabs'));
-  setTimeout(() => reject(new Error('brain store open timed out')), 3000);
+  rq.onblocked = () => reject(new Error('brain store blocked by another open tab — close other Worm tabs, then reload'));
+  setTimeout(() => { timedOut = true; reject(new Error('brain store open timed out — reload to retry')); }, 3000);
 });
-// An early rejection must not surface as an unhandled-rejection before the
-// first awaiter attaches; every real consumer try/catches for itself.
-dbPromise.catch(() => {});
+// Degraded persistence must be SAID, not swallowed: every consumer catches
+// and falls back, so without this line a dead brain store looks identical to
+// a fresh player — and the defining feature (it remembers you) silently
+// stops working for the whole session.
+let dbDead = null;
+dbPromise.catch((e) => { dbDead = e?.message || 'brain store unavailable'; });
 
 /**
  * Resolve the player identity, preferring IndexedDB.
@@ -334,6 +348,8 @@ async function boot() {
           (game.brain_restore_summary() || 'memory restored')
         : (game.brain_restore_summary() || 'brain restored from this device'),
     );
+  } else if (dbDead) {
+    setBrainStatus(`⚠ memory unavailable — this session will not be remembered (${dbDead})`);
   } else {
     setBrainStatus('fresh brain — teach it by playing');
   }

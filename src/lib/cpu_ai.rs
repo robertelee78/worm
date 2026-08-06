@@ -1859,6 +1859,14 @@ pub fn count_open_space_excluding(
     start_y: u16,
     excluded: &[(u16, u16)],
 ) -> f32 {
+    // A start cell that is itself excluded is a destination the player is
+    // about to occupy: it has NO open space, not "one plus whatever the
+    // fill finds" (the old code marked it visited and then counted it
+    // anyway, quietly ignoring the exclusion for exactly the most
+    // dangerous cell).
+    if excluded.contains(&(start_x, start_y)) {
+        return 0.0;
+    }
     let mut visited = vec![vec![false; game.width as usize]; game.height as usize];
     for &(ex, ey) in excluded {
         if ex < game.width && ey < game.height {
@@ -3287,6 +3295,9 @@ impl Ensemble {
         const ETA_SLOW: f32 = 0.3;
         const SHARE_FAST: f32 = 0.08;
         const SHARE_SLOW: f32 = 0.01;
+        let mut awake_loss = 0.0f32;
+        let mut awake = 0u32;
+        let mut slept = [false; ENSEMBLE_MODELS];
         for i in 0..ENSEMBLE_MODELS {
             if let Some(pred) = self.pending[i].take() {
                 let hit = pred == actual;
@@ -3297,10 +3308,26 @@ impl Ensemble {
                     self.hits[i] += 1;
                 }
                 let loss = if hit { 0.0 } else { 1.0 };
+                awake_loss += loss;
+                awake += 1;
                 self.w_fast[i] *= (-ETA_FAST * loss).exp();
                 self.w_slow[i] *= (-ETA_SLOW * loss).exp();
+            } else {
+                slept[i] = true;
             }
         }
+        // SLEEPERS ARE NOT CHARGED. The specialist-Hedge alternative —
+        // charging an abstainer the awake population's average loss — is
+        // theoretically fairer and was MEASURED WORSE: the intent models
+        // sleep on most frames by design (no power-up on the board, no
+        // errand underway), and the average-loss charge decayed their
+        // weight with the crowd so their awake skill could never earn rank.
+        // The power-up persona's voluntary-turn read collapsed 74% -> 30%
+        // under it. The sleeper-takeover risk codex identified is real but
+        // is closed by the other half of the fix: selection now happens
+        // post-mask among models that currently SPEAK, so a well-ranked
+        // sleeper can hold its weight yet never drive while silent.
+        let _ = (awake_loss, awake, slept);
         for (weights, share) in [
             (&mut self.w_fast, SHARE_FAST),
             (&mut self.w_slow, SHARE_SLOW),
@@ -3559,14 +3586,42 @@ fn intent_family(
     let (px, py) = game.cycles[0].head;
     let w = game.width as usize;
 
+    // Route distance at an OCCUPIED cell (the player's head, their neck):
+    // the field never enters worm cells, so a direct lookup is -1 there and
+    // a commitment tested that way evicts itself every frame — measured,
+    // the advertised hysteresis never operated at all. The occupant's route
+    // is one more than the best adjacent field cell.
+    let route_dist = |f: &[i32], x: u16, y: u16| -> i32 {
+        let direct = f[y as usize * w + x as usize];
+        if direct >= 0 {
+            return direct;
+        }
+        let mut best = i32::MAX;
+        for (dx, dy) in [(0i16, -1i16), (0, 1), (-1, 0), (1, 0)] {
+            let nx = x as i16 + dx;
+            let ny = y as i16 + dy;
+            if nx >= 0 && ny >= 0 && nx < game.width as i16 && ny < game.height as i16 {
+                let v = f[ny as usize * w + nx as usize];
+                if v >= 0 && v < best {
+                    best = v;
+                }
+            }
+        }
+        if best == i32::MAX {
+            -1
+        } else {
+            best + 1
+        }
+    };
+
     let mut commit = committed.filter(|t| targets.contains(t));
     if let Some(t) = commit {
         let f = target_field(game, &[t]);
-        let here = f[py as usize * w + px as usize];
+        let here = route_dist(&f, px, py);
         // The previous head is the neck — observable by anyone watching.
         let still_closing = match game.cycles[0].positions.get(1) {
             Some(&(qx, qy)) if here >= 0 => {
-                let prev = f[qy as usize * w + qx as usize];
+                let prev = route_dist(&f, qx, qy);
                 prev < 0 || here < prev
             }
             _ => here >= 0,
@@ -3586,16 +3641,36 @@ fn intent_family(
     let f = target_field(game, targets);
     let hold = intent_step(game, &f, true);
     let weave = intent_step(game, &f, false);
-    // Commit to the Manhattan-nearest target. The multi-source field knows
-    // only the distance to the nearest target, not WHICH one; per-target
-    // routed distance would cost a BFS each. Manhattan is a fine first
-    // guess, and the closing test above evicts a wrong commitment on the
-    // very next observed move.
+    // Commit to the nearest target CONSISTENT WITH THE OBSERVED MOTION:
+    // among the targets the player's last move actually approached, take the
+    // Manhattan-nearest (per-target routed distance would cost a BFS each).
+    // Plain nearest was measured wrong: standing between a near morsel
+    // behind them and a far one ahead, it committed to the one at their
+    // BACK, was evicted one frame later for not closing, and re-committed —
+    // flapping forever and never latching the errand actually underway.
+    // When no target was approached (first frame, or they just turned), fall
+    // back to nearest; the closing test evicts a bad guess next move.
     let new_commit = hold.map(|_| {
-        targets
-            .iter()
+        let manh = |t: (u16, u16), from: (u16, u16)| -> i32 {
+            (t.0 as i32 - from.0 as i32).abs() + (t.1 as i32 - from.1 as i32).abs()
+        };
+        let neck = game.cycles[0].positions.get(1).copied();
+        let approached: Vec<(u16, u16)> = match neck {
+            Some(n) => targets
+                .iter()
+                .copied()
+                .filter(|&t| manh(t, (px, py)) < manh(t, n))
+                .collect(),
+            None => Vec::new(),
+        };
+        let pool: &[(u16, u16)] = if approached.is_empty() {
+            targets
+        } else {
+            &approached
+        };
+        pool.iter()
             .copied()
-            .min_by_key(|&(tx, ty)| (tx as i32 - px as i32).abs() + (ty as i32 - py as i32).abs())
+            .min_by_key(|&t| manh(t, (px, py)))
             .unwrap_or((px, py))
     });
     (hold, weave, new_commit)
@@ -3734,14 +3809,64 @@ pub fn compute_ensemble(
     (pending, active, confidence, [eat_commit, arm_commit])
 }
 
-/// Effective score used by ensemble selection. The UI exports this alongside
-/// the raw quadratic score so a warm k-NN bonus is never an invisible tie-break.
-pub fn ensemble_rank_score(brain: &CpuBrain, model: usize) -> f32 {
-    let mut score = brain.ensemble.score(model);
-    if model == KNN_MODEL && brain.opp_brain.episodes.len() >= COLD_START_EPISODES {
-        score += KNN_SCORE_BONUS;
+/// Select the driving model AMONG THOSE CURRENTLY SPEAKING — called after
+/// legal masking, on the predictions actually published. Selecting before
+/// masking let a silent model be crowned: its pending stayed None while its
+/// historical hit-rate rode along as "confidence", and the hunt gates opened
+/// on a read that did not exist that frame.
+///
+/// Returns (active, confidence). When no scored model speaks, falls back to
+/// any speaking model (fresh game); when nothing speaks at all, model 0 with
+/// zero confidence — an honest silent frame.
+pub fn select_active(brain: &CpuBrain, masked: &[Option<Direction>]) -> (usize, f32) {
+    let e = &brain.ensemble;
+    let warm = brain.opp_brain.episodes.len() >= COLD_START_EPISODES;
+    let rank = |i: usize| -> f32 {
+        let mut w = e.w_fast[i] + e.w_slow[i];
+        if i == KNN_MODEL && warm {
+            w *= 1.0 + KNN_SCORE_BONUS;
+        }
+        w
+    };
+    let mut best = usize::MAX;
+    let mut best_w = f32::NEG_INFINITY;
+    for i in 0..ENSEMBLE_MODELS {
+        if e.den[i] <= 0.0 || masked[i].is_none() {
+            continue;
+        }
+        if rank(i) > best_w {
+            best_w = rank(i);
+            best = i;
+        }
     }
-    score
+    if best == usize::MAX {
+        // Nothing scored yet (first frames): first speaking model, like
+        // rps-ai forcing model 0 — but never a silent one.
+        best = (0..ENSEMBLE_MODELS)
+            .find(|&i| masked[i].is_some())
+            .unwrap_or(0);
+    }
+    let confidence = if masked[best].is_some() && e.total[best] > 0 {
+        e.hits[best] as f32 / e.total[best] as f32
+    } else {
+        0.0
+    };
+    (best, confidence)
+}
+
+/// Effective score used by ensemble selection — the SAME quantity
+/// `select_active` ranks by (two-horizon fixed-share weights, with the warm
+/// k-NN multiplier), so the panel can never show a lower-scored model
+/// driving. It previously exported the retired quadratic num/den score with
+/// an additive bonus: a different ordering from the one actually deciding,
+/// which is indefensible in a HUD whose job is being believed.
+pub fn ensemble_rank_score(brain: &CpuBrain, model: usize) -> f32 {
+    let e = &brain.ensemble;
+    let mut w = e.w_fast[model] + e.w_slow[model];
+    if model == KNN_MODEL && brain.opp_brain.episodes.len() >= COLD_START_EPISODES {
+        w *= 1.0 + KNN_SCORE_BONUS;
+    }
+    w
 }
 
 /// Heuristic for when the CPU should fire a held power-up.
@@ -3956,10 +4081,24 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
     // Explainable as: "it doesn't act on a read until it has watched you make
     // about ten real choices."
     let read_conf = (game.cpu_brain.opp_brain.turn_observations() / 10.0).min(1.0);
-    let player_pred_conf = decision_forecast
+    // Two confidences, split on purpose (codex silent-model finding, then
+    // measured):
+    //  - track_conf gates DEFENSIVE use of the projected path. When the
+    //    forecast is silent the path is a straight-line extrapolation — a
+    //    perfectly good thing to dodge, and zeroing it was measured to cost
+    //    wins by blinding CloseEvasion on exactly the silent frames.
+    //  - pred_conf gates AGGRESSIVE use. A hunt on a silent forecast is
+    //    aggression without a read, which violates the product contract —
+    //    so it is zero unless the published forecast actually names a move.
+    let track_conf = decision_forecast
         .map(|forecast| forecast.confidence)
         .unwrap_or(0.0)
         * read_conf;
+    let player_pred_conf = if decision_forecast.and_then(|f| f.predicted).is_some() {
+        track_conf
+    } else {
+        0.0
+    };
     let cpu = &game.cycles[1];
     let (cx, cy) = cpu.head;
 
@@ -4083,7 +4222,9 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
     // SURVIVAL BEFORE HUNTING: this used to run AFTER the intercept layers,
     // so a confident hunt could steer us head-on into the player and the
     // dodge never ran. Now it outranks food and intercepts alike.
-    if player_pred_conf >= 0.4 {
+    // Gated on track_conf: dodging an extrapolated path is defensive and
+    // must keep working on frames where the forecast is silent.
+    if track_conf >= 0.4 {
         let mut min_dist = i16::MAX;
         for &(px, py) in &predicted_positions {
             let dist = (cx as i16 - px as i16).abs() + (cy as i16 - py as i16).abs();
@@ -4100,11 +4241,23 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
             //   2. candidates below the escape floor on that measure are
             //      rejected whenever any candidate clears it (same discipline
             //      as every other layer — never empties the choice).
+            // Only the projected cells the player's trail can actually HOLD
+            // at once count as future walls: a length-2 player's tail
+            // vacates the oldest projected cell almost immediately, and
+            // excluding all five hallucinated a sealed pocket where none
+            // could form (codex finding).
+            let coexist = (game.cycles[0].positions.len()
+                + game.cycles[0].pending_growth as usize)
+                .min(predicted_positions.len());
+            // The SUFFIX: by the end of the horizon their tail has vacated
+            // the earliest projected cells; the last `coexist` are the ones
+            // still standing as trail.
+            let live_projection = &predicted_positions[predicted_positions.len() - coexist..];
             let evasion_open = |d: Direction| -> f32 {
                 let (ddx, ddy) = d.as_delta();
                 let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
                 let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
-                count_open_space_excluding(game, nx, ny, &predicted_positions)
+                count_open_space_excluding(game, nx, ny, live_projection)
             };
             let clearing: Vec<Direction> = candidates
                 .iter()
@@ -4323,6 +4476,15 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
         for (i, &(px, py)) in predicted_positions.iter().enumerate() {
             let frames_ahead = (i + 1) as f32; // 1, 2, 3, 4, 5
             let dist = ((cx as i16 - px as i16).abs() + (cy as i16 - py as i16).abs()) as f32;
+            // NO strict reachability gate. It was tried (dist must not
+            // exceed frames_ahead + 2) on the theory that an intercept you
+            // cannot arrive at in time is a camp — and MEASURED WRONG:
+            // browser-board wins fell 88.8% -> 81.2%, head-to-head distance
+            // rose, and long corner dwells returned. Moving TOWARD a
+            // predicted crossing is engagement pressure even when arrival is
+            // a beat late, because the trail laid en route still closes
+            // lanes behind them. Camping is prevented where it was actually
+            // measured: CornerIntercept's win-the-race check.
             // Score: closer target + fewer frames ahead = easier intercept.
             let score = 20.0 - dist - frames_ahead * 2.0;
             if best_intercept.is_none() || score > best_intercept.unwrap().2 {

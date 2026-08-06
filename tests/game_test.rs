@@ -2237,3 +2237,72 @@ fn test_burst_spares_walls_and_own_trail() {
         "the opponent trail cell on the ray was severed"
     );
 }
+
+/* ---------------- errand hysteresis (codex High finding #2) ---------------- */
+
+/// A committed errand target must SURVIVE across real moves while the player
+/// keeps closing on it. The first implementation evicted the commitment every
+/// frame — the route field never enters occupied cells, so the distance test
+/// at the player's own head read "unreachable" and re-shopped — meaning the
+/// advertised hysteresis never operated at all.
+#[test]
+fn test_errand_commitment_survives_while_closing() {
+    let mut game = WormGame::with_size(55, 40);
+    for row in &mut game.grid {
+        for cell in row.iter_mut() {
+            if *cell != worm::CellType::Wall {
+                *cell = worm::CellType::Empty;
+            }
+        }
+    }
+    game.food_items.clear();
+    game.powerups.clear();
+    // Two morsels: a committed-to one ahead, and a decoy that becomes
+    // Manhattan-NEARER mid-errand — re-shopping would flip to it.
+    game.food_items.push((30, 20, 1)); // the errand, straight ahead
+    game.food_items.push((14, 24, 9)); // the decoy, behind-left
+    game.grid[20][30] = worm::CellType::Food;
+    game.grid[24][14] = worm::CellType::Food;
+    game.cycles[1].head = (45, 35);
+    game.cycles[1].positions = vec![(45, 35)];
+    game.grid[35][45] = worm::CellType::CPU;
+
+    let mut place_player = |game: &mut WormGame, head: (u16, u16), neck: (u16, u16)| {
+        for row in &mut game.grid {
+            for cell in row.iter_mut() {
+                if *cell == worm::CellType::Player {
+                    *cell = worm::CellType::Empty;
+                }
+            }
+        }
+        game.cycles[0].head = head;
+        game.cycles[0].direction = worm::Direction::Right;
+        game.cycles[0].positions = vec![head, neck];
+        game.grid[head.1 as usize][head.0 as usize] = worm::CellType::Player;
+        game.grid[neck.1 as usize][neck.0 as usize] = worm::CellType::Player;
+    };
+
+    // Walk the player rightward toward (30,20), one real move at a time,
+    // storing the returned commitments back exactly as game.rs does.
+    let mut committed_seen = Vec::new();
+    for x in [16u16, 17, 18, 19] {
+        place_player(&mut game, (x, 20), (x - 1, 20));
+        let (_, _, _, targets) = worm::cpu_ai::compute_ensemble(&game, &game.cpu_brain);
+        game.cpu_brain.intent_targets = targets;
+        committed_seen.push(targets[0]);
+    }
+
+    assert_eq!(
+        committed_seen[0],
+        Some((30, 20)),
+        "the errand commits to the morsel the player is closing on"
+    );
+    // From x=17 on, the decoy at (14,24) is Manhattan-nearer (7 vs 13) —
+    // only real hysteresis holds the line.
+    assert!(
+        committed_seen.iter().all(|&t| t == Some((30, 20))),
+        "the commitment must survive every closing move, not re-shop to the \
+         nearer decoy: {:?}",
+        committed_seen
+    );
+}
