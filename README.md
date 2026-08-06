@@ -130,7 +130,9 @@ with `WORM_BRAIN`).
 ```bash
 wasm-pack build --target web --features wasm
 cp pkg/worm.js pkg/worm.d.ts pkg/worm_bg.wasm pkg/worm_bg.wasm.d.ts web/pkg/
-python3 -m http.server -d web 8080
+python3 scripts/serve.py 8080   # binds 0.0.0.0 for phones on the same wifi,
+                                # sends no-store so rebuilds never serve stale
+# (python3 -m http.server -d web 8080 also works, but caches stale bundles)
 ```
 
 The browser build keeps a per-player brain in IndexedDB, keyed by an identity
