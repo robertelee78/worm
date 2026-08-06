@@ -149,6 +149,7 @@ pub enum CpuDecisionReason {
     ForcedMove,
     WarmingUp,
     ThreatDodge,
+    EscapeFloor,
     CloseEvasion,
     ItemPickup,
     ItemPath,
@@ -166,6 +167,11 @@ impl CpuDecisionReason {
             Self::ForcedMove => "only safe move",
             Self::WarmingUp => "warming up · wall safety",
             Self::ThreatDodge => "dodging a weapon",
+            // The escape-floor rescue used to reuse ThreatDodge and claim
+            // "dodging a weapon" with no weapon on the board — a label the
+            // player can catch out, which is fatal to a HUD whose whole job
+            // is being believed (ADR-003/ADR-006).
+            Self::EscapeFloor => "backing out of a dead end",
             Self::CloseEvasion => "evading your predicted path",
             Self::ItemPickup => "taking a nearby item",
             Self::ItemPath => "routing to an item",
@@ -4193,7 +4199,7 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
                     .unwrap_or(std::cmp::Ordering::Equal)
             })
         {
-            choose!(roomier, CpuDecisionReason::ThreatDodge);
+            choose!(roomier, CpuDecisionReason::EscapeFloor);
         }
     }
     choose!(followed, CpuDecisionReason::WallFollow);
