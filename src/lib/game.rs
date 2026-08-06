@@ -355,7 +355,7 @@ impl DeathCause {
             // planted. An unexplained death reads as a cheat (ADR-003).
             DeathCause::BombBlast => "blown up by a mine disguised as food",
             DeathCause::Laser => "laser beam",
-            DeathCause::TriShotBolt => "tri-shot bolt",
+            DeathCause::TriShotBolt => "caught in a tri-shot burst",
         }
     }
 }
@@ -1739,40 +1739,7 @@ impl WormGame {
                         .find(|(_, p)| beam.contains(p))
                         .map(|(i, _)| i);
                     if let Some(cut) = cut {
-                        let severed = self.cycles[opp].positions.split_off(cut.max(1));
-                        // Grid/positions lockstep, same rule as detonate and
-                        // close_ring: only clear a cell that still holds THIS
-                        // cycle's own marker, never one another cycle has since
-                        // legally occupied, and never a living head.
-                        let marker = if opp == self.player {
-                            CellType::Player
-                        } else {
-                            CellType::CPU
-                        };
-                        let heads: Vec<(u16, u16)> = self
-                            .cycles
-                            .iter()
-                            .filter(|c| c.alive)
-                            .map(|c| c.head)
-                            .collect();
-                        let color = self.cycles[opp].color;
-                        for (sx, sy) in severed {
-                            if self.grid[sy as usize][sx as usize] == marker
-                                && !heads.contains(&(sx, sy))
-                            {
-                                self.grid[sy as usize][sx as usize] = CellType::Empty;
-                                self.particles.push(Particle {
-                                    x: sx as f32,
-                                    y: sy as f32,
-                                    vx: 0.0,
-                                    vy: 0.0,
-                                    lifetime: 8,
-                                    color,
-                                });
-                            }
-                        }
-                        // Owed growth would silently regrow what was just cut.
-                        self.cycles[opp].pending_growth = 0;
+                        self.sever_from(opp, cut);
                         play_beep(SfxKind::Laser, 900, 60);
                     }
                 }
@@ -1907,6 +1874,121 @@ impl WormGame {
         BeamPath { cells, breach }
     }
 
+    /// Sever `opp`'s trail at positions index `cut` (nearest their head):
+    /// everything from the cut back is lost. Shared by the laser beam and the
+    /// tri-shot burst — one set of grid/positions lockstep rules, one place.
+    pub fn sever_from(&mut self, opp: usize, cut: usize) {
+        let severed = self.cycles[opp].positions.split_off(cut.max(1));
+        // Grid/positions lockstep, same rule as detonate and close_ring: only
+        // clear a cell that still holds THIS cycle's own marker, never one
+        // another cycle has since legally occupied, and never a living head.
+        let marker = if opp == self.player {
+            CellType::Player
+        } else {
+            CellType::CPU
+        };
+        let heads: Vec<(u16, u16)> = self
+            .cycles
+            .iter()
+            .filter(|c| c.alive)
+            .map(|c| c.head)
+            .collect();
+        let color = self.cycles[opp].color;
+        for (sx, sy) in severed {
+            if self.grid[sy as usize][sx as usize] == marker && !heads.contains(&(sx, sy)) {
+                self.grid[sy as usize][sx as usize] = CellType::Empty;
+                self.particles.push(Particle {
+                    x: sx as f32,
+                    y: sy as f32,
+                    vx: 0.0,
+                    vy: 0.0,
+                    lifetime: 8,
+                    color,
+                });
+            }
+        }
+        // Owed growth would silently regrow what was just cut.
+        self.cycles[opp].pending_growth = 0;
+    }
+
+    /// A tri-shot bolt detonating on contact: a 2x2 burst anchored at the
+    /// impact cell and biased one cell FORWARD along the bolt's flight — a
+    /// thrown grenade lands past where it strikes, never behind the thrower.
+    ///
+    /// Inside the burst, against the opponent only (the firer is immune, like
+    /// every weapon here): their head dies; their trail is severed at the
+    /// burst cell nearest their head, costing everything from there back —
+    /// the same cut rule as the laser, so aiming near the neck is worth more
+    /// than clipping the tail tip. Mines caught in the burst chain. Walls are
+    /// NOT breached — breaching stays the laser's and the mine's job.
+    fn bolt_blast(&mut self, x: u16, y: u16, dx: i16, dy: i16, from: u8) {
+        // 2x2 quadrant: the impact cell plus one cell along each axis of
+        // travel. A diagonal bolt extends into its natural quadrant; a
+        // straight bolt borrows its perpendicular sign from the other axis
+        // so the choice is deterministic under a seed.
+        let ax = if dx != 0 { dx.signum() } else { dy.signum() };
+        let ay = if dy != 0 { dy.signum() } else { dx.signum() };
+        let mut cells: Vec<(u16, u16)> = Vec::with_capacity(4);
+        for ox in [0, ax] {
+            for oy in [0, ay] {
+                let cx = x as i16 + ox;
+                let cy = y as i16 + oy;
+                if cx >= 0 && cy >= 0 && cx < self.width as i16 && cy < self.height as i16 {
+                    let cell = (cx as u16, cy as u16);
+                    if !cells.contains(&cell) {
+                        cells.push(cell);
+                    }
+                }
+            }
+        }
+        for &(bx, by) in &cells {
+            self.add_impact_particles(bx, by, (255, 170, 60));
+        }
+        play_beep(SfxKind::Detonate, 150, 70);
+
+        // Mines caught in the burst chain (they detonate on the next tick).
+        for b in &mut self.bombs {
+            if cells.contains(&(b.x, b.y)) {
+                b.tripped = true;
+                b.fuse = 0;
+            }
+        }
+
+        let opp = (1 - from) as usize;
+        if !self.cycles[opp].alive {
+            return;
+        }
+        // Head inside the burst: the kill, with the same draw semantics as a
+        // direct bolt hit.
+        if cells.contains(&self.cycles[opp].head) {
+            let (hx, hy) = self.cycles[opp].head;
+            self.add_impact_particles(hx, hy, self.cycles[opp].color);
+            self.cycles[opp].alive = false;
+            if self.death_cause.is_none() {
+                self.death_cause = Some(DeathCause::TriShotBolt);
+            }
+            if self.game_over {
+                self.winner = None;
+            } else {
+                self.game_over = true;
+                self.winner = Some(from as usize);
+                play_death_riff(80);
+            }
+            return;
+        }
+        // Trail inside the burst: sever at the hit nearest their head.
+        let cut = self.cycles[opp]
+            .positions
+            .iter()
+            .enumerate()
+            .skip(1)
+            .find(|(_, p)| cells.contains(p))
+            .map(|(i, _)| i);
+        if let Some(cut) = cut {
+            self.sever_from(opp, cut);
+        }
+    }
+
     /// Advance live tri-shot bolts one cell; bolts die on walls or at max range,
     /// and kill any head they enter.
     pub fn advance_projectiles(&mut self) {
@@ -1927,22 +2009,22 @@ impl WormGame {
             }
             let (ux, uy) = (x as u16, y as u16);
             let (ox, oy) = (self.projectiles[i].x, self.projectiles[i].y);
-            let hit = (0..2).find(|&c| {
-                if c as u8 == from || !self.cycles[c].alive {
-                    return false;
-                }
-                let cy = &self.cycles[c];
-                // Crossing swap: heads move before bolts each frame, so an
-                // odd-gap head-on approach exchanges cells with the bolt in a
-                // single frame — comparing post-move cells alone tunneled
-                // straight through. The head's pre-move cell is positions[1].
-                let swapped =
-                    cy.head == (ox, oy) && cy.positions.len() > 1 && cy.positions[1] == (ux, uy);
-                cy.head == (ux, uy) || swapped
-            });
-            if let Some(c) = hit {
-                self.add_impact_particles(ux, uy, self.cycles[c].color);
-                self.cycles[c].alive = false;
+            let (pdx, pdy) = (self.projectiles[i].dx, self.projectiles[i].dy);
+            let opp = (1 - from) as usize;
+
+            // Crossing swap: heads move before bolts each frame, so an
+            // odd-gap head-on approach exchanges cells with the bolt in a
+            // single frame — comparing post-move cells alone tunneled
+            // straight through. The head's pre-move cell is positions[1].
+            // Killed directly: the burst is forward-biased and cannot reach
+            // a head that has already swapped BEHIND the impact cell.
+            let swapped = self.cycles[opp].alive
+                && self.cycles[opp].head == (ox, oy)
+                && self.cycles[opp].positions.len() > 1
+                && self.cycles[opp].positions[1] == (ux, uy);
+            if swapped {
+                self.add_impact_particles(ux, uy, self.cycles[opp].color);
+                self.cycles[opp].alive = false;
                 if self.death_cause.is_none() {
                     self.death_cause = Some(DeathCause::TriShotBolt);
                 }
@@ -1953,9 +2035,28 @@ impl WormGame {
                     self.winner = None;
                 } else {
                     self.game_over = true;
-                    self.winner = Some(1 - c);
+                    self.winner = Some(from as usize);
                     play_death_riff(80);
                 }
+                self.projectiles.remove(i);
+                continue;
+            }
+
+            // A bolt is a small thrown grenade: contact with ANY part of the
+            // opponent — head or trail — detonates a 2x2 burst (see
+            // `bolt_blast`: head in the burst dies, trail is severed at the
+            // hit, mines chain). The firer's own trail is not a target; bolts
+            // fly over it exactly as before.
+            let opp_marker = if opp == self.player {
+                CellType::Player
+            } else {
+                CellType::CPU
+            };
+            let contact = self.cycles[opp].alive
+                && (self.cycles[opp].head == (ux, uy)
+                    || self.grid[uy as usize][ux as usize] == opp_marker);
+            if contact {
+                self.bolt_blast(ux, uy, pdx, pdy, from);
                 self.projectiles.remove(i);
                 continue;
             }

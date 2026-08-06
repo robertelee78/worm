@@ -2092,3 +2092,148 @@ fn test_expired_mine_fizzles_instead_of_detonating() {
         "no blast: a fizzle must not punch walls or clear cells"
     );
 }
+
+/* ---------------- tri-shot as grenade bolts (2x2 burst) ---------------- */
+
+fn trishot_board() -> WormGame {
+    let mut game = WormGame::with_size(120, 38);
+    for row in &mut game.grid {
+        for cell in row.iter_mut() {
+            if *cell != worm::CellType::Wall {
+                *cell = worm::CellType::Empty;
+            }
+        }
+    }
+    game.food_items.clear();
+    game.powerups.clear();
+    // Firer: player, heading Right.
+    game.cycles[0].head = (10, 20);
+    game.cycles[0].positions = vec![(10, 20), (9, 20)];
+    game.cycles[0].direction = worm::Direction::Right;
+    game.grid[20][10] = worm::CellType::Player;
+    game.grid[20][9] = worm::CellType::Player;
+    game
+}
+
+/// A bolt striking the opponent's TRAIL (not head) bursts and severs from
+/// the hit back — the tri-shot is a grenade launcher now, not a head-only
+/// needle. The victim survives shorter; the game does not end.
+#[test]
+fn test_bolt_on_trail_severs_from_the_hit_back() {
+    let mut game = trishot_board();
+    // CPU body crossing the straight ray at x=20, head safely off-ray and
+    // far from the 2x2 burst.
+    game.cycles[1].head = (20, 26);
+    game.cycles[1].direction = worm::Direction::Down;
+    game.cycles[1].positions = vec![
+        (20, 26), // head (index 0)
+        (20, 25),
+        (20, 24),
+        (20, 23),
+        (20, 22),
+        (20, 21), // inside the burst — the hit nearest the head
+        (20, 20), // on the ray — the impact cell
+    ];
+    for &(x, y) in &game.cycles[1].positions {
+        game.grid[y as usize][x as usize] = worm::CellType::CPU;
+    }
+    game.cycles[1].pending_growth = 4;
+
+    game.cycles[0].held_powerup = Some(worm::game::PowerUpKind::TriShot);
+    assert!(game.fire_powerup(0));
+    // March only the projectiles; the worms stand still for the assertion.
+    for _ in 0..12 {
+        game.advance_projectiles();
+    }
+
+    assert!(game.cycles[1].alive, "a trail hit must not kill");
+    assert!(!game.game_over);
+    // Burst at (20,20) heading Right covers x 20..=21, y 20..=21; the CPU
+    // cell nearest its head in the burst is (20,21) at index 5 — everything
+    // from there back is gone.
+    assert_eq!(
+        game.cycles[1].positions.len(),
+        5,
+        "severed at the burst cell nearest the head; the stump survives"
+    );
+    assert_eq!(
+        game.cycles[1].pending_growth, 0,
+        "owed growth must not silently regrow the cut"
+    );
+    assert_eq!(
+        game.grid[20][20],
+        worm::CellType::Empty,
+        "severed cells leave the grid"
+    );
+}
+
+/// A head inside the 2x2 burst dies even when the bolt itself struck an
+/// adjacent trail cell — that is what makes the burst a burst.
+#[test]
+fn test_head_inside_burst_dies() {
+    let mut game = trishot_board();
+    // Head sits one cell PAST the trail cell the bolt strikes, inside the
+    // forward-biased 2x2 (impact (20,20) heading Right covers (21,20)).
+    game.cycles[1].head = (21, 20);
+    game.cycles[1].direction = worm::Direction::Right;
+    game.cycles[1].positions = vec![(21, 20), (20, 20), (20, 21)];
+    for &(x, y) in &game.cycles[1].positions {
+        game.grid[y as usize][x as usize] = worm::CellType::CPU;
+    }
+
+    game.cycles[0].held_powerup = Some(worm::game::PowerUpKind::TriShot);
+    assert!(game.fire_powerup(0));
+    for _ in 0..12 {
+        game.advance_projectiles();
+        if game.game_over {
+            break;
+        }
+    }
+
+    assert!(!game.cycles[1].alive, "a head in the burst dies");
+    assert_eq!(game.winner, Some(0), "the firer takes the kill");
+    assert_eq!(
+        game.death_cause,
+        Some(worm::game::DeathCause::TriShotBolt)
+    );
+}
+
+/// The burst must not breach walls (breaching stays the laser's and the
+/// mine's job) and must not touch the firer's own trail.
+#[test]
+fn test_burst_spares_walls_and_own_trail() {
+    let mut game = trishot_board();
+    // Opponent trail hugging the top wall lane so the burst quadrant
+    // includes an arena-wall cell.
+    let wall_y = 2usize; // arena wall ring
+    game.cycles[1].head = (30, 10);
+    game.cycles[1].direction = worm::Direction::Right;
+    game.cycles[1].positions = vec![(30, 10), (20, 3), (19, 3)];
+    game.grid[10][30] = worm::CellType::CPU;
+    game.grid[3][20] = worm::CellType::CPU;
+    game.grid[3][19] = worm::CellType::CPU;
+    // Firer aims up the column so the straight ray hits (20,3), whose 2x2
+    // (heading Up, biased left) touches the wall row above.
+    game.cycles[0].head = (20, 10);
+    game.cycles[0].direction = worm::Direction::Up;
+    game.cycles[0].positions = vec![(20, 10), (20, 11)];
+    game.grid[10][20] = worm::CellType::Player;
+    game.grid[11][20] = worm::CellType::Player;
+
+    game.cycles[0].held_powerup = Some(worm::game::PowerUpKind::TriShot);
+    assert!(game.fire_powerup(0));
+    for _ in 0..12 {
+        game.advance_projectiles();
+    }
+
+    assert_eq!(
+        game.grid[wall_y][20],
+        worm::CellType::Wall,
+        "a tri-shot burst never breaches the arena wall"
+    );
+    assert!(game.cycles[0].alive, "own trail is never a target");
+    assert!(
+        game.cycles[1].positions.len() < 3,
+        "the opponent trail cell on the ray was severed"
+    );
+}

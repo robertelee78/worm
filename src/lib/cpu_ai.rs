@@ -3779,12 +3779,19 @@ pub fn should_fire(game: &mut WormGame, who: usize) -> bool {
             // ARC. Most of the arc is unhittable, and now that bolts fly until
             // a wall a distance gate would also refuse exactly the long
             // straight shots that make the unbounded bolt worth having.
+            //
+            // Since a bolt bursts on ANY part of the opponent (head kill,
+            // trail sever), every opponent cell on a ray is a target — a shot
+            // across their body is a sever even when their head is elsewhere.
             let (dx, dy) = game.cycles[who].direction.as_delta();
-            let fdx = ox as i16 - hx as i16;
-            let fdy = oy as i16 - hy as i16;
-            let forward = dx * fdx + dy * fdy > 0;
-            let on_ray = fdx == 0 || fdy == 0 || fdx.abs() == fdy.abs();
-            forward && on_ray
+            let on_a_ray = |px: u16, py: u16| -> bool {
+                let fdx = px as i16 - hx as i16;
+                let fdy = py as i16 - hy as i16;
+                let forward = dx * fdx + dy * fdy > 0;
+                let aligned = fdx == 0 || fdy == 0 || fdx.abs() == fdy.abs();
+                forward && aligned
+            };
+            on_a_ray(ox, oy) || game.cycles[opp].positions.iter().any(|&(px, py)| on_a_ray(px, py))
         }
         crate::game::PowerUpKind::Bomb => {
             // A mine is PLACED, not aimed, so proximity is the wrong question.
