@@ -3962,7 +3962,16 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
     // When the player is a wall-follower (confidence high, direction stable),
     // predict which corner they'll reach and cut across to lay a trail barrier.
     // This works even when the player is >10 cells away (standard intercept range).
-    if player_pred_conf >= 0.5 {
+    //
+    // Gate history: 0.5 originally. Measured share of player-directed
+    // decisions at that setting was 6-7% of the total — the CPU spent ~90% of
+    // its decisions on itself, which the player experienced as "it plays a
+    // different game in the same arena" (head-to-head distance matched the
+    // uniform-random baseline). read_conf already multiplies the confidence,
+    // so this cannot open before ~10 observed real choices regardless; the
+    // hunt floor still vets every destination. Lowered to buy engagement
+    // without touching a survival floor.
+    if player_pred_conf >= 0.35 {
         // Predict the corner the player will reach next.
         // Wall-followers turn right at corners. We predict their path to the next corner.
         let corner_target = predict_next_corner(game, &game.cycles[0], player_pred_dir);
@@ -3970,10 +3979,21 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
         if let Some((corner_x, corner_y)) = corner_target {
             let dist_to_corner =
                 ((cx as i16 - corner_x as i16).abs() + (cy as i16 - corner_y as i16).abs()) as f32;
+            // The player travels a straight line to this corner, so their
+            // Manhattan distance IS their arrival time. An intercept the CPU
+            // cannot win is not an intercept — it is a camp: measured, 4 of 7
+            // long corner dwells were entered under this reason and then held
+            // in place by the self-memory, which is precisely the
+            // "sit and spin in the corner" the player complained about.
+            // Arriving strictly first is what makes the barrier a barrier.
+            let (phx, phy) = game.cycles[0].head;
+            let player_to_corner =
+                ((phx as i16 - corner_x as i16).abs() + (phy as i16 - corner_y as i16).abs()) as f32;
 
-            // Only intercept if the corner is reachable (within ~20 cells)
-            // and we're not too close to the player (avoid head-on).
-            if (5.0..=25.0).contains(&dist_to_corner) {
+            // Only intercept if the corner is reachable (within ~20 cells),
+            // we're not too close to the player (avoid head-on), and we can
+            // actually beat them there.
+            if (5.0..=25.0).contains(&dist_to_corner) && dist_to_corner < player_to_corner {
                 let mut best_dir = wall_dir;
                 let mut best_score = f32::NEG_INFINITY;
                 for &d in candidates {
@@ -4022,7 +4042,8 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
     // it, leaving a trail the player crashes into. Against wall-followers this
     // triggers at the corners where both cycles converge; against chasers it
     // triggers constantly because the player is always approaching.
-    if player_pred_conf >= 0.6 {
+    // Gate lowered 0.6 -> 0.45 with the corner gate above (same rationale).
+    if player_pred_conf >= 0.45 {
         // Target: where the player will be in 2-5 frames (from iterative prediction).
         let mut best_intercept: Option<(u16, u16, f32)> = None;
         for (i, &(px, py)) in predicted_positions.iter().enumerate() {
