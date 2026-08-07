@@ -50,19 +50,38 @@ The claim is not that the CPU predicts you — it is that predicting you makes i
 fixed and varies only whether the CPU may remember:
 
 ```
-COLD (cannot learn)   cpu 19 player 11 draw 0   win  63%
-WARM (remembers you)  cpu 28 player  2 draw 0   win  93%   lift 81%
+COLD (cannot learn)   cpu 86 player 1 draw 3   win  96%
+WARM (remembers you)  cpu 84 player 2 draw 4   win  93%   earned read 0.75
 ```
 
-A thirty-point gap whose only cause is memory — and the cold row is LOW
-on purpose: since [ADR-018](docs/adrs/018-the-beatable-opening.md) an
-unread CPU opens slow-witted and genuinely beatable (a casual-novice
-fixture wins 3 of its first 5 rounds), and wits are earned by reading
-you or by the scoreboard pressure of losing to you.
+These numbers are HONEST in a way their predecessors were not, and they
+tell a subtler story. [ADR-020](docs/adrs/020-the-turn-book.md) rebuilt
+the evidence system: the baseline the CPU must beat now receives
+everything public the CPU had (the legal move set, the forecast's own
+class), every evidence channel is held to an anytime-valid significance
+boundary with null-player controls asserted at every frame, and the
+difficulty spends only what survives all of that. Under the old
+class-blind accounting this same suite printed "lift 81%" — fabricated
+almost entirely from board knowledge at forced turns. The honest ledger
+shows something different: this survival-competent persona is beaten
+96% by DEFAULT play, so there is almost no headroom for memory to
+convert into wins here (the ceiling problem
+[ADR-009](docs/adrs/009-learning-must-convert-into-winning.md)
+documents), and the warm row's few give-backs are the beatable opening
+running while evidence accrues. The suite therefore asserts
+non-inferiority plus a genuinely EARNED read — and the conversion claim
+is carried by the acceptance tests instead: a strict alternator (a
+habit no modal baseline can ever call) is read far above chance
+end-to-end, and the metronome probe's published swerve forecasts hit
+100% once the turn book's gate opens. The cold row is HIGH here and the
+novice fixture still wins its share, because since
+[ADR-018](docs/adrs/018-the-beatable-opening.md) an unread CPU opens
+slow-witted and genuinely beatable — and since ADR-020, any PROVEN
+read ends that opening's sloppiness outright.
 [ADR-012](docs/adrs/012-two-swarm-findings-implemented.md) and
-[ADR-014](docs/adrs/014-the-codex-corrections.md) record the trades and
-reverts behind these numbers, including the changes that measured worse
-and were rolled back.
+[ADR-014](docs/adrs/014-the-codex-corrections.md) record earlier trades
+and reverts, including changes that measured worse and were rolled
+back.
 
 That test was failing until recently, with the *warm* CPU winning less — see
 [ADR-009](docs/adrs/009-learning-must-convert-into-winning.md) for the two
@@ -93,6 +112,25 @@ read went from 6% (habit models only) to ~76-85%
 [ADR-014](docs/adrs/014-the-codex-corrections.md)). Compensating with a
 difficulty multiplier would just restore the arbitrary clock ramp ADR-007
 deleted.
+
+### The turn book: reading the frames that decide games
+
+The owner's own 45-round ghost corpus then exposed the next wall
+([ADR-020](docs/adrs/020-the-turn-book.md)): global model selection let
+straight-frame volume (88% of play) crown always-straight experts, so
+the published forecast scored 9% on his voluntary turns while unelected
+models in the same ensemble scored 55% on those exact frames. The fix
+is class-conditional selection — a turn-HAZARD model (context cells
+over swerve cadence, food alignment, and pursuit pressure) for WHEN,
+a turn-scored book over the same roster for WHICH WAY, a no-knob
+derived gate deciding what gets published, and a fourteenth model
+(`alt`, the rhythm reader — a variable-order model over voluntary
+swerves) that the book elects on the frames it exists for. The book's
+precommitted side calls are scored through the same honest machinery
+as everything else, and they are where the CPU earned its first
+statistically proven read of the owner's play — his alternation,
+called at 71% on genuine choices across a thousand prequential
+events.
 
 ## The metric, and why the obvious version is wrong
 
