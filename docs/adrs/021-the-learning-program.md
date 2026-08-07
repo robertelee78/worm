@@ -122,6 +122,16 @@ surface).
    recorded (book aT 0.70, spendable 0.34 at era-2 end — the read
    survived the measured drift); k3's downward-crossing drifting
    persona joins the gauntlet.
+
+   EXECUTED. Receipts: full suite green (53+79+7+1+2); the downward
+   crossing passes (peak earned >0.2 during alternation, honestly
+   released to 0 after twelve coin games); ghost_eval bisected to
+   verify metric-neutrality — Kata 0 changes nothing (+2.5% before and
+   after). The bisect also attributed an unreported −0.2pp from stage
+   2.2 (the 96-cell hazard feeds the publish gate, so gate-fire frames
+   changed): **the program's honest baseline is +2.5% over 13,120
+   frames on the 63-round corpus**, superseding the +2.7 quoted in the
+   arena-era receipts.
 1. **#5 loss-attribution defense** (Darwin ESCAPE_* static sweep
    first; chase-flag attribution; floors only rise; coin NULL).
 2. **#4+#7 TurnTimingBook** (merged): discrete survival over gap with

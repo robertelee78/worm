@@ -550,3 +550,51 @@ fn acceptance_a_strict_alternator_is_learned() {
         r.z()
     );
 }
+
+/// The DOWNWARD latch crossing (kimi-k3, final verification C.3): a player
+/// who IS read and then abandons the habit. The latch must release as the
+/// evidence decays (frozen excess, growing variance), earned spend must
+/// return to zero, and nothing may flap catastrophically on the way down —
+/// the Schmitt band is the protection, and nothing else exercised it.
+#[test]
+fn a_read_player_who_changes_their_game_is_honestly_unlearned() {
+    let mut game = WormGame::with_size_seed(120, 38, 90_2026);
+    let mut rng = Rng(90_2026 ^ 0x9E37_79B9);
+    let mut st = PersonaState::default();
+    let mut peak = 0.0f32;
+    // Phase 1: six games of strict alternation — the read must be earned.
+    for g in 0..6 {
+        if g > 0 {
+            game.restart();
+        }
+        let mut frames = 0;
+        while !game.game_over && frames < 4000 {
+            let mv = act(Persona::SlalomAlt, &game, &mut rng, &mut st);
+            game.change_direction(mv.dir);
+            game.update();
+            frames += 1;
+            peak = peak.max(game.cpu_brain.family_earned_read());
+        }
+    }
+    assert!(
+        peak > 0.2,
+        "the alternator must first BE read (peak earned {peak:.2})"
+    );
+    // Phase 2: twelve games of fair-coin sides — the read must release.
+    for _ in 0..12 {
+        game.restart();
+        let mut frames = 0;
+        while !game.game_over && frames < 4000 {
+            let mv = act(Persona::SlalomCoin, &game, &mut rng, &mut st);
+            game.change_direction(mv.dir);
+            game.update();
+            frames += 1;
+        }
+    }
+    game.refresh_read_rate();
+    assert!(
+        game.cpu_brain.family_earned_read() == 0.0,
+        "the abandoned habit must be honestly unlearned (still spending {:.2})",
+        game.cpu_brain.family_earned_read()
+    );
+}

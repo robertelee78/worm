@@ -4,7 +4,7 @@
 //!
 //!     cargo run --release --example learning_probe -- data/players/<id>.json
 use std::collections::HashMap;
-use worm::{Direction, WormGame};
+use worm::WormGame;
 
 fn main() {
     let path = std::env::args().nth(1).expect("usage: learning_probe <player.json>");

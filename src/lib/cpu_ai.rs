@@ -1149,6 +1149,23 @@ impl ReadRate {
         }
     }
 
+    /// EVIDENCE-BUDGET REGISTRY (ADR-021, codex prescription): every
+    /// anytime-valid evidence family in this brain, named, with its α
+    /// and channel count stated in one place. Adding a channel or a
+    /// family REQUIRES updating this table — the thresholds below derive
+    /// from it, and an unregistered channel is an unbudgeted false-wake.
+    ///
+    /// | Family | Channels | α | Looks |
+    /// |--------|----------|---|-------|
+    /// | A: player-read (per-frame) | 4: published×{McNemar, lateral}, book×{McNemar, lateral} | 0.005 | ratio 1.4 from n=20 |
+    /// | B: drift (per-round) | 1: round-summary change test | 0.005 | ratio 1.4 from n=8 rounds |
+    ///
+    /// Families are independent budgets (their consumers differ: A funds
+    /// aggression via earned_snapshot; B funds only a NARRATION flag and
+    /// fast-horizon resets, never spend).
+    pub const FAMILY_A_CHANNELS: f32 = 4.0;
+    pub const FAMILY_B_CHANNELS: f32 = 1.0;
+
     /// The family's PROVED time-uniform opening rule (codex round 3: an
     /// LIL-shaped constant is shorthand, not a theorem — this is the
     /// theorem, and it is elementary). A channel is only TESTED at
@@ -1166,14 +1183,17 @@ impl ReadRate {
     /// threshold when n IS a look point; None between looks, where the
     /// latch simply holds its state.
     pub fn look_threshold(n: u32) -> Option<f32> {
-        if n < 20 {
+        Self::look_threshold_for(n, 20, Self::FAMILY_A_CHANNELS)
+    }
+
+    /// Registry-parametrized look rule (see the table above): geometric
+    /// looks with ratio 1.4 from `base_n`, α_k = (α_family/channels) ·
+    /// 6/(π²k²) at look k, exact Hoeffding crossing bounds.
+    pub fn look_threshold_for(n: u32, base_n: u32, channels: f32) -> Option<f32> {
+        if n < base_n {
             return None;
         }
-        // Geometric looks with ratio 1.4 (20, 28, 40, 56, 79, …): denser
-        // than doubling so a wandering z-trajectory is sampled where it
-        // peaks, while the proof is unchanged — the same convergent
-        // series is spent over the same countable looks.
-        let mut base = 20u32;
+        let mut base = base_n;
         let mut k = 1u32;
         while base < n {
             base = ((base as f32) * 1.4).ceil() as u32;
@@ -1193,7 +1213,7 @@ impl ReadRate {
         // far stricter than any per-look convention.
         let alpha_family = 0.005f32;
         let alpha_k =
-            (alpha_family / 4.0) * 6.0 / (std::f32::consts::PI.powi(2) * (k * k) as f32);
+            (alpha_family / channels) * 6.0 / (std::f32::consts::PI.powi(2) * (k * k) as f32);
         Some((2.0 * (1.0 / alpha_k).ln()).sqrt())
     }
 
@@ -1511,6 +1531,10 @@ pub struct CpuBrain {
     pub book_spend_snapshot: f32,
     #[serde(skip)]
     pub book_authority_snapshot: bool,
+    /// Self-knowledge instrumentation (ADR-021 Kata 0). Persisted in its
+    /// own sections; recording-only until later katas activate readers.
+    #[serde(skip)]
+    pub ledgers: LearningLedgers,
     /// The book's precommitted record for the NEXT frame — one auditable
     /// struct, target-framed so a stale record can never score against the
     /// wrong input (codex round 2). "Precommitted internally", not
@@ -1534,6 +1558,185 @@ pub struct PendingBook {
     /// The lateral direction TOWARD the nearest food at commit time
     /// (None when food was ahead/absent) — trains the correction prior.
     pub food_side_dir: Option<Direction>,
+}
+
+/* -------------------- the learning ledgers (ADR-021 Kata 0) -------------------- */
+
+/// Hunt-family tactics with STABLE semantic ids (never reorder — the wire
+/// stores these ids, not enum positions).
+pub const TACTIC_IDS: [(u8, CpuDecisionReason); 4] = [
+    (0, CpuDecisionReason::DirectIntercept),
+    (1, CpuDecisionReason::CornerIntercept),
+    (2, CpuDecisionReason::ItemPath),
+    (3, CpuDecisionReason::WallFollow),
+];
+/// Frames an opened tactic attempt stays live for kill attribution. The
+/// window is PRECOMMITTED at decision time (codex: no post-hoc causal
+/// stories) — a kill credits the tactic only if death lands inside a
+/// window opened before the outcome existed.
+pub const ATTEMPT_HORIZON: u32 = 12;
+
+/// Weapon ids on the wire (stable).
+pub const WEAPON_IDS: [(u8, crate::game::PowerUpKind); 3] = [
+    (0, crate::game::PowerUpKind::Laser),
+    (1, crate::game::PowerUpKind::TriShot),
+    (2, crate::game::PowerUpKind::Bomb),
+];
+
+/// Self-knowledge instrumentation (ADR-021 Kata 0): pure RECORDING, zero
+/// behavior change — the ledgers that later katas' bandits and defenses
+/// read. Class: self-knowledge (exempt from the evidence family; nothing
+/// here may raise aggression — and in Kata 0 nothing here is read at all).
+#[derive(Clone, Debug, Default)]
+pub struct LearningLedgers {
+    /// Per tactic id: decayed (attempts, kills) + non-decayed totals for
+    /// the later activation comparison (codex: never treat decayed mass
+    /// as evidence).
+    pub tactic_attempts: Vec<(u8, f32, f32, u32, u32)>,
+    /// Per weapon id: (held-frames, gate-pass frames, fires, lethal) —
+    /// the opportunity ledger that turns "9 fires" into a denominator.
+    pub weapon_ops: Vec<(u8, u32, u32, u32, u32)>,
+    /// Per death-cause id: (deaths, chased-deaths) — chase flag = player
+    /// head within 8 cells at any point in the last 10 frames before the
+    /// CPU died (k3's boxer-vs-wander attribution bit).
+    pub loss_causes: Vec<(u8, u32, u32)>,
+    /// Ring of per-round summaries for the drift alarm's family:
+    /// (laterals, alternations, mean_gap_x10, frames). Capped at 64.
+    pub round_summaries: std::collections::VecDeque<(u32, u32, u32, u32)>,
+    /// Transient: attempt window currently open (tactic id, opened frame).
+    pub open_attempt: Option<(u8, u32)>,
+    /// Transient per-round tallies feeding the summary.
+    pub rs_laterals: u32,
+    pub rs_alternations: u32,
+    pub rs_gap_sum: u32,
+    pub rs_last_left: Option<bool>,
+    /// Transient: recent player↔CPU head distances (last 10 frames).
+    pub recent_dist: std::collections::VecDeque<u32>,
+}
+
+impl LearningLedgers {
+    pub fn note_tactic(&mut self, reason: CpuDecisionReason, frame: u32) {
+        if let Some(&(id, _)) = TACTIC_IDS.iter().find(|&&(_, r)| r == reason) {
+            self.open_attempt = Some((id, frame));
+            let e = match self.tactic_attempts.iter_mut().find(|e| e.0 == id) {
+                Some(e) => e,
+                None => {
+                    self.tactic_attempts.push((id, 0.0, 0.0, 0, 0));
+                    self.tactic_attempts.last_mut().unwrap()
+                }
+            };
+            e.1 = e.1 * 0.999 + 1.0;
+            e.3 = e.3.saturating_add(1);
+        }
+    }
+
+    /// Player died: credit the open attempt iff its precommitted window
+    /// still covers this frame.
+    pub fn resolve_player_death(&mut self, frame: u32) {
+        if let Some((id, opened)) = self.open_attempt {
+            if frame.saturating_sub(opened) <= ATTEMPT_HORIZON {
+                if let Some(e) = self.tactic_attempts.iter_mut().find(|e| e.0 == id) {
+                    e.2 = e.2 * 0.999 + 1.0;
+                    e.4 = e.4.saturating_add(1);
+                }
+            }
+        }
+        self.open_attempt = None;
+    }
+
+    pub fn note_weapon(&mut self, kind: crate::game::PowerUpKind, gate_pass: bool, fired: bool) {
+        if let Some(&(id, _)) = WEAPON_IDS.iter().find(|&&(_, k)| k == kind) {
+            let e = match self.weapon_ops.iter_mut().find(|e| e.0 == id) {
+                Some(e) => e,
+                None => {
+                    self.weapon_ops.push((id, 0, 0, 0, 0));
+                    self.weapon_ops.last_mut().unwrap()
+                }
+            };
+            e.1 = e.1.saturating_add(1);
+            if gate_pass {
+                e.2 = e.2.saturating_add(1);
+            }
+            if fired {
+                e.3 = e.3.saturating_add(1);
+            }
+        }
+    }
+
+    pub fn note_weapon_lethal(&mut self, kind: crate::game::PowerUpKind) {
+        if let Some(&(id, _)) = WEAPON_IDS.iter().find(|&&(_, k)| k == kind) {
+            if let Some(e) = self.weapon_ops.iter_mut().find(|e| e.0 == id) {
+                e.4 = e.4.saturating_add(1);
+            }
+        }
+    }
+
+    pub fn note_cpu_death(&mut self, cause_id: u8) {
+        let chased = self.recent_dist.iter().any(|&d| d <= 8);
+        let e = match self.loss_causes.iter_mut().find(|e| e.0 == cause_id) {
+            Some(e) => e,
+            None => {
+                self.loss_causes.push((cause_id, 0, 0));
+                self.loss_causes.last_mut().unwrap()
+            }
+        };
+        e.1 = e.1.saturating_add(1);
+        if chased {
+            e.2 = e.2.saturating_add(1);
+        }
+    }
+
+    pub fn note_frame(&mut self, dist: u32, lateral: Option<bool>, gap_before: u32) {
+        self.recent_dist.push_back(dist);
+        while self.recent_dist.len() > 10 {
+            self.recent_dist.pop_front();
+        }
+        if let Some(left) = lateral {
+            self.rs_laterals += 1;
+            self.rs_gap_sum += gap_before;
+            if let Some(prev) = self.rs_last_left {
+                if prev != left {
+                    self.rs_alternations += 1;
+                }
+            }
+            self.rs_last_left = Some(left);
+        }
+    }
+
+    pub fn end_round(&mut self, frames: u32) {
+        if self.rs_laterals > 0 {
+            let mean_gap_x10 = self.rs_gap_sum * 10 / self.rs_laterals.max(1);
+            self.round_summaries
+                .push_back((self.rs_laterals, self.rs_alternations, mean_gap_x10, frames));
+            while self.round_summaries.len() > 64 {
+                self.round_summaries.pop_front();
+            }
+        }
+        self.rs_laterals = 0;
+        self.rs_alternations = 0;
+        self.rs_gap_sum = 0;
+        self.rs_last_left = None;
+        self.open_attempt = None;
+        self.recent_dist.clear();
+    }
+}
+
+/// Wire shapes: count-keyed vectors, semantic ids, own versions.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ActionOutcomesWire {
+    ver: u8,
+    tactics: Vec<(u8, f32, f32, u32, u32)>,
+    weapons: Vec<(u8, u32, u32, u32, u32)>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+struct LossLedgerWire {
+    ver: u8,
+    causes: Vec<(u8, u32, u32)>,
+}
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DriftEpochsWire {
+    ver: u8,
+    rounds: Vec<(u32, u32, u32, u32)>,
 }
 
 /* ----------------------- the turn book (ADR-020 stage 2) ----------------------- */
@@ -1980,6 +2183,7 @@ impl Default for CpuBrain {
             earned_snapshot: 0.0,
             book_spend_snapshot: 0.0,
             book_authority_snapshot: false,
+            ledgers: LearningLedgers::default(),
             pending_book: None,
         }
     }
@@ -2177,6 +2381,28 @@ impl CpuBrain {
             &mut sections,
             SEC_CLASS_BOOKS,
             &ClassBooksWire::from(&self.class_books),
+        );
+        push_section(
+            &mut sections,
+            SEC_ACTION_OUTCOMES,
+            &ActionOutcomesWire {
+                ver: 1,
+                tactics: self.ledgers.tactic_attempts.clone(),
+                weapons: self.ledgers.weapon_ops.clone(),
+            },
+        );
+        push_section(
+            &mut sections,
+            SEC_LOSS_DEFENSE,
+            &LossLedgerWire { ver: 1, causes: self.ledgers.loss_causes.clone() },
+        );
+        push_section(
+            &mut sections,
+            SEC_DRIFT_EPOCHS,
+            &DriftEpochsWire {
+                ver: 1,
+                rounds: self.ledgers.round_summaries.iter().copied().collect(),
+            },
         );
         push_section(&mut sections, SEC_TURN_PRIOR, &self.opp_brain.turn_tally);
         push_section(&mut sections, SEC_PORTFOLIO, &self.portfolio);
@@ -2471,6 +2697,23 @@ impl CpuBrain {
                     Ok(w) => brain.class_books = w.restore(),
                     Err(_) => report.sections_skipped += 1,
                 },
+                SEC_ACTION_OUTCOMES => {
+                    match bincode::deserialize::<ActionOutcomesWire>(body) {
+                        Ok(w) => {
+                            brain.ledgers.tactic_attempts = w.tactics;
+                            brain.ledgers.weapon_ops = w.weapons;
+                        }
+                        Err(_) => report.sections_skipped += 1,
+                    }
+                }
+                SEC_LOSS_DEFENSE => match bincode::deserialize::<LossLedgerWire>(body) {
+                    Ok(w) => brain.ledgers.loss_causes = w.causes,
+                    Err(_) => report.sections_skipped += 1,
+                },
+                SEC_DRIFT_EPOCHS => match bincode::deserialize::<DriftEpochsWire>(body) {
+                    Ok(w) => brain.ledgers.round_summaries = w.rounds.into_iter().collect(),
+                    Err(_) => report.sections_skipped += 1,
+                },
                 // Forward compatibility: a section this build has never heard
                 // of is skipped by its length, not treated as corruption.
                 _ => report.sections_skipped += 1,
@@ -2556,6 +2799,10 @@ const SEC_CLASS_BOOKS: u16 = 9;
 /// wiping what the CPU learned about the human. The writer emits v1 before
 /// v2, so on load the full record wins.
 const SEC_READ_RATE2: u16 = 10;
+/// ADR-021 self-knowledge ledgers, by failure domain (consult D).
+const SEC_ACTION_OUTCOMES: u16 = 11;
+const SEC_LOSS_DEFENSE: u16 = 12;
+const SEC_DRIFT_EPOCHS: u16 = 13;
 
 /// The pre-ADR-020 `ReadRate` shape, kept as the v1 wire projection.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -5027,6 +5274,10 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
             };
             game.cpu_telemetry.decision = Some(trace.clone());
             game.round_last_cpu_decision = Some(trace);
+            // ADR-021 Kata 0: hunt-family decisions open a precommitted
+            // attempt window in the tactic ledger (recording only;
+            // note_tactic ignores non-hunt reasons).
+            game.cpu_brain.ledgers.note_tactic($reason, game.frame_count);
             return chosen;
         }};
     }

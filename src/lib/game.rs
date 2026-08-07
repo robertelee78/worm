@@ -1131,6 +1131,22 @@ impl WormGame {
                         }
                     }
                 }
+                // ADR-021 Kata 0: the drift family's raw material — the
+                // same voluntary-lateral eligibility as the book, plus
+                // the chase-context distance ring.
+                {
+                    let (px, py) = self.cycles[self.player].head;
+                    let (cx2, cy2) = self.cycles[1].head;
+                    let dist = ((px as i32 - cx2 as i32).abs()
+                        + (py as i32 - cy2 as i32).abs()) as u32;
+                    let lat = if straight_legal && turned_lateral {
+                        Some(player_turn == Some(crate::cpu_ai::Turn::Left))
+                    } else {
+                        None
+                    };
+                    let gap_before = self.cpu_brain.gap_since_voluntary;
+                    self.cpu_brain.ledgers.note_frame(dist, lat, gap_before);
+                }
                 // The dedicated hazard counter: voluntary laterals only —
                 // and the voluntary-turn VOMM (M13 `alt`) sees the same
                 // stream.
@@ -1615,6 +1631,11 @@ impl WormGame {
             // (red embers along the beam) — crossing the CPU's firing line is
             // dodgeable instead of an unannounced instant death.
             let wants_fire = crate::cpu_ai::should_fire(self, 1);
+            if let Some(kind) = self.cycles[1].held_powerup {
+                self.cpu_brain
+                    .ledgers
+                    .note_weapon(kind, wants_fire, wants_fire);
+            }
             let holding_laser = self.cycles[1].held_powerup == Some(PowerUpKind::Laser);
             let fire_now = if holding_laser {
                 if wants_fire {
@@ -2142,6 +2163,36 @@ impl WormGame {
         if !self.shadow_learning {
             let draw = self.seal_seed ^ ((self.cpu_brain.portfolio.rounds as u64 + 1) << 17);
             self.cpu_brain.portfolio.end_round(reward, draw);
+        }
+        // ADR-021 Kata 0: resolve the round into the self-knowledge
+        // ledgers (recording only). Same on-policy discipline as the
+        // portfolio: ghost evaluation never steered, so it neither opens
+        // attempts nor credits kills — but round summaries (about the
+        // PLAYER) record in both modes.
+        {
+            match self.winner {
+                Some(1) => {
+                    self.cpu_brain.ledgers.resolve_player_death(self.frame_count);
+                    if let Some(cause) = self.death_cause {
+                        let kind = match cause {
+                            DeathCause::Laser => Some(PowerUpKind::Laser),
+                            DeathCause::TriShotBolt => Some(PowerUpKind::TriShot),
+                            DeathCause::BombBlast => Some(PowerUpKind::Bomb),
+                            _ => None,
+                        };
+                        if let Some(k) = kind {
+                            self.cpu_brain.ledgers.note_weapon_lethal(k);
+                        }
+                    }
+                }
+                Some(0) => {
+                    if let Some(cause) = self.death_cause {
+                        self.cpu_brain.ledgers.note_cpu_death(cause as u8);
+                    }
+                }
+                _ => {}
+            }
+            self.cpu_brain.ledgers.end_round(self.frame_count);
         }
 
         self.winner = None;
