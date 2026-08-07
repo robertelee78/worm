@@ -224,6 +224,85 @@ turn-conditioned selection book over the existing models, the derived
 Schmitt gate, per-book confidence to the hunt gates, ForecastTrace
 carrying which book drove, and the persistence sections.
 
+### Stage 2 — executed; the measured result that reshaped it (2026-08-06)
+
+The machinery above landed as specified (ClassBooks: 64 KT hazard
+cells, turn-scored fixed-share book, derived Schmitt gate,
+SEC_CLASS_BOOKS wire, PendingBook precommit record folded into the
+reveal chain). Then the owner-corpus measurement invalidated the
+plan's central assumption AND revealed the real prize:
+
+- **The side book is excellent: aT = 0.71** on his genuine two-sided
+  voluntary turns (single prequential pass, 983 events, coverage
+  0.99) — the turn-scored fixed-share does surface the eatW/armW
+  skill the RCA found buried.
+- **The derived gate can never open for him.** h·aT > (1−h)·aS needs
+  a context cell with h ≳ 0.55; his best populated cell reaches
+  ~0.2 (base hazard 12%). This is the gate WORKING — for a rare-event
+  player the expected-hit argmax at every single frame IS straight —
+  and it means the original proof bar ("PUBLISHED voluntary-turn
+  accuracy 9% → 55–65%") was unachievable by the agreed design. Both
+  consults endorsed the gate; nobody connected θ ≈ 0.55 to his
+  measured 12% hazard. A metronome alternator probe confirms the gate
+  DOES fire when hazard truly spikes (h = 0.90 at its due cell).
+
+Reformulation (consulted with codex — verdict "proceed, with two
+blockers", both resolved):
+
+1. **The evidence family** (the codex blocker): every channel —
+   published McNemar, published lateral, book McNemar, book lateral —
+   now shares ONE anytime-valid boundary sqrt(2(ln(4/α)+lnln n)) with
+   the α split across the family, Schmitt latches, and every spend is
+   an SE-shrunk lift, never the raw point estimate. The book's
+   evidence lives in `book_read`: its PRECOMMITTED side picks scored
+   on genuine two-sided voluntary turns through the same ReadRate
+   machinery, nulls and all, scaled by declaration coverage.
+   **Measured on the owner corpus: book_read earned 0.38, spendable
+   0.37, authority granted.** The CPU finally holds an honestly
+   earned read against the owner — his alternation — where every
+   previous number was 0. Difficulty spends it through a
+   round-boundary snapshot (no mid-round latch may open hunts).
+2. **Projection** (the other blocker): scenario-based weighted-medoid
+   projection (no-turn + turn-at-t × side, survival-adjusted masses,
+   book-calibrated side split, path-loss medoid — codex's design,
+   no forced bend, authority-gated). **Measured NEUTRAL on the owner
+   corpus** (paired 5-frame loss 11445 vs 11433 over 1671 windows):
+   kept behind `projection_authority()` and the WORM_TUNE_BOOK_BEND
+   arm switch, claims nothing, candidate for Darwin.
+3. **The transition regime, finally attributed and fixed**: with
+   honest evidence the read arrives MID-arc, and survival discipline
+   scaled by partial sharpness produced a half-woken middle that lost
+   games both dozy (96%) and fully-sharp (92%) play win. Fix:
+   `discipline_sharpness()` — any proven read ends the casual
+   opening's sloppiness outright (basics snap to full; AGGRESSION
+   still scales continuously with the read). Sloppy basics exist for
+   the genuinely-unread phase only.
+
+**The stage-2 gate is un-ignored and green**: warm 93% vs cold 96%
+pooled over three paired 30-game seeds (5-point non-inferiority
+margin), peak earned read 0.75; the habitual arm reads at 0.57 with
+85% wins over 60 games. NULL personas hold on every channel of the
+family, at every frame, across three seeds, and a fair-side book
+never wins projection authority. Novice opening unchanged (~22%
+wins+draws — the discipline snap touches only proven-read play).
+
+### Proof bar, rewritten (stage 2 measured; supersedes the original)
+
+- a. Book side skill: aT ≥ 0.65 with coverage ≥ 0.9 on genuine
+  two-sided choices, single prequential pass — **met (0.71/0.99)**.
+- b. book_read positive and family-latched on the owner corpus —
+  **met (earned 0.38)**; NULLs null on every channel — **met**.
+- c. Projection: paired 5-frame loss must not regress; bending claims
+  nothing until it measurably wins — **met (neutral, gated off the
+  spend path)**.
+- d. Warm-vs-cold non-inferiority un-ignored and green — **met**.
+- e. Full gauntlet green; ghost_eval honest lift non-regressing —
+  **met (+2.9%)**.
+- f. Stage 3 (M14 voluntary VOMM) raises aT on alternation personas
+  (measured today: a strict alternator's side book sits at coin level
+  because no roster model reads voluntary alternation — the metronome
+  probe's aT = 0.54 is the gap M14 exists to close).
+
 Stage 3 — M14: the voluntary-turn VOMM as an ensemble model.
 
 Proof bar (per the kata): rca_probe re-run with the PRODUCTION baseline

@@ -2472,3 +2472,20 @@ fn test_brain_loader_is_total_on_hostile_bytes() {
     // Reaching here without a panic (and inside the test's runtime budget,
     // which an allocation bomb would blow) IS the assertion.
 }
+
+/// A stale book precommitment (wrong target frame — round restarts, frame
+/// skips) must never train the books against an input it did not predict.
+#[test]
+fn a_stale_book_record_never_scores() {
+    let mut game = worm::WormGame::with_size_seed(40, 30, 7);
+    game.cpu_brain.pending_book = Some(worm::cpu_ai::PendingBook {
+        target_frame: 999_999,
+        cell: 3,
+        side: Some(worm::Direction::Left),
+    });
+    game.update();
+    let b = &game.cpu_brain.class_books;
+    let trained: f32 = b.hz_total.iter().sum();
+    assert_eq!(trained, 0.0, "stale record trained the hazard");
+    assert_eq!(b.side_opportunities, 0);
+}

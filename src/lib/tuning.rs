@@ -56,6 +56,13 @@ pub struct Tuning {
     /// play — reaching every-frame wits as the read grows. THE lever that
     /// makes the opening genuinely losable: held headings meet walls.
     pub open_latency: f32,
+    /// Attribution-arm switches (ADR-020 stage 2.1, codex D10): 1.0 = on.
+    /// book_bend: the turn book may bend the 5-frame player projection.
+    /// book_spend: the book's earned evidence may feed difficulty.
+    /// Kept as tuning knobs so the promotion arms (straight / bent-only /
+    /// bent+spend) run without rebuilds, and Darwin can see them.
+    pub book_bend: f32,
+    pub book_spend: f32,
 }
 
 fn env_f32(name: &str, default: f32) -> f32 {
@@ -84,5 +91,7 @@ pub fn tuning() -> &'static Tuning {
         bold_spend: env_f32("WORM_TUNE_BOLD_SPEND", 0.40),
         bold_drive: env_f32("WORM_TUNE_BOLD_DRIVE", 1.0),
         open_latency: env_f32("WORM_TUNE_OPEN_LATENCY", 6.0),
+        book_bend: env_f32("WORM_TUNE_BOOK_BEND", 1.0),
+        book_spend: env_f32("WORM_TUNE_BOOK_SPEND", 1.0),
     })
 }

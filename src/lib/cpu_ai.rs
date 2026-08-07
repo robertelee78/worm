@@ -59,7 +59,8 @@ fn escape_floor_cells(game: &WormGame, who: usize) -> f32 {
         // its survival margin — bold enough to genuinely die to its own
         // dives. Reading the player restores the champion floor. "Before it
         // knows you it plays reckless; reading you makes it careful."
-        let discipline = t.discipline_floor + (1.0 - t.discipline_floor) * game.sharpness();
+        let discipline =
+            t.discipline_floor + (1.0 - t.discipline_floor) * game.discipline_sharpness();
         (own_len * t.escape_multiple + t.escape_margin) * discipline
     }
 }
@@ -217,6 +218,9 @@ pub struct ForecastTrace {
     pub source: usize,
     pub predicted: Option<Direction>,
     pub confidence: f32,
+    /// Which book drove this forecast: 0 = the global (straight-dominated)
+    /// selection, 1 = the turn book through the derived gate (ADR-020).
+    pub book: u8,
     /// Hash of the prediction, published BEFORE the player's input for
     /// `target_frame` is read, and revealed after. See [`seal_commit`].
     pub seal: u64,
@@ -1002,13 +1006,19 @@ pub struct ReadRate {
     pub lat_chance: f32,
     /// Sum of per-frame p(1-p) — the exact variance of the chance rival.
     pub lat_var: f32,
-    /// Schmitt latch on the lateral channel: proven at 3 sigma, and it
-    /// stays proven until the evidence decays below 1 sigma. Without
-    /// hysteresis the absolute excess is frozen once earned while variance
-    /// keeps growing, so a genuine read drifts back under a single fixed
-    /// gate and sharpness flaps dozy mid-session. A null never crosses
-    /// 3 sigma, so the latch never manufactures a read.
+    /// Schmitt latch on the lateral channel: proven at the family's
+    /// anytime boundary, and it stays proven until the evidence decays
+    /// below 1 sigma. Without hysteresis the absolute excess is frozen
+    /// once earned while variance keeps growing, so a genuine read drifts
+    /// back under a single fixed gate and sharpness flaps dozy
+    /// mid-session. A null never crosses the boundary, so the latch never
+    /// manufactures a read.
     pub lat_latched: bool,
+    /// Same Schmitt latch for the McNemar channel — the discordant stream
+    /// is Bernoulli(1/2) under the null, the same family, same boundary,
+    /// same repeated-looks discipline. The exact p-value stays alongside
+    /// for one-shot reporting only.
+    pub mc_latched: bool,
 }
 
 impl ReadRate {
@@ -1130,10 +1140,8 @@ impl ReadRate {
             // with the looks: sqrt(2*(ln(1/alpha) + ln ln n)), alpha =
             // 0.001 — ~4.0 at n=20, ~4.3 at n=10,000. The 1-sigma close
             // is hysteresis AFTER a legitimate open, not a second test.
-            let n = self.lat_samples.max(8) as f32;
-            let bound = (2.0 * ((1.0f32 / 0.001).ln() + n.ln().ln().max(0.0))).sqrt();
             let z = self.lateral_z();
-            if z > bound && self.lat_samples >= 20 {
+            if z > Self::anytime_bound(self.lat_samples) && self.lat_samples >= 20 {
                 self.lat_latched = true;
             } else if z < 1.0 {
                 self.lat_latched = false;
@@ -1148,22 +1156,51 @@ impl ReadRate {
             (false, true) => self.mode_only += 1,
             _ => {}
         }
+        if hit != mode_hit {
+            let z = self.mcnemar_z();
+            if z > Self::anytime_bound(self.discordant()) && self.discordant() >= 20 {
+                self.mc_latched = true;
+            } else if z < 1.0 {
+                self.mc_latched = false;
+            }
+        }
     }
 
-    /// Lift of the lateral-frame forecast over uniform chance, 0 when the
-    /// evidence does not clear a 3-sigma binomial bar. Straight frames are
-    /// excluded by construction, so "predict the usual thing" scores zero
-    /// here and cannot inflate it.
+    /// The family-wise anytime boundary every evidence channel in this
+    /// struct must clear (codex verification round 2): each channel's
+    /// statistic is inspected after every qualifying frame, and there are
+    /// FOUR channels per brain (published McNemar, published lateral, book
+    /// McNemar, book lateral) racing to wake difficulty — so the per-look
+    /// alpha is split across the family (alpha_family = 0.001, Bonferroni
+    /// over 4) and the boundary grows with the looks (law of the iterated
+    /// logarithm): sqrt(2·(ln(4/alpha) + ln ln n)) ≈ 4.2 at n=20, 4.5 at
+    /// n=10,000. One family, one rule — no channel gets a cheaper bar.
+    pub fn anytime_bound(n: u32) -> f32 {
+        let n = n.max(8) as f32;
+        (2.0 * ((4.0f32 / 0.001).ln() + n.ln().ln().max(0.0))).sqrt()
+    }
+
+    /// Lift of the lateral-frame forecast over uniform chance, 0 until the
+    /// latch is proven. Straight frames are excluded by construction, so
+    /// "predict the usual thing" scores zero here and cannot inflate it.
+    /// SPENDS A CONSERVATIVE BOUND, not the raw point estimate: the rate
+    /// is shrunk by one standard error before the lift is computed, so the
+    /// winning channel of the family cannot cash in its own selection
+    /// luck (codex: "spend a simultaneous lower confidence bound").
     pub fn lateral_lift(&self) -> f32 {
-        if !self.lateral_significant() {
+        if !self.lateral_significant() || self.lat_samples == 0 {
             return 0.0;
         }
-        let rate = self.lat_hits as f32 / self.lat_samples as f32;
-        let chance = self.lat_chance / self.lat_samples as f32;
+        let n = self.lat_samples as f32;
+        let rate = self.lat_hits as f32 / n;
+        let chance = self.lat_chance / n;
         if chance >= 1.0 {
             return 0.0;
         }
-        ((rate - chance) / (1.0 - chance)).clamp(0.0, 1.0)
+        // One standard error of the hit rate: sd(sum)/n.
+        let se = self.lat_var.max(0.0).sqrt() / n;
+        let shrunk = (rate - se).max(0.0);
+        ((shrunk - chance) / (1.0 - chance)).clamp(0.0, 1.0)
     }
 
     /// The lateral channel's z against chance (exact per-frame variance).
@@ -1172,6 +1209,20 @@ impl ReadRate {
             return 0.0;
         }
         (self.lat_hits as f32 - self.lat_chance) / self.lat_var.sqrt()
+    }
+
+    /// The McNemar channel's z: under the null each discordant frame is a
+    /// fair coin, so this is the same Bernoulli family the lateral channel
+    /// lives in — and it is held to the same anytime boundary, because it
+    /// too is inspected after every frame. (The exact p-value below remains
+    /// for one-shot REPORTING — ghost_eval reads it once per corpus, a
+    /// single look, where it is valid.)
+    fn mcnemar_z(&self) -> f32 {
+        let n = self.discordant();
+        if n == 0 {
+            return 0.0;
+        }
+        (self.cpu_only as f32 - n as f32 / 2.0) / (n as f32 / 4.0).sqrt()
     }
 
     /// Whether the lateral channel's evidence is proven — the Schmitt
@@ -1183,16 +1234,20 @@ impl ReadRate {
     }
 
     /// The read the CPU has actually EARNED — the number sharpness is
-    /// allowed to spend. Two evidence channels, each with its own
-    /// significance bar, take the max:
+    /// allowed to spend. Two evidence channels per record, each held to
+    /// the SAME family-wise anytime boundary (see `anytime_bound`), each
+    /// spending a one-standard-error-shrunk lift rather than its raw
+    /// point estimate:
     ///  * McNemar lift over the class-aware modal base (catches edges the
     ///    base cannot express, e.g. alternation);
     ///  * lateral lift over uniform chance (catches habits the base ALSO
     ///    calls — a real read even though the discordant stream is silent).
-    /// A null player clears neither, so an unearned read is exactly 0.
+    /// A null player latches neither, so an unearned read is exactly 0.
     pub fn earned_read(&self) -> f32 {
-        let mcnemar = if self.is_ready() && self.is_significant() {
-            self.lift().max(0.0)
+        let mcnemar = if self.mc_latched {
+            let n = self.discordant().max(1) as f32;
+            let se = 1.0 / n.sqrt();
+            (self.lift() - se).max(0.0)
         } else {
             0.0
         };
@@ -1402,6 +1457,389 @@ pub struct CpuBrain {
     /// an errand does not survive a session.
     #[serde(skip)]
     pub intent_targets: [Option<(u16, u16)>; 2],
+    /// The class-conditional selection layer (ADR-020 stage 2). Persisted
+    /// in its OWN section (SEC_CLASS_BOOKS) — skipped here because bincode
+    /// is not field-tolerant and this struct rides other wire shapes.
+    #[serde(skip)]
+    pub class_books: ClassBooks,
+    /// Frames since the player's last VOLUNTARY lateral turn — the
+    /// dedicated hazard counter (the 4-deep player tail cannot represent a
+    /// 5-frame gap). Transient.
+    #[serde(skip)]
+    pub gap_since_voluntary: u32,
+    /// Frames since the player last picked up food. Transient.
+    #[serde(skip)]
+    pub frames_since_food: u32,
+    /// Player↔CPU distance last frame, for the closing bucket. Transient.
+    #[serde(skip)]
+    pub prev_pc_dist: u32,
+    /// earned_read snapshot taken at ROUND boundaries (refresh_read_rate).
+    /// In-round consumers (the hunt confidence ramp) spend THIS, never the
+    /// live latches — a mid-round latch flip must not open hunts before
+    /// any boundary check has seen it (codex round 2: the half-woken
+    /// transition regime reborn). Transient.
+    #[serde(skip)]
+    pub earned_snapshot: f32,
+    /// The book's precommitted record for the NEXT frame — one auditable
+    /// struct, target-framed so a stale record can never score against the
+    /// wrong input (codex round 2). "Precommitted internally", not
+    /// "sealed": the public seal covers only the published forecast; this
+    /// is folded into the round's reveal chain for post-hoc audit instead.
+    /// Transient.
+    #[serde(skip)]
+    pub pending_book: Option<PendingBook>,
+}
+
+/// Everything the turn book committed to before the player's next input
+/// existed, kept together so training and auditing read one record.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PendingBook {
+    /// The frame this record predicts — must match at scoring time.
+    pub target_frame: u32,
+    /// Hazard context cell at commit time.
+    pub cell: usize,
+    /// The book's side pick, None when no lateral model spoke.
+    pub side: Option<Direction>,
+}
+
+/* ----------------------- the turn book (ADR-020 stage 2) ----------------------- */
+
+/// Number of hazard cells: gap-since-voluntary-turn (8 buckets) ×
+/// food-aligned (2) × just-ate (2) × cpu-closing (2).
+pub const HAZARD_CELLS: usize = 64;
+/// Voluntary-turn events the book must have scored before the gate may
+/// fire at all (kimi-k3: maturity floor; ~22 events arrive per round
+/// against the owner, so this is about a round and a half of warmup).
+pub const BOOK_MATURITY: u32 = 30;
+/// Decay for every online statistic in the books. Chosen over an EMA of
+/// the raw signal because an EMA would smear the ~5-frame slalom
+/// periodicity the hazard exists to see.
+const BOOK_DECAY: f32 = 0.995;
+
+/// The class-conditional selection layer over the SAME ensemble: a hazard
+/// model for WHEN the player turns, a turn-conditioned book for WHICH WAY,
+/// and a derived no-knob gate deciding which book's answer gets published.
+///
+/// The RCA this answers: global fixed-share selection lets straight-frame
+/// volume (88%) crown always-straight experts, so the published forecast
+/// degenerates to "straight" exactly on the frames that decide games —
+/// while eatW/armW sit unused at 54.8%/56.3% on those same frames. The
+/// books are specialist accounting (sleeping-experts formalism): each is
+/// scored ONLY against its own class, gate-independently, so neither can
+/// be starved by the other's volume.
+#[derive(Clone, Debug)]
+pub struct ClassBooks {
+    /// KT cells: decayed (turn events, total eligible events) per context.
+    /// Estimate is Krichevsky–Trofimov, (t + 0.5)/(n + 1) — well-behaved
+    /// at zero data.
+    pub hz_turn: [f32; HAZARD_CELLS],
+    pub hz_total: [f32; HAZARD_CELLS],
+    /// Turn-book fixed-share weights over the ensemble roster, scored only
+    /// on realized voluntary laterals. Slow half persists (knowledge about
+    /// the human); fast half is per-round, like the ensemble's own.
+    pub wt_slow: [f32; ENSEMBLE_MODELS],
+    /// Fast horizon — per-round, never persisted.
+    pub wt_fast: [f32; ENSEMBLE_MODELS],
+    /// Gate-independent decayed accuracies: the straight book's hit rate
+    /// over eligible frames (its prediction is always "straight"), and the
+    /// turn book's SIDE hit rate over realized voluntary laterals.
+    pub as_hits: f32,
+    pub as_total: f32,
+    pub at_hits: f32,
+    pub at_total: f32,
+    /// Scored voluntary-turn events (maturity floor).
+    pub turn_events: u32,
+    /// Coverage accounting (codex round 2): genuine side choices the book
+    /// COULD have called (voluntary lateral, straight AND both laterals
+    /// legal), how often it actually declared a side there, and how often
+    /// the declaration was right. aT conditions on declaration; spendable
+    /// evidence must multiply by coverage or an abstaining book reports
+    /// excellent accuracy on an undisclosed subset.
+    pub side_opportunities: u32,
+    pub side_declarations: u32,
+    /// The book's own honest evidence record: its precommitted side picks
+    /// scored on genuine two-sided voluntary turns through the SAME
+    /// machinery as the published read — class-aware legality-aware
+    /// baseline, McNemar + lateral channels, the family-wise anytime
+    /// boundary, the same NULL guarantees. This — not raw aT — is what
+    /// difficulty and projection authority are allowed to spend.
+    pub book_read: ReadRate,
+    /// Schmitt state of the publish gate (±0.05 band around the derived
+    /// threshold, so the sealed HUD-visible forecast identity cannot flap
+    /// on a knife edge).
+    pub gate_open: bool,
+}
+
+impl Default for ClassBooks {
+    fn default() -> Self {
+        Self {
+            hz_turn: [0.0; HAZARD_CELLS],
+            hz_total: [0.0; HAZARD_CELLS],
+            wt_slow: [1.0; ENSEMBLE_MODELS],
+            wt_fast: [1.0; ENSEMBLE_MODELS],
+            as_hits: 0.0,
+            as_total: 0.0,
+            at_hits: 0.0,
+            at_total: 0.0,
+            turn_events: 0,
+            side_opportunities: 0,
+            side_declarations: 0,
+            book_read: ReadRate::default(),
+            gate_open: false,
+        }
+    }
+}
+
+impl ClassBooks {
+    /// Per-round reset: ONLY the fast horizon. Slow weights, hazard cells,
+    /// accuracies and maturity persist — cold-starting selection every
+    /// round is exactly the failure the RCA measured 45 times over.
+    pub fn reset_round(&mut self) {
+        self.wt_fast = [1.0; ENSEMBLE_MODELS];
+    }
+
+    /// KT hazard estimate for a context cell.
+    pub fn hazard(&self, cell: usize) -> f32 {
+        let c = cell.min(HAZARD_CELLS - 1);
+        (self.hz_turn[c] + 0.5) / (self.hz_total[c] + 1.0)
+    }
+
+    /// Train the hazard on an eligible frame (straight was legal; the
+    /// player could have held the line).
+    pub fn observe_hazard(&mut self, cell: usize, turned: bool) {
+        let c = cell.min(HAZARD_CELLS - 1);
+        self.hz_turn[c] *= BOOK_DECAY;
+        self.hz_total[c] *= BOOK_DECAY;
+        self.hz_total[c] += 1.0;
+        if turned {
+            self.hz_turn[c] += 1.0;
+        }
+    }
+
+    /// Straight book accuracy: P(hit) of always-answering-straight over
+    /// eligible frames, decayed.
+    pub fn a_straight(&self) -> f32 {
+        if self.as_total <= 0.0 {
+            0.5
+        } else {
+            self.as_hits / self.as_total
+        }
+    }
+
+    /// Turn book accuracy: P(side correct | voluntary lateral), decayed.
+    /// 0.5 before evidence — a coin, honestly.
+    pub fn a_turn(&self) -> f32 {
+        if self.at_total <= 0.0 {
+            0.5
+        } else {
+            self.at_hits / self.at_total
+        }
+    }
+
+    pub fn observe_straight_book(&mut self, hit: bool) {
+        self.as_hits *= BOOK_DECAY;
+        self.as_total *= BOOK_DECAY;
+        self.as_total += 1.0;
+        if hit {
+            self.as_hits += 1.0;
+        }
+    }
+
+    /// The book evidence difficulty may spend: the book's earned read
+    /// (family-gated, SE-shrunk) scaled by coverage, so accuracy on an
+    /// undisclosed subset cannot buy global aggression.
+    pub fn spendable(&self) -> f32 {
+        self.book_read.earned_read() * self.coverage()
+    }
+
+    /// Whether the book has earned the right to BEND the projection: the
+    /// evidence family latched AND the maturity floor met. A chance-level
+    /// side book must never reshape defensive paths, even while sharpness
+    /// stays zero (codex round 2).
+    pub fn projection_authority(&self) -> bool {
+        self.turn_events >= BOOK_MATURITY && self.book_read.earned_read() > 0.0
+    }
+
+    /// Fraction of genuine side choices where the book declared a side.
+    pub fn coverage(&self) -> f32 {
+        if self.side_opportunities == 0 {
+            0.0
+        } else {
+            self.side_declarations as f32 / self.side_opportunities as f32
+        }
+    }
+
+    pub fn observe_turn_book(&mut self, hit: bool) {
+        self.at_hits *= BOOK_DECAY;
+        self.at_total *= BOOK_DECAY;
+        self.at_total += 1.0;
+        if hit {
+            self.at_hits += 1.0;
+        }
+        self.turn_events = self.turn_events.saturating_add(1);
+    }
+
+    /// Fixed-share update of the turn-book weights on a realized voluntary
+    /// lateral — same Herbster–Warmuth step the global ensemble uses, same
+    /// tuned rates, applied only to models that spoke.
+    pub fn score_turn_frame(&mut self, masked: &[Option<Direction>], actual: Direction) {
+        let t = crate::tuning::tuning();
+        for i in 0..ENSEMBLE_MODELS {
+            if let Some(p) = masked.get(i).copied().flatten() {
+                let loss = if p == actual { 0.0 } else { 1.0 };
+                self.wt_fast[i] *= (-t.eta_fast * loss).exp();
+                self.wt_slow[i] *= (-t.eta_slow * loss).exp();
+            }
+        }
+        for (weights, share) in [
+            (&mut self.wt_fast, t.share_fast),
+            (&mut self.wt_slow, t.share_slow),
+        ] {
+            let sum: f32 = weights.iter().sum();
+            if sum > 0.0 && sum.is_finite() {
+                let pool = share * sum / ENSEMBLE_MODELS as f32;
+                for v in weights.iter_mut() {
+                    *v = (1.0 - share) * *v + pool;
+                }
+                let sum: f32 = weights.iter().sum();
+                let inv = ENSEMBLE_MODELS as f32 / sum;
+                for v in weights.iter_mut() {
+                    *v *= inv;
+                }
+            } else {
+                *weights = [1.0; ENSEMBLE_MODELS];
+            }
+        }
+    }
+
+    /// The turn book's SIDE pick: among models currently predicting a
+    /// LATERAL (relative to the player's heading), the one with the best
+    /// turn-book weight. None when nothing lateral speaks.
+    pub fn side_pick(
+        &self,
+        masked: &[Option<Direction>],
+        heading: Direction,
+    ) -> Option<(usize, Direction)> {
+        let mut best: Option<(usize, Direction)> = None;
+        let mut best_w = f32::NEG_INFINITY;
+        for i in 0..ENSEMBLE_MODELS {
+            if let Some(p) = masked.get(i).copied().flatten() {
+                let lateral = matches!(
+                    Turn::from_dirs(heading, p),
+                    Some(Turn::Left) | Some(Turn::Right)
+                );
+                if lateral {
+                    let w = self.wt_fast[i] + self.wt_slow[i];
+                    if w > best_w {
+                        best_w = w;
+                        best = Some((i, p));
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    /// The derived publish gate (kimi-k3: no threshold knob). Publishing
+    /// the turn book earns h·aT expected hits; publishing straight earns
+    /// (1−h)·aS. The Schmitt band (±0.05) means the sealed forecast's
+    /// identity switches on conviction, not on a knife edge. Below the
+    /// maturity floor the gate is hard-closed.
+    pub fn gate(&mut self, h: f32) -> bool {
+        if self.turn_events < BOOK_MATURITY {
+            self.gate_open = false;
+            return false;
+        }
+        let turn_ev = h * self.a_turn();
+        let straight_ev = (1.0 - h) * self.a_straight();
+        if turn_ev > straight_ev + 0.05 {
+            self.gate_open = true;
+        } else if turn_ev < straight_ev - 0.05 {
+            self.gate_open = false;
+        }
+        self.gate_open
+    }
+}
+
+/// The turn book's wire shape: length-prefixed vectors so a roster or
+/// cell-count change is a readable mismatch that drops ONLY this section,
+/// never a decode failure that eats the file (EpisodesWire pattern).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ClassBooksWire {
+    cells: u16,
+    models: u16,
+    hz_turn: Vec<f32>,
+    hz_total: Vec<f32>,
+    wt_slow: Vec<f32>,
+    as_hits: f32,
+    as_total: f32,
+    at_hits: f32,
+    at_total: f32,
+    turn_events: u32,
+    side_opportunities: u32,
+    side_declarations: u32,
+    book_read: ReadRate,
+    gate_open: bool,
+}
+
+impl From<&ClassBooks> for ClassBooksWire {
+    fn from(b: &ClassBooks) -> Self {
+        ClassBooksWire {
+            cells: HAZARD_CELLS as u16,
+            models: ENSEMBLE_MODELS as u16,
+            hz_turn: b.hz_turn.to_vec(),
+            hz_total: b.hz_total.to_vec(),
+            wt_slow: b.wt_slow.to_vec(),
+            as_hits: b.as_hits,
+            as_total: b.as_total,
+            at_hits: b.at_hits,
+            at_total: b.at_total,
+            turn_events: b.turn_events,
+            side_opportunities: b.side_opportunities,
+            side_declarations: b.side_declarations,
+            book_read: b.book_read,
+            gate_open: b.gate_open,
+        }
+    }
+}
+
+impl ClassBooksWire {
+    /// Restore what still fits. A changed roster drops the weights but
+    /// keeps the hazard (and vice versa) — knowledge about the human
+    /// survives every schema change that can possibly honor it.
+    fn restore(self) -> ClassBooks {
+        let mut b = ClassBooks::default();
+        if self.cells as usize == HAZARD_CELLS
+            && self.hz_turn.len() == HAZARD_CELLS
+            && self.hz_total.len() == HAZARD_CELLS
+        {
+            b.hz_turn.copy_from_slice(&self.hz_turn);
+            b.hz_total.copy_from_slice(&self.hz_total);
+        }
+        if self.models as usize == ENSEMBLE_MODELS && self.wt_slow.len() == ENSEMBLE_MODELS {
+            b.wt_slow.copy_from_slice(&self.wt_slow);
+        }
+        b.as_hits = self.as_hits;
+        b.as_total = self.as_total;
+        b.at_hits = self.at_hits;
+        b.at_total = self.at_total;
+        b.turn_events = self.turn_events;
+        b.side_opportunities = self.side_opportunities;
+        b.side_declarations = self.side_declarations;
+        b.book_read = self.book_read;
+        b.gate_open = self.gate_open;
+        b
+    }
+}
+
+/// Bucket the hazard context into a cell index.
+/// gap: frames since the player's last voluntary lateral (0..7+);
+/// aligned: their heading is closing on the nearest food;
+/// just_ate: they picked food up within the last 3 frames;
+/// cpu_close: the CPU is within 12 cells and closing.
+pub fn hazard_cell(gap: u32, aligned: bool, just_ate: bool, cpu_close: bool) -> usize {
+    let g = (gap as usize).min(7);
+    g | ((aligned as usize) << 3) | ((just_ate as usize) << 4) | ((cpu_close as usize) << 5)
 }
 
 impl Default for CpuBrain {
@@ -1421,6 +1859,12 @@ impl Default for CpuBrain {
             turn_pattern: TurnPattern::default(),
             portfolio: Portfolio::default(),
             intent_targets: [None; 2],
+            class_books: ClassBooks::default(),
+            gap_since_voluntary: 0,
+            frames_since_food: 99,
+            prev_pc_dist: 0,
+            earned_snapshot: 0.0,
+            pending_book: None,
         }
     }
 }
@@ -1428,6 +1872,20 @@ impl Default for CpuBrain {
 impl CpuBrain {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// The whole evidence family's earned read: the published record's
+    /// channels and the book's channels (scaled by coverage), every one
+    /// individually latched under the shared family-wise anytime boundary
+    /// and spending an SE-shrunk lift. The book half sits behind the
+    /// book_spend attribution switch (codex D10).
+    pub fn family_earned_read(&self) -> f32 {
+        let published = self.lifetime_read.earned_read();
+        if crate::tuning::tuning().book_spend < 0.5 {
+            published
+        } else {
+            published.max(self.class_books.spendable())
+        }
     }
 
     /// Laplace-smoothed prior over directions. Uniform tally → uniform prior,
@@ -1599,6 +2057,11 @@ impl CpuBrain {
             &ReadRateWireV1::from(&self.lifetime_read),
         );
         push_section(&mut sections, SEC_READ_RATE2, &self.lifetime_read);
+        push_section(
+            &mut sections,
+            SEC_CLASS_BOOKS,
+            &ClassBooksWire::from(&self.class_books),
+        );
         push_section(&mut sections, SEC_TURN_PRIOR, &self.opp_brain.turn_tally);
         push_section(&mut sections, SEC_PORTFOLIO, &self.portfolio);
 
@@ -1681,6 +2144,25 @@ impl CpuBrain {
 
         // Accuracy is hits/total; hits > total reports above 100%.
         self.opp_pred_hits = self.opp_pred_hits.min(self.opp_pred_total);
+
+        // Persisted book state: any non-finite or negative float poisons
+        // the hazard, the gate, and everything the projection trusts.
+        {
+            let b = &mut self.class_books;
+            let bad = b
+                .hz_turn
+                .iter()
+                .chain(b.hz_total.iter())
+                .chain(b.wt_slow.iter())
+                .chain([b.as_hits, b.as_total, b.at_hits, b.at_total].iter())
+                .any(|v| !v.is_finite() || *v < 0.0);
+            if bad {
+                *b = ClassBooks::default();
+                report.sections_skipped += 1;
+            } else {
+                b.side_declarations = b.side_declarations.min(b.side_opportunities);
+            }
+        }
 
         if self.ensemble.active >= ENSEMBLE_MODELS {
             self.ensemble.active = 0;
@@ -1857,6 +2339,10 @@ impl CpuBrain {
                     }
                     Err(_) => report.sections_skipped += 1,
                 },
+                SEC_CLASS_BOOKS => match bincode::deserialize::<ClassBooksWire>(body) {
+                    Ok(w) => brain.class_books = w.restore(),
+                    Err(_) => report.sections_skipped += 1,
+                },
                 // Forward compatibility: a section this build has never heard
                 // of is skipped by its length, not treated as corruption.
                 _ => report.sections_skipped += 1,
@@ -1931,6 +2417,10 @@ const SEC_READ_RATE: u16 = 6;
 const SEC_TURN_PRIOR: u16 = 7;
 /// The Exp3 playstyle weights — which temperaments beat this human.
 const SEC_PORTFOLIO: u16 = 8;
+/// The turn book's books, hazard cells, and accuracies (ADR-020 stage 2).
+/// Knowledge about the human — persists so the 45-round corpus failure
+/// (selection cold-started every round) cannot recur.
+const SEC_CLASS_BOOKS: u16 = 9;
 /// The widened lifetime read (adds the lateral evidence channel, ADR-020).
 /// `bincode` is not field-tolerant, so the widened `ReadRate` gets a NEW
 /// section id; `SEC_READ_RATE` keeps carrying the v1 projection so an older
@@ -3350,6 +3840,187 @@ fn cell_threatened_by_bomb(game: &WormGame, x: u16, y: u16, frames_ahead: u8) ->
     false
 }
 
+/// Scenario-based player projection (ADR-020 stage 2.1, codex-designed):
+/// the old projector assumed straight-until-blocked, which against a
+/// slalomer aims every hunt and dodge where they WON'T be. This one
+/// enumerates the no-turn trajectory plus turn-at-step-t trajectories for
+/// each side over the horizon, masses them by survival-adjusted hazard
+/// P(T=t) = P(T>t−1)·h_t with side mass split by the book's calibrated
+/// side accuracy, and returns the probability-weighted MEDOID — the
+/// enumerated path minimizing expected path loss against the mixture. A
+/// real, reachable trajectory, never an average of incompatible ones, and
+/// no-turn wins whenever it carries the mass (no forced bend).
+///
+/// Approximations, documented: hazards are evaluated along the no-turn
+/// path (the pre-turn prefix is shared, which is where h is read); the
+/// CPU is held stationary for the closing feature; food is static.
+/// Only runs with PROJECTION AUTHORITY — the book's evidence family
+/// latched and mature — and behind the book_bend attribution switch.
+fn predict_player_positions_book(
+    game: &WormGame,
+    brain: &CpuBrain,
+    predicted_dir: Direction,
+    max_frames: usize,
+) -> Vec<(u16, u16)> {
+    let base = predict_player_positions_iterative(game, predicted_dir, max_frames);
+    if crate::tuning::tuning().book_bend < 0.5
+        || !brain.class_books.projection_authority()
+        || max_frames < 2
+    {
+        return base;
+    }
+    let heading = game.cycles[0].direction;
+    let (l, r) = (left_turn(heading), right_turn(heading));
+
+    // Hazard mass along the shared no-turn prefix, features advanced.
+    let (cx, cy) = game.cycles[1].head;
+    let nearest_food = game
+        .food_items
+        .iter()
+        .min_by_key(|&&(fx, fy, _)| {
+            let (px, py) = game.cycles[0].head;
+            (fx as i32 - px as i32).abs() + (fy as i32 - py as i32).abs()
+        })
+        .copied();
+    let mut surv = 1.0f32;
+    let mut turn_mass: Vec<f32> = Vec::with_capacity(max_frames);
+    let mut prev_dist = brain.prev_pc_dist;
+    for (step, &(px, py)) in base.iter().enumerate() {
+        let aligned = nearest_food
+            .map(|(fx, fy, _)| {
+                let (dx, dy) = heading.as_delta();
+                (fx as i32 - px as i32) * dx as i32 + (fy as i32 - py as i32) * dy as i32 > 0
+            })
+            .unwrap_or(true);
+        let dist =
+            ((px as i32 - cx as i32).abs() + (py as i32 - cy as i32).abs()) as u32;
+        let cpu_close = dist <= 12 && dist < prev_dist.max(1);
+        prev_dist = dist;
+        let cell = hazard_cell(
+            brain.gap_since_voluntary.saturating_add(step as u32),
+            aligned,
+            brain.frames_since_food.saturating_add(step as u32) <= 3,
+            cpu_close,
+        );
+        let h = brain.class_books.hazard(cell).clamp(0.0, 1.0);
+        turn_mass.push(surv * h);
+        surv *= 1.0 - h;
+    }
+    let no_turn_mass = surv;
+
+    // Side split: the book's declared side carries its calibrated
+    // accuracy; the other side the remainder. No declaration → the
+    // learned turn prior decides the split.
+    let a_t = brain.class_books.a_turn().clamp(0.5, 1.0);
+    let side_pref = brain.pending_book.and_then(|p| p.side);
+    let (p_l, p_r) = match side_pref {
+        Some(d) if d == l => (a_t, 1.0 - a_t),
+        Some(d) if d == r => (1.0 - a_t, a_t),
+        _ => {
+            let prior = brain.opp_brain.turn_prior();
+            let (wl, wr) = (prior[turn_index(Turn::Left)], prior[turn_index(Turn::Right)]);
+            let s = (wl + wr).max(1e-6);
+            (wl / s, wr / s)
+        }
+    };
+
+    // Enumerate: scenario 0 = no-turn; then (turn@t, side) for each step.
+    let walk_bent = |bend_at: usize, side: Direction| -> Vec<(u16, u16)> {
+        let mut path = Vec::with_capacity(max_frames);
+        let mut px = game.cycles[0].head.0 as i16;
+        let mut py = game.cycles[0].head.1 as i16;
+        let mut pdir = heading;
+        let open = |x: i16, y: i16| -> bool {
+            x >= 0
+                && y >= 0
+                && x < game.width as i16
+                && y < game.height as i16
+                && matches!(
+                    game.grid[y as usize][x as usize],
+                    crate::game::CellType::Empty
+                        | crate::game::CellType::Food
+                        | crate::game::CellType::Hole
+                        | crate::game::CellType::PowerUp
+                )
+        };
+        for step in 0..max_frames {
+            if step == bend_at {
+                let (sdx, sdy) = side.as_delta();
+                if open(px + sdx, py + sdy) {
+                    pdir = side;
+                }
+            }
+            let (dx, dy) = pdir.as_delta();
+            if !open(px + dx, py + dy) {
+                // Blocked: same corner logic as the base projector.
+                let (fdx, fdy) = left_turn(pdir).as_delta();
+                pdir = if open(px + fdx, py + fdy) {
+                    left_turn(pdir)
+                } else {
+                    right_turn(pdir)
+                };
+            }
+            let (dx, dy) = pdir.as_delta();
+            if open(px + dx, py + dy) {
+                px += dx;
+                py += dy;
+            }
+            path.push((px as u16, py as u16));
+        }
+        path
+    };
+
+    let mut scenarios: Vec<(f32, Vec<(u16, u16)>)> = vec![(no_turn_mass, base.clone())];
+    for t in 0..max_frames {
+        if turn_mass[t] <= 1e-4 {
+            continue;
+        }
+        scenarios.push((turn_mass[t] * p_l, walk_bent(t, l)));
+        scenarios.push((turn_mass[t] * p_r, walk_bent(t, r)));
+    }
+    // Weighted medoid under summed per-step Manhattan path loss.
+    let loss = |a: &[(u16, u16)], b: &[(u16, u16)]| -> f32 {
+        a.iter()
+            .zip(b.iter())
+            .map(|(&(ax, ay), &(bx, by))| {
+                ((ax as i32 - bx as i32).abs() + (ay as i32 - by as i32).abs()) as f32
+            })
+            .sum()
+    };
+    let mut best = 0usize;
+    let mut best_cost = f32::INFINITY;
+    for i in 0..scenarios.len() {
+        let cost: f32 = scenarios
+            .iter()
+            .map(|(m, p)| m * loss(&scenarios[i].1, p))
+            .sum();
+        if cost < best_cost {
+            best_cost = cost;
+            best = i;
+        }
+    }
+    scenarios.swap_remove(best).1
+}
+
+/// Public evaluation wrappers: the two projection strategies from the
+/// same live state, for paired grading (rca_probe, ADR-020 stage 2.1).
+pub fn project_player_straight(game: &WormGame, frames: usize) -> Vec<(u16, u16)> {
+    let dir = game
+        .cpu_brain
+        .ensemble
+        .predicted_dir
+        .unwrap_or(game.cycles[0].direction);
+    predict_player_positions_iterative(game, dir, frames)
+}
+pub fn project_player_book(game: &WormGame, frames: usize) -> Vec<(u16, u16)> {
+    let dir = game
+        .cpu_brain
+        .ensemble
+        .predicted_dir
+        .unwrap_or(game.cycles[0].direction);
+    predict_player_positions_book(game, &game.cpu_brain, dir, frames)
+}
+
 /// Iterative multi-frame player prediction: step the player's position
 /// forward, turning at obstacles with the ensemble's predicted direction.
 /// Returns a vector of (x, y) positions for frames 1..max_frames.
@@ -4365,7 +5036,7 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
         + game.cpu_brain.lifetime_read.taken[2]) as f32
         / 10.0)
         .min(1.0)
-        * game.cpu_brain.lifetime_read.earned_read();
+        * game.cpu_brain.earned_snapshot;
     // THE BEATABLE OPENING's second half: before there is a read, the hunt
     // gates may run on RAW forecast confidence (straight-line extrapolation
     // chasing) — eager, imperfect, killable. The DBR observation ramp takes
@@ -4385,10 +5056,20 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
     //  - pred_conf gates AGGRESSIVE use. A hunt on a silent forecast is
     //    aggression without a read, which violates the product contract —
     //    so it is zero unless the published forecast actually names a move.
-    let track_conf = decision_forecast
+    let track_conf = (decision_forecast
         .map(|forecast| forecast.confidence)
         .unwrap_or(0.0)
-        * read_conf;
+        * read_conf)
+        // A book-bent path carries the BOOK's earned authority for
+        // DEFENSIVE use (dodging where the read says they'll be) — it
+        // must not inherit the global straight book's confidence, and it
+        // must not feed pred_conf's aggression either (that stays on the
+        // published forecast).
+        .max(if game.cpu_brain.class_books.projection_authority() {
+            game.cpu_brain.class_books.spendable()
+        } else {
+            0.0
+        });
     let player_pred_conf = if decision_forecast.and_then(|f| f.predicted).is_some() {
         track_conf
     } else {
@@ -4398,7 +5079,8 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
     let (cx, cy) = cpu.head;
 
     // Iterative multi-frame prediction: predicts direction changes at corners.
-    let predicted_positions = predict_player_positions_iterative(game, player_pred_dir, 5);
+    let predicted_positions =
+        predict_player_positions_book(game, &game.cpu_brain, player_pred_dir, 5);
     if decision_forecast.is_some() {
         decision_projection = Some(PlayerProjection {
             direction: player_pred_dir,
@@ -4688,7 +5370,7 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
     // survival floors still vet every step, and the trail-blind doze means
     // an over-eager approach can die into the trail you laid: the earned
     // kill the opening exists to offer. Fades out entirely with sharpness.
-    if game.sharpness() < 0.5 {
+    if game.discipline_sharpness() < 0.5 {
         let (px, py) = game.cycles[0].head;
         let dist_now = (cx as i16 - px as i16).abs() + (cy as i16 - py as i16).abs();
         if dist_now > 10 {
@@ -5487,6 +6169,89 @@ mod tests {
         let expected = (10.0 * 0.5 + 10.0 / 3.0) / 20.0;
         assert!((r.uniform_chance() - expected).abs() < 1e-5);
         assert!(r.uniform_chance() > 0.25, "never the old 25% claim");
+    }
+
+    /// The derived gate's full lifecycle: hard-closed below maturity,
+    /// opens only when h·aT clears (1−h)·aS by the Schmitt band, holds
+    /// inside the band, releases below it.
+    #[test]
+    fn the_turn_book_gate_derives_and_holds() {
+        let mut b = ClassBooks::default();
+        // Strong hazard context but immature book: closed.
+        assert!(!b.gate(0.9), "maturity floor must hard-close the gate");
+        for _ in 0..BOOK_MATURITY {
+            b.observe_turn_book(true); // aT -> 1.0
+        }
+        for _ in 0..100 {
+            b.observe_straight_book(true); // aS -> 1.0
+        }
+        // h*1.0 vs (1-h)*1.0: crosses at 0.5+band.
+        assert!(!b.gate(0.50), "inside the band from below: stays closed");
+        assert!(b.gate(0.60), "clear conviction opens");
+        assert!(b.gate(0.52), "Schmitt: stays open inside the band");
+        assert!(!b.gate(0.40), "clear reversal closes");
+    }
+
+    /// KT hazard cells: honest 0.5 at zero data, converging toward the
+    /// observed rate, and decay keeps them adaptive.
+    #[test]
+    fn hazard_cells_estimate_and_decay() {
+        let mut b = ClassBooks::default();
+        assert!((b.hazard(3) - 0.5).abs() < 1e-6);
+        for _ in 0..50 {
+            b.observe_hazard(3, true);
+        }
+        assert!(b.hazard(3) > 0.9, "50 straight turn events: h={}", b.hazard(3));
+        for _ in 0..200 {
+            b.observe_hazard(3, false);
+        }
+        assert!(b.hazard(3) < 0.25, "recent stays dominate: h={}", b.hazard(3));
+    }
+
+    /// Coverage discounts an abstaining book: excellent accuracy on an
+    /// undisclosed subset must not buy global aggression.
+    #[test]
+    fn an_abstaining_book_cannot_spend_full_evidence() {
+        let mut b = ClassBooks::default();
+        b.side_opportunities = 100;
+        b.side_declarations = 25;
+        // Force a proven book_read so spendable is limited by coverage only.
+        for i in 0..120u64 {
+            let s = i.wrapping_mul(6364136223846793005).wrapping_add(7);
+            let side = if ((s >> 33) % 10) < 9 { Turn::Left } else { Turn::Right };
+            b.book_read.record(3, side, Turn::Left, [true; 3], side == Turn::Left);
+        }
+        assert!(b.book_read.earned_read() > 0.0, "positive control failed to latch");
+        assert!(
+            b.spendable() <= b.book_read.earned_read() * 0.25 + 1e-6,
+            "spendable {} must be coverage-scaled",
+            b.spendable()
+        );
+        assert!(b.coverage() == 0.25);
+    }
+
+    /// side_pick only ever selects a model currently predicting a LATERAL.
+    #[test]
+    fn side_pick_ignores_straight_speakers() {
+        let b = ClassBooks::default();
+        let mut masked = [None; ENSEMBLE_MODELS];
+        masked[0] = Some(Direction::Up); // straight (heading Up)
+        assert!(b.side_pick(&masked, Direction::Up).is_none());
+        masked[4] = Some(Direction::Left); // a lateral
+        let (src, d) = b.side_pick(&masked, Direction::Up).unwrap();
+        assert_eq!((src, d), (4, Direction::Left));
+    }
+
+    /// Poisoned persisted book state resets to default instead of feeding
+    /// NaN into the hazard and the gate.
+    #[test]
+    fn sanitize_resets_poisoned_books() {
+        let mut brain = CpuBrain::new();
+        brain.class_books.hz_turn[7] = f32::NAN;
+        brain.class_books.turn_events = 500;
+        let mut report = BrainRestore::default();
+        brain.sanitize(&mut report);
+        assert_eq!(brain.class_books.turn_events, 0, "poisoned books must reset");
     }
 
     /// The exact defect the external verification caught in the first

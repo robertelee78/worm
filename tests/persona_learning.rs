@@ -218,6 +218,9 @@ struct Result {
     /// significant on either evidence channel — the strictest null: a
     /// habit-free opponent must never cross either bar even transiently.
     read_significant: bool,
+    /// Whether the book EVER earned projection authority — a fair-side
+    /// player must never have their defensive paths reshaped.
+    projection_authority_seen: bool,
     /// earned_read() at the end of the run — what sharpness would spend.
     read_lift: f32,
     /// How many real two-lateral choices the production channel scored —
@@ -259,6 +262,7 @@ fn play(persona: Persona, games: u32, seed: u64) -> Result {
         turn_prior: [0.0; 3],
         no_forecast: 0,
         read_significant: false,
+        projection_authority_seen: false,
         read_lift: 0.0,
         lat_samples: 0,
     };
@@ -278,12 +282,20 @@ fn play(persona: Persona, games: u32, seed: u64) -> Result {
             game.change_direction(mv.dir);
             game.update();
             frames += 1;
-            // EVERY frame, not just round boundaries: read_conf consults
-            // the latch mid-round, so a transiently-manufactured read
-            // would spend itself before any boundary check saw it.
+            // EVERY frame, not just round boundaries — and EVERY channel
+            // of the evidence family plus the aggregate (codex round 2):
+            // a transiently-manufactured read in any one channel would
+            // spend itself before a boundary check saw it.
             {
                 let r = &game.cpu_brain.lifetime_read;
-                out.read_significant |= r.is_significant() || r.lateral_significant();
+                let b = &game.cpu_brain.class_books;
+                out.read_significant |= r.is_significant()
+                    || r.lateral_significant()
+                    || r.mc_latched
+                    || b.book_read.lateral_significant()
+                    || b.book_read.mc_latched
+                    || game.cpu_brain.family_earned_read() > 0.0;
+                out.projection_authority_seen |= b.projection_authority();
             }
 
             if mv.habit_frame {
@@ -455,25 +467,36 @@ fn acceptance_a_relative_turn_habit_is_learned() {
 /// keep it null, through the REAL update() pipeline, not a hand-fed tally.
 #[test]
 fn null_control_a_fair_coin_slalomer_never_reads_as_learned() {
-    let r = play(Persona::SlalomCoin, 12, 77_2026);
-    report("slalom-coin (NULL)", &r);
-    assert!(
-        r.habit_frames >= 100,
-        "not enough voluntary swerves to conclude anything: {}",
-        r.habit_frames
-    );
-    assert!(
-        r.lat_samples >= 30,
-        "the null must actually exercise the lateral channel: only {} real choices scored",
-        r.lat_samples
-    );
-    assert!(
-        !r.read_significant,
-        "a side-habit-free slalomer must NOT come out significant at ANY frame \
-         (earned={:.2}, lat n={})",
-        r.read_lift,
-        r.lat_samples
-    );
+    // Three independent seeds: one lucky arc proves nothing about an
+    // anytime guarantee (codex round 2). The metronome TIMING is
+    // deliberately learnable — the hazard may model it freely — but with
+    // fair-coin sides no evidence channel may latch and the book must
+    // never win projection authority.
+    for seed in [77_2026u64, 13_37, 424_242] {
+        let r = play(Persona::SlalomCoin, 12, seed);
+        report(&format!("slalom-coin (NULL, seed {seed})"), &r);
+        assert!(
+            r.habit_frames >= 100,
+            "seed {seed}: not enough voluntary swerves: {}",
+            r.habit_frames
+        );
+        assert!(
+            r.lat_samples >= 30,
+            "seed {seed}: the null must exercise the channel: {} choices",
+            r.lat_samples
+        );
+        assert!(
+            !r.read_significant,
+            "seed {seed}: a side-habit-free slalomer read as significant \
+             (earned={:.2}, lat n={})",
+            r.read_lift,
+            r.lat_samples
+        );
+        assert!(
+            !r.projection_authority_seen,
+            "seed {seed}: a fair-side book must never bend projections"
+        );
+    }
 }
 
 /// Same guarantee for the original habitless opponent, on the lifetime read

@@ -462,6 +462,7 @@ mod tests {
                     source: 1,
                     predicted: Some(Direction::Right),
                     confidence: 0.75,
+                    book: 0,
                     seal: 0,
                 }),
                 projection: None,
@@ -471,6 +472,7 @@ mod tests {
                 source: 2,
                 predicted: Some(Direction::Down),
                 confidence: 0.5,
+                book: 0,
                 seal: 0,
             }),
         };

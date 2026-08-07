@@ -105,13 +105,48 @@ fn main() {
     let mut total = vec![vec![0u32; m]; CLASSES];
     let mut base = BaseMirror::default();
 
+    // Projection grading (codex D8): every 5 frames, freeze both
+    // projections from the same state and score them against the5
+    // realized positions; windows cut short by round end are censored
+    // (dropped) rather than zero-padded.
+    let mut proj_loss_straight = 0f64;
+    let mut proj_loss_medoid = 0f64;
+    let mut proj_windows = 0u32;
     for r in &rounds {
         game.start_recorded_round(r.seed, r.w, r.h, r.events.clone());
         let mut pend: Option<([Option<Direction>; ENSEMBLE_MODELS], Option<Direction>)> = None;
         let mut prev_heading = game.cycles[0].direction;
         let mut prev_legal = worm::legal_options_from(&game, 0, prev_heading);
+        let mut proj_pending: Option<(Vec<(u16, u16)>, Vec<(u16, u16)>, usize)> = None;
+        let mut realized: Vec<(u16, u16)> = Vec::new();
         while !game.game_over && game.frame_count <= r.frames {
+            // Freeze both projections from the CURRENT state every 5th frame.
+            if proj_pending.is_none() {
+                let base = worm::cpu_ai::project_player_straight(&game, 5);
+                let bent = worm::cpu_ai::project_player_book(&game, 5);
+                proj_pending = Some((base, bent, 0));
+                realized.clear();
+            }
             game.update();
+            realized.push(game.cycles[0].head);
+            if let Some((base, bent, _)) = &proj_pending {
+                if realized.len() == 5 {
+                    let loss = |p: &Vec<(u16, u16)>| -> f64 {
+                        p.iter()
+                            .zip(realized.iter())
+                            .map(|(&(ax, ay), &(bx, by))| {
+                                ((ax as i32 - bx as i32).abs()
+                                    + (ay as i32 - by as i32).abs())
+                                    as f64
+                            })
+                            .sum()
+                    };
+                    proj_loss_straight += loss(base);
+                    proj_loss_medoid += loss(bent);
+                    proj_windows += 1;
+                    proj_pending = None;
+                }
+            }
             let actual = game.cycles[0].direction;
             // Frame class from the PRE-move state.
             let straight_ok = prev_legal.contains(&prev_heading);
@@ -169,10 +204,16 @@ fn main() {
         }
     }
 
+    let books_after_pass1 = game.cpu_brain.class_books.clone();
+
     // ---- WHY-HAZARD spike: does target misalignment predict his turns? ----
-    // Replay again, tracking per frame: is his heading REDUCING distance to
-    // the nearest food (aligned)? If not, a correction is due — and the
-    // correcting turn should be TOWARD the food side. The why as the gate.
+    // A FRESH game+brain: replaying the corpus into the already-trained
+    // brain would double-count every event (codex round 2 — the 1,983-
+    // event figure from the first probe run was exactly this), so pass 1
+    // above stays the single prequential pass all statistics come from.
+    let mut game = WormGame::with_size_seed(55, 40, 1);
+    game.cpu_autopilot = false;
+    game.shadow_learning = true;
     let mut mis = [[0u32; 2]; 2]; // [aligned?][turned?] counts
     let mut toward_hits = 0u32;
     let mut toward_total = 0u32;
@@ -251,6 +292,45 @@ fn main() {
         toward_hits,
         toward_total
     );
+
+    // Turn-book diagnostics after the full corpus (single prequential pass).
+    {
+        let b = &books_after_pass1;
+        let mut max_h = 0.0f32;
+        let mut hot = 0usize;
+        for cell in 0..worm::cpu_ai::HAZARD_CELLS {
+            if b.hz_total[cell] >= 5.0 {
+                let h = b.hazard(cell);
+                if h > max_h {
+                    max_h = h;
+                    hot = cell;
+                }
+            }
+        }
+        println!(
+            "\n== TURN BOOK (prequential, pass 1) == events={} aT={:.2} aS={:.2} coverage={:.2} gate_open={} max_h={:.2} (cell {:#08b}, n={:.0})",
+            b.turn_events,
+            b.a_turn(),
+            b.a_straight(),
+            b.coverage(),
+            b.gate_open,
+            max_h,
+            hot,
+            b.hz_total[hot]
+        );
+        println!(
+            "   book_read: side_opps={} decls={} earned={:.2} spendable={:.2} authority={}",
+            b.side_opportunities,
+            b.side_declarations,
+            b.book_read.earned_read(),
+            b.spendable(),
+            b.projection_authority(),
+        );
+        println!(
+            "   projection paired loss (sum manhattan over 5f, lower=better): straight={:.0} medoid={:.0} on {} scored windows",
+            proj_loss_straight, proj_loss_medoid, proj_windows
+        );
+    }
 
     let class_names = ["straight", "VOLUNTARY-TURN", "forced-turn"];
     for c in 0..CLASSES {

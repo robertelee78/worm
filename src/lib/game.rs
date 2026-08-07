@@ -624,6 +624,22 @@ impl WormGame {
         (read.max(deficit.clamp(0.0, 1.0)) / 0.6).min(1.0)
     }
 
+    /// Sharpness for SURVIVAL BASICS: any proven read ends the casual
+    /// opening outright. The continuous sharpness below is the right
+    /// scale for AGGRESSION (spend proportional to evidence), but scaling
+    /// survival discipline by a partial read produced a lossy half-woken
+    /// middle — measured: dozy won 96%, fully-sharp won 92%, and the
+    /// half-sharp transition lost games both of those win (ADR-020
+    /// stage 2.1). Sloppy basics exist for the genuinely-unread phase
+    /// ONLY; a CPU holding latched evidence has no business faceplanting.
+    pub fn discipline_sharpness(&self) -> f32 {
+        if self.cpu_brain.earned_snapshot > 0.0 {
+            1.0
+        } else {
+            self.sharpness()
+        }
+    }
+
     /// How much manufactured opening recklessness (the bold_* knobs) is
     /// still warranted: 1.0 at first contact and even scores, fading to 0
     /// as the CPU pulls AHEAD on the visible scoreboard. Boldness exists to
@@ -1003,6 +1019,98 @@ impl WormGame {
                     });
                 }
             }
+            // THE TURN BOOK's training (ADR-020 stage 2) — specialist
+            // accounting, gate-independent, BEFORE score_frame consumes the
+            // pending predictions this frame is graded against. Eligible
+            // frames are those where straight was legal: the player could
+            // have held the line, so WHEN and WHICH WAY were genuinely
+            // theirs. Forced turns belong to the mask, not the books.
+            {
+                let straight_legal = legal_now.contains(&player_heading);
+                let both_laterals_legal = {
+                    let mut l = 0;
+                    for &d in &legal_now {
+                        if matches!(
+                            crate::cpu_ai::Turn::from_dirs(player_heading, d),
+                            Some(crate::cpu_ai::Turn::Left) | Some(crate::cpu_ai::Turn::Right)
+                        ) {
+                            l += 1;
+                        }
+                    }
+                    l == 2
+                };
+                let turned_lateral = matches!(
+                    player_turn,
+                    Some(crate::cpu_ai::Turn::Left) | Some(crate::cpu_ai::Turn::Right)
+                );
+                // A stale record (round restart, frame skip) must never
+                // score against the wrong input.
+                let pend_book = self
+                    .cpu_brain
+                    .pending_book
+                    .take()
+                    .filter(|p| p.target_frame == self.frame_count);
+                if let Some(p) = pend_book {
+                    if straight_legal && player_turn.is_some() {
+                        self.cpu_brain.class_books.observe_hazard(p.cell, turned_lateral);
+                        self.cpu_brain.class_books.observe_straight_book(
+                            player_turn == Some(crate::cpu_ai::Turn::Straight),
+                        );
+                        // SIDE-skill population (codex round 2): only
+                        // genuine two-sided choices count — with one legal
+                        // lateral the side is board-determined.
+                        if turned_lateral && both_laterals_legal {
+                            self.cpu_brain.class_books.side_opportunities =
+                                self.cpu_brain.class_books.side_opportunities.saturating_add(1);
+                            if let Some(side) = p.side {
+                                self.cpu_brain.class_books.side_declarations = self
+                                    .cpu_brain
+                                    .class_books
+                                    .side_declarations
+                                    .saturating_add(1);
+                                let side_hit = side == player_dir_this_frame;
+                                self.cpu_brain.class_books.observe_turn_book(side_hit);
+                                // The book's own honest record — same
+                                // machinery, same nulls as the published
+                                // read (ADR-020 stage 2.1).
+                                if let (Some(actual_t), Some(pred_t)) = (
+                                    player_turn,
+                                    crate::cpu_ai::Turn::from_dirs(player_heading, side),
+                                ) {
+                                    let mut legal_turns = [false; 3];
+                                    for &d in &legal_now {
+                                        if let Some(t) =
+                                            crate::cpu_ai::Turn::from_dirs(player_heading, d)
+                                        {
+                                            legal_turns[crate::cpu_ai::turn_index(t)] = true;
+                                        }
+                                    }
+                                    self.cpu_brain.class_books.book_read.record(
+                                        player_options,
+                                        actual_t,
+                                        pred_t,
+                                        legal_turns,
+                                        side_hit,
+                                    );
+                                }
+                            }
+                            let pend = self.cpu_brain.ensemble.pending;
+                            self.cpu_brain
+                                .class_books
+                                .score_turn_frame(&pend, player_dir_this_frame);
+                        }
+                    }
+                }
+                // The dedicated hazard counter: voluntary laterals only.
+                if straight_legal && turned_lateral {
+                    self.cpu_brain.gap_since_voluntary = 0;
+                } else {
+                    self.cpu_brain.gap_since_voluntary =
+                        self.cpu_brain.gap_since_voluntary.saturating_add(1);
+                }
+                self.cpu_brain.frames_since_food =
+                    self.cpu_brain.frames_since_food.saturating_add(1);
+            }
             self.cpu_brain
                 .ensemble
                 .score_frame(player_dir_this_frame, self.frame_count);
@@ -1186,6 +1294,7 @@ impl WormGame {
         {
             let (_, _, v) = self.food_items.remove(idx);
             player_food_val = v;
+            self.cpu_brain.frames_since_food = 0;
             self.cycles[self.player].score += player_food_val as u32;
             self.score += player_food_val as u32 * 10;
             self.food_eaten_total += player_food_val as u32;
@@ -1319,13 +1428,83 @@ impl WormGame {
             // speak this frame — a silent model must never drive with its
             // historical hit-rate as phantom confidence (codex finding).
             let (active, confidence) = crate::cpu_ai::select_active(&self.cpu_brain, &masked);
+
+            // THE TURN BOOK's publish decision (ADR-020 stage 2). Hazard
+            // context from the post-move board this forecast targets;
+            // side pick sealed gate-independently (aT trains either way);
+            // the derived gate decides which book's answer ships.
+            let straight_next = legal_next.contains(&heading);
+            let (book_source, book_dir, book_conf) = {
+                let (px, py) = self.cycles[self.player].head;
+                let (cx, cy) = self.cycles[1].head;
+                let dist = ((px as i32 - cx as i32).abs()
+                    + (py as i32 - cy as i32).abs()) as u32;
+                let cpu_close =
+                    dist <= 12 && dist < self.cpu_brain.prev_pc_dist.max(1);
+                self.cpu_brain.prev_pc_dist = dist;
+                let aligned = self
+                    .food_items
+                    .iter()
+                    .min_by_key(|&&(fx, fy, _)| {
+                        (fx as i32 - px as i32).abs() + (fy as i32 - py as i32).abs()
+                    })
+                    .map(|&(fx, fy, _)| {
+                        let (dx, dy) = heading.as_delta();
+                        (fx as i32 - px as i32) * dx as i32
+                            + (fy as i32 - py as i32) * dy as i32
+                            > 0
+                    })
+                    .unwrap_or(true);
+                let cell = crate::cpu_ai::hazard_cell(
+                    self.cpu_brain.gap_since_voluntary,
+                    aligned,
+                    self.cpu_brain.frames_since_food <= 3,
+                    cpu_close,
+                );
+                let side = self.cpu_brain.class_books.side_pick(&masked, heading);
+                self.cpu_brain.pending_book = Some(crate::cpu_ai::PendingBook {
+                    target_frame: self.frame_count + 1,
+                    cell,
+                    side: side.map(|(_, d)| d),
+                });
+                // Fold the book's precommitment into the reveal chain so
+                // the counterfactual is auditable after the fact, even
+                // though the public seal covers only the published
+                // forecast.
+                self.seal_chain = crate::cpu_ai::fnv1a64(&[
+                    self.seal_chain.to_le_bytes().as_slice(),
+                    &[cell as u8, side.map(|(_, d)| d as u8 + 1).unwrap_or(0)],
+                ]
+                .concat());
+                let h = self.cpu_brain.class_books.hazard(cell);
+                // The gate only ever matters on frames where straight is a
+                // real alternative — forced turns already belong to the
+                // legal mask and the turn prior.
+                if straight_next && self.cpu_brain.class_books.gate(h) {
+                    match side {
+                        Some((src, d)) => (
+                            Some(src),
+                            Some(d),
+                            self.cpu_brain.class_books.a_turn(),
+                        ),
+                        None => (None, None, 0.0),
+                    }
+                } else {
+                    (None, None, 0.0)
+                }
+            };
+
             let e = &mut self.cpu_brain.ensemble;
             for (slot, m) in e.pending.iter_mut().zip(masked.iter()) {
                 *slot = *m;
             }
+            let (active, confidence, from_book) = match (book_source, book_dir) {
+                (Some(src), Some(_)) => (src, book_conf, true),
+                _ => (active, confidence, false),
+            };
             e.active = active;
             e.confidence = confidence;
-            e.predicted_dir = e.pending[active];
+            e.predicted_dir = if from_book { book_dir } else { e.pending[active] };
             self.cpu_brain.last_opp_prediction = e.predicted_dir;
             // Commit the prediction BEFORE the player's input for that frame
             // exists. The salt is a pure function of (seal_seed, frame) — it
@@ -1340,6 +1519,7 @@ impl WormGame {
                 source: active,
                 predicted,
                 confidence,
+                book: if from_book { 1 } else { 0 },
                 seal: crate::cpu_ai::seal_commit(salt, predicted, target),
             });
         }
@@ -1358,7 +1538,8 @@ impl WormGame {
         // is what makes it sharp." Never applies to replays (scripted).
         let open_k = {
             let t = crate::tuning::tuning();
-            1 + ((t.open_latency - 1.0).max(0.0) * (1.0 - self.sharpness())).round() as u32
+            1 + ((t.open_latency - 1.0).max(0.0) * (1.0 - self.discipline_sharpness())).round()
+                as u32
         };
         // A doze never overrides WALL reflexes — play-tested, a CPU that
         // holds heading into a static wall reads as broken, not casual (the
@@ -1836,13 +2017,14 @@ impl WormGame {
     /// trivially predictable produces a high base rate and cannot inflate the
     /// CPU's aggression by being boring.
     pub fn refresh_read_rate(&mut self) {
-        let read = &self.cpu_brain.lifetime_read;
-        // SIGNIFICANCE-GATED (ADR-020 stage 1): only evidence that clears a
-        // significance bar may drive sharpness — a null player must never
-        // wake the CPU on fluctuation. earned_read() is the max of the two
-        // honest channels (McNemar over the class-aware base, lateral over
-        // chance), each individually gated.
-        let base = read.earned_read();
+        // SIGNIFICANCE-GATED (ADR-020): only evidence that clears the
+        // family-wise anytime boundary may drive sharpness — a null player
+        // must never wake the CPU on fluctuation, however many channels
+        // race. The snapshot taken here is the ONLY earned value in-round
+        // consumers may spend (codex round 2: no mid-round latch may open
+        // hunts before a boundary check has seen it).
+        let base = self.cpu_brain.family_earned_read();
+        self.cpu_brain.earned_snapshot = base;
         // The active playstyle scales how hard the read is SPENT, never the
         // read itself: cautious plays under its evidence, relentless over it.
         // Survival floors are untouched by every style.
@@ -1929,6 +2111,15 @@ impl WormGame {
         // rps-ai wipes its per-game record each game: ensemble model scores are
         // per-game (responsive), the k-NN memory beneath persists (the corpus).
         self.cpu_brain.ensemble.reset_scores();
+        // The turn book keeps its slow weights, hazard and accuracies —
+        // cold-starting class selection every round is the exact failure
+        // the owner corpus measured 45 times (ADR-020). Only the fast
+        // horizon and the transient per-round context reset.
+        self.cpu_brain.class_books.reset_round();
+        self.cpu_brain.gap_since_voluntary = 0;
+        self.cpu_brain.frames_since_food = 99;
+        self.cpu_brain.prev_pc_dist = 0;
+        self.cpu_brain.pending_book = None;
         self.cpu_brain.last_opp_prediction = None;
         self.cpu_history.clear();
         self.powerups.clear();
