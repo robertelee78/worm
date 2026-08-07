@@ -152,7 +152,32 @@ fn main() {
                 }
             }
         }
+        if idx == 44 {
+            let b = &game.cpu_brain.class_books;
+            println!(
+                "[era-1 end] book aT={:.2} spendable={:.2} events={} alt_p_left_events={}",
+                b.a_turn(),
+                b.spendable(),
+                b.turn_events,
+                game.cpu_brain.voluntary_pattern.events
+            );
+        }
     }
+    {
+        let b = &game.cpu_brain.class_books;
+        println!(
+            "[era-2 end] book aT={:.2} spendable={:.2} events={}",
+            b.a_turn(),
+            b.spendable(),
+            b.turn_events
+        );
+    }
+
+    // Era snapshot of book health (consult question C: does the measured
+    // drift already degrade the read?) — captured after round 45.
+    // (Recomputed here rather than mid-loop to keep the loop simple: the
+    // ClassBooks accuracies are decayed, so "state at end of era 2" vs
+    // "state at end of era 1" is the comparison that matters.)
 
     // ---- Epistemic thinness over the learned hazard cells ----
     let b = &game.cpu_brain.class_books;
