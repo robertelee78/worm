@@ -852,6 +852,37 @@ impl Default for TurnPattern {
 }
 
 impl TurnPattern {
+    /// Wire round-trip (ADR-021 Kata 2): the voluntary-turn VOMM is
+    /// knowledge about the HUMAN — their swerve grammar — and must
+    /// survive sessions like every other read.
+    pub fn to_wire(&self) -> TurnTimingWire {
+        TurnTimingWire {
+            ver: 1,
+            history: self.history.clone(),
+            counts: self.counts.iter().map(|(&k, &v)| (k.0, k.1, v.0, v.1)).collect(),
+            weights: self.weights.to_vec(),
+            events: self.events,
+        }
+    }
+
+    pub fn from_wire(w: TurnTimingWire) -> Self {
+        let mut t = Self::default();
+        if w.weights.len() == t.weights.len() {
+            for (i, v) in w.weights.iter().enumerate() {
+                t.weights[i] = *v;
+            }
+        }
+        t.history = w.history;
+        t.history.truncate(64);
+        t.counts = w
+            .counts
+            .into_iter()
+            .map(|(d, bits, l, n)| ((d, bits), (l, n)))
+            .collect();
+        t.events = w.events;
+        t
+    }
+
     fn context_bits(&self, depth: usize) -> Option<u16> {
         if self.history.len() < depth {
             return None;
@@ -1745,6 +1776,16 @@ impl LearningLedgers {
     }
 }
 
+/// The voluntary-turn VOMM on the wire (SEC_TURN_TIMING).
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct TurnTimingWire {
+    pub ver: u8,
+    pub history: Vec<bool>,
+    pub counts: Vec<(u8, u16, f32, f32)>,
+    pub weights: Vec<f32>,
+    pub events: u32,
+}
+
 /// Wire shapes: count-keyed vectors, semantic ids, own versions.
 #[derive(serde::Serialize, serde::Deserialize)]
 struct ActionOutcomesWire {
@@ -2422,6 +2463,11 @@ impl CpuBrain {
         );
         push_section(
             &mut sections,
+            SEC_TURN_TIMING,
+            &self.voluntary_pattern.to_wire(),
+        );
+        push_section(
+            &mut sections,
             SEC_DRIFT_EPOCHS,
             &DriftEpochsWire {
                 ver: 1,
@@ -2734,6 +2780,10 @@ impl CpuBrain {
                     Ok(w) => brain.ledgers.loss_causes = w.causes,
                     Err(_) => report.sections_skipped += 1,
                 },
+                SEC_TURN_TIMING => match bincode::deserialize::<TurnTimingWire>(body) {
+                    Ok(w) => brain.voluntary_pattern = TurnPattern::from_wire(w),
+                    Err(_) => report.sections_skipped += 1,
+                },
                 SEC_DRIFT_EPOCHS => match bincode::deserialize::<DriftEpochsWire>(body) {
                     Ok(w) => brain.ledgers.round_summaries = w.rounds.into_iter().collect(),
                     Err(_) => report.sections_skipped += 1,
@@ -2827,6 +2877,12 @@ const SEC_READ_RATE2: u16 = 10;
 const SEC_ACTION_OUTCOMES: u16 = 11;
 const SEC_LOSS_DEFENSE: u16 = 12;
 const SEC_DRIFT_EPOCHS: u16 = 13;
+/// The voluntary-turn VOMM (the rhythm reader's grammar) — ADR-021 Kata 2.
+/// The 8→16 gap-bucket upgrade measured WORSE prequentially (0.3642 vs
+/// 0.3619 log-loss/frame on the owner corpus) and was NOT taken; this
+/// section is the kata's durable half: the sequence read survives
+/// sessions.
+const SEC_TURN_TIMING: u16 = 14;
 
 /// The pre-ADR-020 `ReadRate` shape, kept as the v1 wire projection.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -6539,6 +6595,20 @@ mod tests {
         let expected = (10.0 * 0.5 + 10.0 / 3.0) / 20.0;
         assert!((r.uniform_chance() - expected).abs() < 1e-5);
         assert!(r.uniform_chance() > 0.25, "never the old 25% claim");
+    }
+
+    /// Kata 2 (#4+#7): the rhythm reader's grammar survives sessions —
+    /// a returning alternator is read from round one, not re-learned.
+    #[test]
+    fn the_voluntary_vomm_survives_persistence() {
+        let mut brain = CpuBrain::new();
+        for i in 0..24 {
+            brain.voluntary_pattern.observe(i % 2 == 0);
+        }
+        let before = brain.voluntary_pattern.p_left();
+        let (restored, _) = CpuBrain::from_bytes_report(&brain.to_bytes()).unwrap();
+        assert_eq!(restored.voluntary_pattern.events, 24);
+        assert!((restored.voluntary_pattern.p_left() - before).abs() < 1e-6);
     }
 
     /// Kata 1 (#5): the boxer aversion — floors only rise, chase-gated,

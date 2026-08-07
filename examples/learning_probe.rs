@@ -179,6 +179,86 @@ fn main() {
     // ClassBooks accuracies are decayed, so "state at end of era 2" vs
     // "state at end of era 1" is the comparison that matters.)
 
+    // ---- Kata 2 gate: 8- vs 16-bucket gap resolution, prequential ----
+    // Twin KT tables over the same context factors as production
+    // (food-side x just-ate x cpu-close = 12 contexts), differing only in
+    // gap buckets. Per eligible frame: log-loss of the CURRENT estimate
+    // against the realized turn/stay, THEN update — prequential.
+    {
+        let mut t8 = vec![(0.0f32, 0.0f32); 8 * 12];
+        let mut t16 = vec![(0.0f32, 0.0f32); 16 * 12];
+        let mut ll8 = 0f64;
+        let mut ll16 = 0f64;
+        let mut n_frames = 0u64;
+        let mut game = WormGame::with_size_seed(55, 40, 1);
+        game.cpu_autopilot = false;
+        game.shadow_learning = true;
+        for (_, rec) in ordered.iter() {
+            let Some(replay) = rec.get("replay") else { continue };
+            if replay["v"].as_u64() != Some(2) { continue; }
+            let seed: u64 = replay["seed"].as_str().unwrap().parse().unwrap();
+            let w = replay["w"].as_u64().unwrap() as u16;
+            let h = replay["h"].as_u64().unwrap() as u16;
+            let arena = replay.get("arena").and_then(|x| x.as_u64()).unwrap_or(1) as u8;
+            let frames = replay["frames"].as_u64().unwrap() as u32;
+            let events: Vec<(u32, u8, u8)> = replay["ev"].as_array().unwrap().iter().map(|e| {
+                let t = e.as_array().unwrap();
+                (t[0].as_u64().unwrap() as u32, t[1].as_u64().unwrap() as u8, t[2].as_u64().unwrap() as u8)
+            }).collect();
+            game.start_recorded_round(seed, w, h, arena, events);
+            let mut gap = 0u32;
+            while !game.game_over && game.frame_count <= frames {
+                let heading = game.cycles[0].prev_direction;
+                let straight_legal = worm::legal_options_from(&game, 0, heading).contains(&heading);
+                let (px, py) = game.cycles[0].head;
+                let nearest = game.food_items.iter().min_by_key(|&&(fx, fy, _)| {
+                    (fx as i32 - px as i32).abs() + (fy as i32 - py as i32).abs()
+                }).map(|&(fx, fy, _)| (fx, fy));
+                let fs = match worm::cpu_ai::food_side(px, py, heading, nearest) {
+                    worm::cpu_ai::FoodSide::Ahead => 0usize,
+                    worm::cpu_ai::FoodSide::Left => 1,
+                    worm::cpu_ai::FoodSide::Right => 2,
+                };
+                let just_ate = false; // context parity across both tables
+                let ctx = fs + 3 * (just_ate as usize);
+                game.update();
+                let dir = game.cycles[0].direction;
+                if let Some(t) = worm::cpu_ai::Turn::from_dirs(heading, dir) {
+                    let lateral = t != worm::cpu_ai::Turn::Straight;
+                    if straight_legal {
+                        let c8 = (gap as usize).min(7) + 8 * ctx;
+                        let c16 = (gap as usize).min(15) + 16 * ctx;
+                        let p8 = (t8[c8].0 + 0.5) / (t8[c8].1 + 1.0);
+                        let p16 = (t16[c16].0 + 0.5) / (t16[c16].1 + 1.0);
+                        let y = lateral;
+                        ll8 -= if y { (p8 as f64).ln() } else { (1.0 - p8 as f64).ln() };
+                        ll16 -= if y { (p16 as f64).ln() } else { (1.0 - p16 as f64).ln() };
+                        n_frames += 1;
+                        for (tab, cell) in [(&mut t8, c8), (&mut t16, c16)] {
+                            tab[cell].0 *= 0.995;
+                            tab[cell].1 *= 0.995;
+                            tab[cell].1 += 1.0;
+                            if y {
+                                tab[cell].0 += 1.0;
+                            }
+                        }
+                    }
+                    if lateral && straight_legal {
+                        gap = 0;
+                    } else {
+                        gap = gap.saturating_add(1);
+                    }
+                }
+            }
+        }
+        println!(
+            "\n== KATA-2 GATE: gap resolution (prequential log-loss, lower=better) ==\n  8-bucket: {:.4}/frame  16-bucket: {:.4}/frame  over {} eligible frames",
+            ll8 / n_frames as f64,
+            ll16 / n_frames as f64,
+            n_frames
+        );
+    }
+
     // ---- Epistemic thinness over the learned hazard cells ----
     let b = &game.cpu_brain.class_books;
     let mut populated = 0;
