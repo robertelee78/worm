@@ -245,8 +245,13 @@ impl LightCycle {
     }
 }
 
-/// Current arena geometry version for NEW rounds.
-pub const ARENA_VERSION: u8 = 2;
+/// Current WORLD-RULES version for NEW rounds (recorded per round; replays
+/// pin theirs). v1: original geometry. v2: the corridor turns the corners.
+/// v3: projectiles resolve BEFORE the worms move each frame — a bolt you
+/// fired is ahead of you and lands before your body arrives (owner
+/// incident 2026-08-07: a tri-shot that should have killed the CPU was
+/// pre-empted by the firer's own collision and mis-reported as a ram).
+pub const ARENA_VERSION: u8 = 3;
 
 pub struct WormGame {
     /// Arena geometry this game builds (replays pin their recorded one).
@@ -870,6 +875,19 @@ impl WormGame {
 
         self.frame_count += 1;
         self.time += 1;
+
+        // WORLD v3: in-flight bolts get their step FIRST. They were fired
+        // in the past and travel ahead of the worm that fired them; under
+        // v1/v2 ordering they stepped at frame END, so a firer chasing
+        // their own bolt could ram the target and die before the bolt's
+        // kill resolved. Replayed v1/v2 ghosts keep the old order (the
+        // frame-end call below is version-gated the other way).
+        if self.arena_version >= 3 {
+            self.advance_projectiles();
+            if self.game_over {
+                return false;
+            }
+        }
 
         // Consume last frame's forecast into a fresh transaction before any
         // lethal early return. A frame can therefore expose a scored forecast
@@ -1896,8 +1914,12 @@ impl WormGame {
         self.cycles[1].snapshot_direction();
 
 
-        // Live projectiles and planted bombs (can end the game).
-        self.advance_projectiles();
+        // Live projectiles and planted bombs (can end the game). Under
+        // world v3 the projectile step already happened at frame START;
+        // stepping again here would double their speed.
+        if self.arena_version < 3 {
+            self.advance_projectiles();
+        }
         self.tick_bombs();
         if self.game_over {
             return false;

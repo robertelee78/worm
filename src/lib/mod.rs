@@ -15,4 +15,4 @@ pub use cpu_ai::{
     ForecastTrace, PlayerAggregate, PlayerBrain, PlayerEpisode, PlayerProjection, Recalled,
     ScoredForecast,
 };
-pub use game::{CellType, Direction, LightCycle, Particle, WormGame, FRAME_DELAY_MS};
+pub use game::{CellType, DeathCause, Direction, LightCycle, Particle, Projectile, WormGame, FRAME_DELAY_MS};

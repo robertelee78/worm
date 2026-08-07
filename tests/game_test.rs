@@ -2548,3 +2548,39 @@ fn the_corridor_turns_the_corners_and_replays_keep_their_arena() {
     assert_eq!(old.grid[2][1], CellType::Wall, "v1: wall end crosses corridor");
     assert_eq!(old.grid[1][2], CellType::Wall, "v1: wall end crosses corridor");
 }
+
+/// World v3 (owner incident): a bolt in flight resolves BEFORE the worms
+/// move. The firer chasing their own tri-shot bolt into the CPU must win
+/// by the bolt — not die ramming the target the bolt was about to kill.
+#[test]
+fn a_bolt_ahead_of_its_firer_kills_first() {
+    let mut game = worm::WormGame::with_size_seed(40, 30, 3);
+    // Place the duel by hand: CPU head at (20,10); player right behind a
+    // bolt that is one cell from the CPU.
+    let cpu_head = (20u16, 10u16);
+    game.cycles[1].head = cpu_head;
+    game.cycles[1].positions = vec![cpu_head].into();
+    game.grid[10][20] = worm::CellType::CPU;
+    game.cycles[1].direction = worm::Direction::Right;
+    let player_head = (18u16, 10u16);
+    game.cycles[0].head = player_head;
+    game.cycles[0].positions = vec![player_head].into();
+    game.grid[10][18] = worm::CellType::Player;
+    game.cycles[0].direction = worm::Direction::Right;
+    game.projectiles.push(worm::Projectile {
+        x: 19,
+        y: 10,
+        dx: 1,
+        dy: 0,
+        from: 0,
+        steps_left: 10,
+    });
+    game.update();
+    assert_eq!(
+        game.death_cause,
+        Some(worm::DeathCause::TriShotBolt),
+        "the bolt must land before the body"
+    );
+    assert_eq!(game.winner, Some(0), "the firer wins by the bolt");
+    assert!(game.cycles[0].alive, "the firer never reaches the corpse");
+}
