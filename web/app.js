@@ -4,14 +4,14 @@
 // The ?v= must match BUILD below (and index.html's) — an unversioned glue
 // import could pair a cached old worm.js with a fresh wasm on the next
 // rebuild that changes the bindings.
-import init, { WasmGame } from './pkg/worm.js?v=20';
+import init, { WasmGame } from './pkg/worm.js?v=21';
 import { Sfx } from './audio.js';
 import { computeBoardLayout, VIEWPORT_BLOCK_GUTTER } from './layout.js';
 
 let CELL = 14; // recomputed by applyBoardLayout() to fit the measured stage
 // Bump together with the ?v= in index.html whenever the wasm bundle is
 // rebuilt — it keys the cache-busting query on the .wasm fetch.
-const BUILD = 20;
+const BUILD = 21;
 const MATCH_TARGET = 3;
 const STATE_SCHEMA_VERSION = 2;
 const ROUND_SCHEMA_VERSION = 1;
@@ -1161,6 +1161,81 @@ if (window.visualViewport) {
 
 /* ---------------- render ---------------- */
 
+// Fixed constellation of streak seeds so the field is stable frame-to-
+// frame (only phase animates) — flicker reads as noise, flow reads as
+// SPEED.
+const SLIP_STREAKS = Array.from({ length: 64 }, (_, i) => ({
+  angle: (i / 64) * Math.PI * 2 + (Math.sin(i * 12.9898) * 43758.5453) % 0.09,
+  speed: 0.6 + ((i * 7919) % 100) / 100 * 1.4,
+  jitter: ((i * 104729) % 100) / 100,
+}));
+
+function drawSlipstreamFx(s) {
+  const [hx, hy] = s.cycles[0].head;
+  const cx = hx * CELL + CELL / 2;
+  const cy = hy * CELL + CELL / 2;
+  const W = s.w * CELL, H = s.h * CELL;
+  const t = performance.now() / 1000;
+  const maxR = Math.hypot(W, H);
+
+  offCtx.save();
+  offCtx.globalCompositeOperation = 'lighter';
+
+  // Hyperspace streaks: each runs OUTWARD from the worm; phase cycles so
+  // they continuously tear past. Length grows with radius (near-field
+  // short, far-field long) — the classic light-speed starfield.
+  for (const sk of SLIP_STREAKS) {
+    const phase = (t * sk.speed + sk.jitter) % 1;
+    const r0 = 18 + phase * maxR * 0.75;
+    const len = 6 + phase * phase * 90;
+    const x0 = cx + Math.cos(sk.angle) * r0;
+    const y0 = cy + Math.sin(sk.angle) * r0;
+    const x1 = cx + Math.cos(sk.angle) * (r0 + len);
+    const y1 = cy + Math.sin(sk.angle) * (r0 + len);
+    const a = (1 - phase) * 0.5;
+    const grad = offCtx.createLinearGradient(x0, y0, x1, y1);
+    grad.addColorStop(0, `rgba(160, 255, 235, 0)`);
+    grad.addColorStop(0.5, `rgba(120, 255, 220, ${a})`);
+    grad.addColorStop(1, `rgba(255, 255, 255, ${a * 0.9})`);
+    offCtx.strokeStyle = grad;
+    offCtx.lineWidth = 1 + phase * 1.6;
+    offCtx.beginPath();
+    offCtx.moveTo(x0, y0);
+    offCtx.lineTo(x1, y1);
+    offCtx.stroke();
+  }
+
+  // Chromatic warp rings: three expanding circles, RGB-split by a few
+  // pixels — the lensing shimmer.
+  for (let ring = 0; ring < 3; ring++) {
+    const phase = ((t * 0.9) + ring / 3) % 1;
+    const r = 12 + phase * 130;
+    const a = (1 - phase) * 0.35;
+    const chans = [
+      [255, 80, 120, -2],
+      [120, 255, 190, 0],
+      [110, 160, 255, 2],
+    ];
+    for (const [cr, cg, cb, off] of chans) {
+      offCtx.strokeStyle = `rgba(${cr}, ${cg}, ${cb}, ${a})`;
+      offCtx.lineWidth = 1.5;
+      offCtx.beginPath();
+      offCtx.arc(cx + off, cy, Math.max(1, r + off), 0, Math.PI * 2);
+      offCtx.stroke();
+    }
+  }
+
+  offCtx.globalCompositeOperation = 'source-over';
+  // Focus vignette: the world beyond your bubble dims — you are the
+  // still point the light bends around.
+  const vg = offCtx.createRadialGradient(cx, cy, 40, cx, cy, maxR * 0.7);
+  vg.addColorStop(0, 'rgba(0, 12, 10, 0)');
+  vg.addColorStop(1, 'rgba(0, 12, 10, 0.45)');
+  offCtx.fillStyle = vg;
+  offCtx.fillRect(0, 0, W, H);
+  offCtx.restore();
+}
+
 function render(s) {
   const g = game.grid();
   const w = s.w, h = s.h;
@@ -1349,6 +1424,13 @@ function render(s) {
     offCtx.fillRect(px * CELL - 1, py * CELL - 1, 3, 3);
   }
   offCtx.globalCompositeOperation = 'source-over';
+
+  // SLIPSTREAM FX — light-speed distortion anchored on YOUR worm:
+  // hyperspace streaks tearing outward, chromatic warp rings, and a
+  // focus vignette. Additive, time-animated, all on the game canvas.
+  if (s.slipstream && s.cycles && s.cycles[0] && s.cycles[0].alive) {
+    drawSlipstreamFx(s);
+  }
 
   // present: crisp pass + phosphor bloom
   ctx.clearRect(0, 0, canvas.width, canvas.height);

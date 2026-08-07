@@ -251,7 +251,11 @@ impl LightCycle {
 /// fired is ahead of you and lands before your body arrives (owner
 /// incident 2026-08-07: a tri-shot that should have killed the CPU was
 /// pre-empted by the firer's own collision and mis-reported as a ram).
-pub const ARENA_VERSION: u8 = 3;
+/// v4: SLIPSTREAM is asymmetric SIMULATION time (owner spec): a worm out
+/// in the ring-1 corridor steps only 1 frame in 16 while the world clock
+/// runs 4× — corridor worm ≈ 25% of original speed, arena worm ≈ 4×.
+/// Projectiles ride the fast clock (light does not slow down).
+pub const ARENA_VERSION: u8 = 4;
 
 pub struct WormGame {
     /// Arena geometry this game builds (replays pin their recorded one).
@@ -929,12 +933,28 @@ impl WormGame {
             }
         }
 
+        // SLIPSTREAM (world v4): a worm whose head is out in the corridor
+        // steps only when frame_count % 16 == 0 — on all other frames it
+        // is FROZEN: no movement, no tail retract, no collisions of its
+        // own making, no decisions, no learning about it (a frozen frame
+        // is not a choice). The other worm plays at full rate. Solid
+        // while frozen: it can still be hit, shot, and sealed in.
+        let slip_hold = self.arena_version >= 4 && self.frame_count % 16 != 0;
+        let player_frozen = slip_hold && self.cycle_in_corridor(self.player);
+        let cpu_frozen = slip_hold && self.cycle_in_corridor(1);
+
         // Consume last frame's forecast into a fresh transaction before any
         // lethal early return. A frame can therefore expose a scored forecast
         // without a CPU decision, or a decision without a next forecast, but
         // never stale fields from a different frame.
         let incoming_forecast = self.cpu_telemetry.next_forecast.take();
         self.cpu_telemetry = crate::cpu_ai::CpuFrameTelemetry::for_frame(self.frame_count);
+        // A frozen player makes no move this frame: the pending forecast is
+        // neither scored nor discarded — it stays sealed for their next
+        // MOVING frame (slipstream, world v4).
+        if player_frozen {
+            self.cpu_telemetry.next_forecast = incoming_forecast;
+        }
 
         // (The old `difficulty = time/300 + 1` clock ramp lived here. It was
         // read nowhere, and an arbitrary timer is the opposite of what the
@@ -982,7 +1002,10 @@ impl WormGame {
 
         // Last frame's forecasts targeted this input, even when this move is
         // lethal. Score them before collision early-returns can end the game.
-        if self.cpu_autopilot || self.shadow_learning {
+        // A FROZEN frame is not a decision: nothing scores, nothing observes
+        // (slipstream would otherwise pollute the read with phantom
+        // straights).
+        if (self.cpu_autopilot || self.shadow_learning) && !player_frozen {
             // The choice the player actually faced this frame, read before
             // anything moves. `prev_direction` is the heading they were
             // travelling, so the turn is relative to that — the same anchor
@@ -1232,7 +1255,7 @@ impl WormGame {
         // this snake's own marker — after a blast trims the trail, or when the
         // opponent has legally entered a just-vacated cell, a stale pop must
         // not wipe a cell someone else now occupies.
-        {
+        if !player_frozen {
             let cycle = &mut self.cycles[self.player];
             if cycle.positions.len() > 1 && cycle.pending_growth == 0 {
                 let tail = cycle.positions.pop().unwrap();
@@ -1242,8 +1265,11 @@ impl WormGame {
             }
         }
 
-        // Pre-compute new positions for both cycles (immutable borrows)
-        let (player_new, player_crashed) = {
+        // Pre-compute new positions for both cycles (immutable borrows).
+        // A slipstream-frozen player holds position: no move, no collision.
+        let (player_new, player_crashed) = if player_frozen {
+            (self.cycles[self.player].head, false)
+        } else {
             let cycle = &self.cycles[self.player];
             let (dx, dy) = cycle.direction.as_delta();
             let new_x = (cycle.head.0 as i16 + dx)
@@ -1412,7 +1438,7 @@ impl WormGame {
         }
 
         // Move player head (grow by the food value eaten)
-        {
+        if !player_frozen {
             let cycle = &mut self.cycles[self.player];
             cycle.head = player_new;
             cycle.positions.insert(0, player_new);
@@ -1454,7 +1480,7 @@ impl WormGame {
         // about-to-vacate tail tip as an illegal move. Own-marker guard, same
         // as the player's retraction: the player may have legally entered
         // this cell already.
-        {
+        if !cpu_frozen {
             let cycle = &mut self.cycles[1];
             if cycle.positions.len() > 1 && cycle.pending_growth == 0 {
                 let tail = cycle.positions.pop().unwrap();
@@ -1679,7 +1705,10 @@ impl WormGame {
                 || self.grid[ny as usize][nx as usize] == CellType::Wall;
             !wall_ahead && !crate::cpu_ai::ring_doomed_step(self, cy.head, cy.direction)
         };
-        let cpu_dir = if self.cpu_autopilot && cpu_dozing {
+        let cpu_dir = if cpu_frozen {
+            // Slipstream-frozen: no decision, no discharge — held heading.
+            self.cycles[1].direction
+        } else if self.cpu_autopilot && cpu_dozing {
             // Attention lapse: hold the heading, no decisions, no firing.
             self.cycles[1].direction
         } else if self.cpu_autopilot {
@@ -1809,8 +1838,11 @@ impl WormGame {
             self.cycles[1].direction
         };
 
-        // Recompute CPU position after AI decision
-        let (cpu_new, cpu_crashed) = {
+        // Recompute CPU position after AI decision. Slipstream-frozen:
+        // holds position, no collision of its own making.
+        let (cpu_new, cpu_crashed) = if cpu_frozen {
+            (self.cycles[1].head, false)
+        } else {
             let cycle = &self.cycles[1];
             let (dx, dy) = cycle.direction.as_delta();
             let new_x = (cycle.head.0 as i16 + dx)
@@ -1898,7 +1930,7 @@ impl WormGame {
         }
 
         // Move CPU head (grow by the food value eaten)
-        {
+        if !cpu_frozen {
             let cycle = &mut self.cycles[1];
             cycle.head = cpu_new;
             cycle.positions.insert(0, cpu_new);
@@ -2391,15 +2423,19 @@ impl WormGame {
         self.generate_food_items();
     }
 
-    /// Is the PLAYER's head out in the ring-1 corridor (or standing in a
-    /// punched hole)? Drives SLIPSTREAM time (below).
-    pub fn player_in_corridor(&self) -> bool {
+    /// Is this cycle's head out in the ring-1 corridor (or standing in a
+    /// punched hole)? Drives SLIPSTREAM time.
+    pub fn cycle_in_corridor(&self, idx: usize) -> bool {
         if !self.has_corridor() {
             return false;
         }
-        let (x, y) = self.cycles[self.player].head;
+        let (x, y) = self.cycles[idx].head;
         let ring1 = x == 1 || y == 1 || x == self.width - 2 || y == self.height - 2;
         ring1 || self.grid[y as usize][x as usize] == CellType::Hole
+    }
+
+    pub fn player_in_corridor(&self) -> bool {
+        self.cycle_in_corridor(self.player)
     }
 
     pub fn frame_delay(&self) -> Duration {
@@ -2408,15 +2444,14 @@ impl WormGame {
         // 35ms floor — proportional to the size of the food, not the clock.
         let speedup = (self.food_eaten_total as u64 / 2).min(80);
         let base = 115u64.saturating_sub(speedup).max(35);
-        // SLIPSTREAM (owner request): the outer corridor runs at half time.
-        // The holes are one cell wide and the corridor one lane — at full
-        // speed it was a death sentence; in the slipstream the WHOLE WORLD
-        // slows (both worms, same clock — symmetric physics, board
-        // knowledge), so threading back in through a punched hole becomes
-        // a play instead of a prayer. Pure wall-clock pacing: simulation
-        // and replays are frame-indexed and unaffected.
-        if self.player_in_corridor() {
-            Duration::from_millis(base * 2)
+        // SLIPSTREAM v2 (owner spec): while anyone is out in the corridor
+        // the WORLD CLOCK runs 4× — combined with the corridor worm's
+        // 1-in-16 stepping (see update()) that lands the spec exactly:
+        // corridor worm 25% of original, arena worm 4×.
+        let slip = (self.cycles[0].alive && self.cycle_in_corridor(0))
+            || (self.cycles[1].alive && self.cycle_in_corridor(1));
+        if slip {
+            Duration::from_millis((base / 4).max(9))
         } else {
             Duration::from_millis(base)
         }

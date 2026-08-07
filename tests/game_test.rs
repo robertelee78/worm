@@ -37,12 +37,14 @@ fn test_food_collection_increases_score() {
 #[test]
 fn test_wall_collision() {
     let mut game = WormGame::with_size(120, 38);
-    let head = (1, game.height / 2);
+    // Mid-arena (x=1 is now the slipstream corridor — a worm there
+    // legitimately holds on non-16th frames, world v4).
+    let head = (10, game.height / 2);
     game.cycles[0].head = head;
     game.cycles[0].positions.clear();
     game.cycles[0].positions.push(head);
     game.cycles[0].direction = worm::Direction::Left;
-    game.grid[head.1 as usize][1] = worm::CellType::Wall;
+    game.grid[head.1 as usize][9] = worm::CellType::Wall;
     game.update();
     assert!(game.game_over);
 }
@@ -934,12 +936,12 @@ fn test_cpu_dodges_head_on() {
 #[test]
 fn test_death_cause_wall_vs_bomb() {
     let mut game = WormGame::with_size(120, 38);
-    let head = (1, game.height / 2);
+    let head = (10, game.height / 2);
     game.cycles[0].head = head;
     game.cycles[0].positions.clear();
     game.cycles[0].positions.push(head);
     game.cycles[0].direction = worm::Direction::Left;
-    game.grid[game.cycles[0].head.1 as usize][1] = worm::CellType::Wall;
+    game.grid[game.cycles[0].head.1 as usize][9] = worm::CellType::Wall;
     game.update();
     assert_eq!(game.death_cause, Some(worm::game::DeathCause::Wall));
 
@@ -2609,15 +2611,41 @@ fn the_last_round_of_a_session_is_not_lost() {
     assert_eq!(game.cpu_brain.ledgers.loss_causes[0].1, 1, "restart consumes, not doubles");
 }
 
-/// SLIPSTREAM (owner request): the outer corridor runs at half time —
-/// the whole world clock, symmetric for both worms — and only while the
-/// player is actually out there.
+/// SLIPSTREAM v2 (owner spec, world v4): time is ASYMMETRIC. The worm out
+/// in the corridor steps 1 frame in 16 while the world clock runs 4× —
+/// corridor ≈ 25% of original speed, arena worm ≈ 4×. The frozen worm
+/// makes no move, no collision, and generates no learning frames.
 #[test]
-fn the_corridor_runs_at_half_time() {
+fn the_corridor_worm_slips_while_the_arena_worm_flies() {
     let mut game = worm::WormGame::with_size_seed(40, 30, 5);
-    let base = game.frame_delay().as_millis();
-    game.cycles[0].head = (1, 5); // ring-1 corridor
-    assert_eq!(game.frame_delay().as_millis(), base * 2, "slipstream engaged");
-    game.cycles[0].head = (10, 10); // back inside the arena
-    assert_eq!(game.frame_delay().as_millis(), base, "normal time inside");
+    game.cpu_autopilot = false; // scripted CPU: holds heading, still moves
+    let base_inside = game.frame_delay().as_millis();
+
+    // Player out in the corridor lane, CPU mid-arena, both heading right
+    // along clear lanes.
+    game.cycles[0].head = (5, 1);
+    game.cycles[0].positions = vec![(5, 1)].into();
+    game.grid[1][5] = worm::CellType::Player;
+    game.cycles[0].direction = worm::Direction::Right;
+    game.cycles[1].head = (5, 15);
+    game.cycles[1].positions = vec![(5, 15)].into();
+    game.grid[15][5] = worm::CellType::CPU;
+    game.cycles[1].direction = worm::Direction::Right;
+
+    assert_eq!(
+        game.frame_delay().as_millis(),
+        (base_inside / 4).max(9),
+        "world clock runs 4x while someone is in the corridor"
+    );
+
+    let p0 = game.cycles[0].head.0;
+    let c0 = game.cycles[1].head.0;
+    for _ in 0..16 {
+        game.update();
+        assert!(!game.game_over);
+    }
+    let p_moved = game.cycles[0].head.0 - p0;
+    let c_moved = game.cycles[1].head.0 - c0;
+    assert_eq!(c_moved, 16, "the arena worm moves every frame");
+    assert_eq!(p_moved, 1, "the corridor worm moves once per 16");
 }
