@@ -77,6 +77,11 @@ struct BrainState {
     accuracy: AccuracyScopes,
     /// The honest metric: read rate against the player's OWN base rate.
     read_rate: ReadRateScopes,
+    /// Where the earned difficulty actually comes from (ADR-020): the
+    /// published forecast's channels, or the turn book's precommitted
+    /// side calls. The HUD must never imply "forecast performance" when
+    /// the evidence is the book's (codex round 3 note).
+    book: BookState,
     /// How well the CPU reads this player, in [0,1], and the HUD tier it buys.
     read_lift: f32,
     difficulty: u32,
@@ -133,6 +138,20 @@ impl From<&crate::cpu_ai::ReadRate> for ReadRateState {
             uniform_chance: g(r.uniform_chance()),
         }
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BookState {
+    /// The book's side accuracy on your genuine two-sided turns (None
+    /// until it has events).
+    side_accuracy: Option<f32>,
+    side_events: u32,
+    coverage: f32,
+    /// The round-boundary earned read difficulty is spending, and which
+    /// family half it came from.
+    earned: f32,
+    earned_source: &'static str,
 }
 
 #[derive(Serialize)]
@@ -380,6 +399,25 @@ impl GameState {
                 decision: game.cpu_telemetry.decision.clone().map(Into::into),
                 last_decision: game.round_last_cpu_decision.clone().map(Into::into),
                 next_forecast: game.cpu_telemetry.next_forecast.map(Into::into),
+                book: {
+                    let b = &game.cpu_brain.class_books;
+                    let published = game.cpu_brain.lifetime_read.earned_read();
+                    let book = b.spendable();
+                    let earned = game.cpu_brain.earned_snapshot;
+                    BookState {
+                        side_accuracy: if b.turn_events > 0 { Some(b.a_turn()) } else { None },
+                        side_events: b.turn_events,
+                        coverage: b.coverage(),
+                        earned,
+                        earned_source: if earned <= 0.0 {
+                            "none"
+                        } else if book >= published {
+                            "book"
+                        } else {
+                            "forecast"
+                        },
+                    }
+                },
                 read_rate: ReadRateScopes {
                     round: (&game.round_read).into(),
                     lifetime: (&game.cpu_brain.lifetime_read).into(),

@@ -4,14 +4,14 @@
 // The ?v= must match BUILD below (and index.html's) — an unversioned glue
 // import could pair a cached old worm.js with a fresh wasm on the next
 // rebuild that changes the bindings.
-import init, { WasmGame } from './pkg/worm.js?v=18';
+import init, { WasmGame } from './pkg/worm.js?v=19';
 import { Sfx } from './audio.js';
 import { computeBoardLayout, VIEWPORT_BLOCK_GUTTER } from './layout.js';
 
 let CELL = 14; // recomputed by applyBoardLayout() to fit the measured stage
 // Bump together with the ?v= in index.html whenever the wasm bundle is
 // rebuilt — it keys the cache-busting query on the .wasm fetch.
-const BUILD = 18;
+const BUILD = 19;
 const MATCH_TARGET = 3;
 const STATE_SCHEMA_VERSION = 2;
 const ROUND_SCHEMA_VERSION = 1;
@@ -920,12 +920,23 @@ function hud(s) {
     chanceEl.classList.add('hidden');
   }
 
+  // The earned-evidence line names its SOURCE: difficulty may be funded by
+  // the published forecast's channels OR by the turn book's precommitted
+  // side calls — claiming "forecast performance" when the book earned it
+  // would be a small lie in the one panel whose job is being believed.
+  const bk = b.book || {};
+  const earnedBits = bk.earned > 0
+    ? ` · earned ${(bk.earned * 100).toFixed(0)}% via ${bk.earnedSource === 'book'
+        ? `its turn book (${(bk.sideAccuracy * 100).toFixed(0)}% on your real turns)`
+        : 'its published forecasts'}`
+    : '';
   document.getElementById('bp-lifetime').textContent =
     !life.ready
-      ? `Lifetime — reading you, ${life.discordant}/${life.minDiscordant} disagreements`
+      ? `Lifetime — reading you, ${life.discordant}/${life.minDiscordant} disagreements` + earnedBits
       : `Lifetime ${(life.rate * 100).toFixed(0)}% vs usual ${(life.baseRate * 100).toFixed(0)}%` +
         ` · lift ${(life.lift * 100).toFixed(0)}% · tier ${b.difficulty}` +
-        (life.significant ? ` (1 in ${Math.max(1, Math.round(1 / Math.max(life.pValue, 1e-9)))} this is luck)` : '');
+        (life.significant ? ` (1 in ${Math.max(1, Math.round(1 / Math.max(life.pValue, 1e-9)))} this is luck)` : '') +
+        earnedBits;
 
   // PLAIN-ENGLISH EXPLAINER. Every line cites a LIVE number — an explainer
   // full of static prose is marketing, not explanation.
@@ -1013,6 +1024,13 @@ function roundRecord(s) {
     decisionHeading: decision?.heading ?? null,
     memoryDelta: Math.max(0, s.brain.memory.opponentObserved -
       (roundMemoryStart ?? s.brain.memory.opponentObserved)),
+    book: s.brain.book ? {
+      sideAccuracy: Number.isFinite(s.brain.book.sideAccuracy) ? s.brain.book.sideAccuracy : null,
+      sideEvents: s.brain.book.sideEvents ?? 0,
+      coverage: s.brain.book.coverage ?? 0,
+      earned: s.brain.book.earned ?? 0,
+      earnedSource: s.brain.book.earnedSource ?? 'none',
+    } : null,
     models: s.brain.models.map((model) => ({
       key: model.key,
       name: model.name,

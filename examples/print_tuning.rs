@@ -6,7 +6,7 @@
 fn main() {
     let t = worm::tuning::tuning();
     println!(
-        "{{\"ESCAPE_MULTIPLE\":{},\"ESCAPE_MARGIN\":{},\"HUNT_SPEND\":{},\"HUNT_CURVE\":{},\"CORNER_GATE\":{},\"DIRECT_GATE\":{},\"ETA_FAST\":{},\"ETA_SLOW\":{},\"SHARE_FAST\":{},\"SHARE_SLOW\":{},\"KNN_BONUS\":{}}}",
+        "{{\"ESCAPE_MULTIPLE\":{},\"ESCAPE_MARGIN\":{},\"HUNT_SPEND\":{},\"HUNT_CURVE\":{},\"CORNER_GATE\":{},\"DIRECT_GATE\":{},\"ETA_FAST\":{},\"ETA_SLOW\":{},\"SHARE_FAST\":{},\"SHARE_SLOW\":{},\"KNN_BONUS\":{},\"DISCIPLINE_FLOOR\":{},\"BOLD_SPEND\":{},\"BOLD_DRIVE\":{},\"OPEN_LATENCY\":{},\"BOOK_BEND\":{},\"BOOK_SPEND\":{}}}",
         t.escape_multiple,
         t.escape_margin,
         t.hunt_spend,
@@ -18,5 +18,11 @@ fn main() {
         t.share_fast,
         t.share_slow,
         t.knn_bonus,
+        t.discipline_floor,
+        t.bold_spend,
+        t.bold_drive,
+        t.open_latency,
+        t.book_bend,
+        t.book_spend,
     );
 }

@@ -40,7 +40,13 @@ KNOB_NAMES = [
     "ESCAPE_MULTIPLE", "ESCAPE_MARGIN", "HUNT_SPEND", "HUNT_CURVE",
     "CORNER_GATE", "DIRECT_GATE", "ETA_FAST", "ETA_SLOW",
     "SHARE_FAST", "SHARE_SLOW", "KNN_BONUS",
+    # ADR-018 opening knobs — the ADR always claimed these were in the
+    # search space; as of 2026-08-06 they actually are.
+    "DISCIPLINE_FLOOR", "BOLD_SPEND", "BOLD_DRIVE", "OPEN_LATENCY",
+    # ADR-020 attribution switches — binary, mutated by flipping.
+    "BOOK_BEND", "BOOK_SPEND",
 ]
+BINARY_KNOBS = {"BOOK_BEND", "BOOK_SPEND"}
 
 
 def champion_defaults():
@@ -59,6 +65,11 @@ def make_knobs(seed):
     knobs = {}
     for name in KNOB_NAMES:
         d = defaults[name]
+        if name in BINARY_KNOBS:
+            # A switch mutates by flipping, not by scaling (0 x anything
+            # is 0 forever).
+            knobs[name] = (d, [1.0 - round(d)])
+            continue
         lo = round(d * rng.uniform(0.70, 0.92), 4)
         hi = round(d * rng.uniform(1.08, 1.40), 4)
         knobs[name] = (d, [lo, hi])
@@ -88,8 +99,12 @@ def run_gauntlet(env_overrides):
 
 
 def fitness(r):
-    # Wins are the objective; lift is the tiebreaker. ADR-009 is a hard gate.
-    if r["warm"]["win"] < r["cold"]["win"]:
+    # Wins are the objective; lift is the tiebreaker. The ADR-009 gate is
+    # the NON-INFERIORITY margin from tests/domination.rs (ADR-020: under
+    # honest evidence warm arms spend their opening earning the read, so
+    # a strict warm >= cold disqualified the committed champion itself
+    # and crashed every nightly sweep on `fit > None`).
+    if r["warm"]["win"] < r["cold"]["win"] - 5:
         return None
     return (r["warm"]["cpu"] + r["habitual"]["cpu"], r["warm"]["lift"])
 
@@ -108,6 +123,9 @@ def main():
     if base is None:
         sys.exit("baseline gauntlet failed to parse — aborting")
     base_fit = fitness(base)
+    if base_fit is None:
+        sys.exit("committed champion fails its own non-inferiority gate — "
+                 "fix the champion before sweeping")
     stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
     receipts.write(f"{stamp},baseline,,,{json.dumps(base)}\n")
     print(f"  warm {base['warm']['win']}% lift {base['warm']['lift']}% · "
@@ -125,7 +143,7 @@ def main():
                 continue
             fit = fitness(r)
             receipts.write(f"{stamp},{knob},{value},{default},{json.dumps(r)}\n")
-            verdict = ("DISQUALIFIED (warm < cold)" if fit is None
+            verdict = ("DISQUALIFIED (beyond non-inferiority margin)" if fit is None
                        else "beats champion" if fit > base_fit
                        else "no improvement")
             print(f"   warm {r['warm']['win']}% lift {r['warm']['lift']}% · "

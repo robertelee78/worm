@@ -76,6 +76,12 @@ def build_prompt(rec):
         "cpuFinalAction": rec.get("decisionReason"),
         "cpuFinalForecastSource": rec.get("decisionSourceName"),
         "playerHabits": habits,
+        # ADR-020: the earned-evidence ledger — which family half funds
+        # the difficulty, and the turn book's side read of the player.
+        "earnedRead": (rec.get("book") or {}).get("earned"),
+        "earnedReadSource": (rec.get("book") or {}).get("earnedSource"),
+        "turnBookSideAccuracy": (rec.get("book") or {}).get("sideAccuracy"),
+        "turnBookSideEvents": (rec.get("book") or {}).get("sideEvents"),
     }
     return (
         "You are the CPU opponent's notebook in a snake/Tron arcade game whose "
@@ -86,8 +92,10 @@ def build_prompt(rec):
         "less rather than guessing. Speak to the player as 'you'. The CPU is "
         "'it'. 90-130 words, plain prose, no lists, no headers. Structure: what "
         "happened, what it learned about you this round (cite 1-3 of the "
-        "numbers), and ONE practical tip for beating it next round based only "
-        "on these measurements. Tone: a rival's notebook — sharp, warm, a "
+        "numbers — if earnedReadSource is 'book', the thing reading you is "
+        "its turn book calling WHICH WAY you swerve, and turnBookSideAccuracy "
+        "is that read; say so plainly), and ONE practical tip for beating it "
+        "next round based only on these measurements. Tone: a rival's notebook — sharp, warm, a "
         "little unnerving.\n\n"
         f"MEASUREMENTS (JSON): {json.dumps(facts, separators=(',', ':'))}"
     )
