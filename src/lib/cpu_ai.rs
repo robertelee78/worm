@@ -5454,6 +5454,58 @@ mod tests {
         assert_eq!(restored.lifetime_read.samples, 40);
         assert_eq!(restored.lifetime_read.hits, 40);
         assert!(!report.is_partial());
+        // The FULL record — lateral channel and latch included — must
+        // survive via SEC_READ_RATE2 (v2 is written after the v1
+        // projection, so it wins on load).
+        assert_eq!(restored.lifetime_read, brain.lifetime_read);
+        assert!(restored.lifetime_read.lat_samples == 40);
+    }
+
+    /// An OLD build reading a NEW save must still recover the core read:
+    /// the v1 projection rides SEC_READ_RATE unchanged, and the widened
+    /// section is skipped by length like any unknown tag. Simulated here by
+    /// stripping SEC_READ_RATE2 from a fresh blob and decoding what
+    /// remains — exactly what the old reader's match arms would keep.
+    #[test]
+    fn v1_projection_preserves_the_core_read_for_old_builds() {
+        let mut brain = CpuBrain::new();
+        for _ in 0..30 {
+            brain.lifetime_read.record(2, Turn::Right, Turn::Right, [true, false, true], true);
+        }
+        let bytes = brain.to_bytes();
+        // Walk the section table (magic u32, count u16, then
+        // [tag u16, len u32, body] repeated) and drop tag 10.
+        let count = u16::from_le_bytes(bytes[6..8].try_into().unwrap());
+        let mut kept: Vec<(u16, &[u8])> = Vec::new();
+        let mut pos = 8usize;
+        for _ in 0..count {
+            let tag = u16::from_le_bytes(bytes[pos..pos + 2].try_into().unwrap());
+            let len =
+                u32::from_le_bytes(bytes[pos + 2..pos + 6].try_into().unwrap()) as usize;
+            let body = &bytes[pos + 6..pos + 6 + len];
+            if tag != SEC_READ_RATE2 {
+                kept.push((tag, body));
+            }
+            pos += 6 + len;
+        }
+        assert!(
+            kept.len() as u16 == count - 1,
+            "the blob must actually contain SEC_READ_RATE2"
+        );
+        let mut older = bytes[..6].to_vec();
+        older.extend_from_slice(&(count - 1).to_le_bytes());
+        for (tag, body) in kept {
+            older.extend_from_slice(&tag.to_le_bytes());
+            older.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            older.extend_from_slice(body);
+        }
+        let (restored, report) = CpuBrain::from_bytes_report(&older).unwrap();
+        assert!(!report.is_partial());
+        assert_eq!(restored.lifetime_read.samples, 30);
+        assert_eq!(restored.lifetime_read.hits, 30);
+        // The widened fields are honestly zero — never garbage.
+        assert_eq!(restored.lifetime_read.lat_samples, 0);
+        assert!(!restored.lifetime_read.lat_latched);
     }
 
     /// A blob written before the read-rate section existed must still restore
@@ -5464,10 +5516,13 @@ mod tests {
         brain.opp_pred_hits = 5;
         brain.opp_pred_total = 9;
         let bytes = brain.to_bytes();
-        // Drop the trailing section by rewriting the section count.
+        // Drop the trailing section by rewriting the section count. The
+        // header is magic(4) + format u16 + count u16 — an earlier version
+        // of this test edited offset 4..6, the FORMAT field, and therefore
+        // dropped nothing.
         let mut older = bytes.clone();
-        let count = u16::from_le_bytes(older[4..6].try_into().unwrap());
-        older[4..6].copy_from_slice(&(count - 1).to_le_bytes());
+        let count = u16::from_le_bytes(older[6..8].try_into().unwrap());
+        older[6..8].copy_from_slice(&(count - 1).to_le_bytes());
 
         let (restored, report) = CpuBrain::from_bytes_report(&older).unwrap();
         assert!(report.ensemble_kept);
