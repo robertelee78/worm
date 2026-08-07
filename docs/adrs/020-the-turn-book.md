@@ -252,10 +252,10 @@ blockers", both resolved):
 
 1. **The evidence family** (the codex blocker): every channel —
    published McNemar, published lateral, book McNemar, book lateral —
-   is tested ONLY at geometric looks n ∈ {20, 40, 80, …}, spending
+   is tested ONLY at geometric looks (ratio 1.4: n ∈ {20, 28, 40, 56, 79, …}), spending
    α_k = (α/4)·6/(π²k²) per look with exact Hoeffding crossing bounds
    (both null statistics are fair-coin sums with exact variance n/4),
-   union-bounded to a PROVED family-wise α = 0.001 — no asymptotics,
+   union-bounded to a PROVED family-wise α = 0.005 (power analysis documented at the constant: the reference 85:15 habit must clear the n=40 look) — no asymptotics,
    no normal approximation, finitely many looks (the first cut's
    LIL-shaped bound was verification-rejected as shorthand, not
    theorem). Schmitt latches hold between looks; every spend is an
