@@ -61,7 +61,13 @@ fn escape_floor_cells(game: &WormGame, who: usize) -> f32 {
         // knows you it plays reckless; reading you makes it careful."
         let discipline =
             t.discipline_floor + (1.0 - t.discipline_floor) * game.discipline_sharpness();
-        (own_len * t.escape_multiple + t.escape_margin) * discipline
+        // ADR-021 Kata 1: a player who keeps killing the CPU with box-ins
+        // earns a bigger escape floor against them — floors only rise
+        // (max +50%), the doze's discipline scaling still applies (this
+        // does not wake the opening), and a player who never chases
+        // leaves it at exactly 1.0.
+        let aversion = 1.0 + game.cpu_brain.ledgers.boxer_aversion();
+        (own_len * t.escape_multiple + t.escape_margin) * discipline * aversion
     }
 }
 
@@ -1669,6 +1675,24 @@ impl LearningLedgers {
                 e.4 = e.4.saturating_add(1);
             }
         }
+    }
+
+    /// Surface #5's consumer (ADR-021 Kata 1): how much extra escape
+    /// margin THIS player's kill record has earned. Self-knowledge class
+    /// under the agreed envelope — it can only RAISE a defensive floor
+    /// (aversion ≥ 0, hard cap), so it structurally cannot manufacture
+    /// aggression and needs no evidence gate. Chase-gated: only deaths
+    /// where the player was actually ON the CPU (within 8 cells in the
+    /// final 10 frames) count — learning "fear all trails" from wandering
+    /// into old ones is nearly free early and ruinous late (k3).
+    pub fn boxer_aversion(&self) -> f32 {
+        let chased_trail = self
+            .loss_causes
+            .iter()
+            .find(|e| e.0 == crate::game::DeathCause::EnemyTrail as u8)
+            .map(|e| e.2)
+            .unwrap_or(0);
+        (0.06 * chased_trail as f32).min(0.5)
     }
 
     pub fn note_cpu_death(&mut self, cause_id: u8) {
@@ -6515,6 +6539,42 @@ mod tests {
         let expected = (10.0 * 0.5 + 10.0 / 3.0) / 20.0;
         assert!((r.uniform_chance() - expected).abs() < 1e-5);
         assert!(r.uniform_chance() > 0.25, "never the old 25% claim");
+    }
+
+    /// Kata 1 (#5): the boxer aversion — floors only rise, chase-gated,
+    /// hard-capped, and a player who never chases earns exactly zero.
+    #[test]
+    fn boxer_aversion_rises_only_on_chased_trail_deaths() {
+        let mut l = LearningLedgers::default();
+        assert_eq!(l.boxer_aversion(), 0.0);
+        // Unchased trail deaths (wandered into an old trail): no aversion.
+        l.loss_causes.push((crate::game::DeathCause::EnemyTrail as u8, 5, 0));
+        assert_eq!(l.boxer_aversion(), 0.0);
+        // Chased deaths raise it, capped at +50%.
+        l.loss_causes[0].2 = 3;
+        assert!((l.boxer_aversion() - 0.18).abs() < 1e-6);
+        l.loss_causes[0].2 = 100;
+        assert_eq!(l.boxer_aversion(), 0.5);
+        // Other causes never contribute.
+        let mut l2 = LearningLedgers::default();
+        l2.loss_causes.push((crate::game::DeathCause::Wall as u8, 10, 10));
+        assert_eq!(l2.boxer_aversion(), 0.0);
+    }
+
+    /// The chase flag itself: within 8 cells inside the last 10 frames.
+    #[test]
+    fn the_chase_flag_reads_the_distance_ring() {
+        let mut l = LearningLedgers::default();
+        for _ in 0..10 {
+            l.note_frame(30, None, 0);
+        }
+        l.note_cpu_death(crate::game::DeathCause::EnemyTrail as u8);
+        assert_eq!(l.loss_causes[0].2, 0, "far player: not a chase");
+        for _ in 0..10 {
+            l.note_frame(6, None, 0);
+        }
+        l.note_cpu_death(crate::game::DeathCause::EnemyTrail as u8);
+        assert_eq!(l.loss_causes[0].2, 1, "close player: chased");
     }
 
     /// The derived gate's full lifecycle: hard-closed below maturity,
