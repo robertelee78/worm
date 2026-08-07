@@ -48,6 +48,9 @@ def valid(rec) -> bool:
             and isinstance(h, int) and 10 <= h <= 400
             and isinstance(frames, int) and 0 <= frames <= 100000):
         return False
+    arena = replay.get("arena", 1)
+    if not (isinstance(arena, int) and 1 <= arena <= 8):
+        return False
     ev = replay.get("ev")
     if not isinstance(ev, list) or len(ev) > 20000:
         return False

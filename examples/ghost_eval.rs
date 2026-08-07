@@ -21,6 +21,7 @@ struct Round {
     seed: u64,
     w: u16,
     h: u16,
+    arena: u8,
     winner: Option<usize>,
     events: Vec<(u32, u8, u8)>,
 }
@@ -47,6 +48,11 @@ fn parse_round(rec: &serde_json::Value) -> Result<Round, String> {
         return Err("dimensions/frames out of range".into());
     }
     let (w, h, frames) = (w64 as u16, h64 as u16, frames64 as u32);
+    let arena64 = replay.get("arena").and_then(|v| v.as_u64()).unwrap_or(1);
+    if !(1..=8).contains(&arena64) {
+        return Err("arena version out of range".into());
+    }
+    let arena = arena64 as u8;
     let mut events = Vec::new();
     let mut last_frame = 0u32;
     for ev in replay
@@ -78,6 +84,7 @@ fn parse_round(rec: &serde_json::Value) -> Result<Round, String> {
         seed,
         w,
         h,
+        arena,
         winner: rec.get("winner").and_then(|v| v.as_u64()).map(|w| w as usize),
         events,
     })
@@ -134,7 +141,7 @@ fn main() {
     game.shadow_learning = true;
 
     for (i, r) in rounds.iter().enumerate() {
-        game.start_recorded_round(r.seed, r.w, r.h, r.events.clone());
+        game.start_recorded_round(r.seed, r.w, r.h, r.arena, r.events.clone());
         // <= frames: an event stamped == frames is a between-frame input
         // after the last completed frame (the classic fatal player laser) —
         // update #frames+1's pump is what consumes it. A diverged survivor

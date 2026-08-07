@@ -54,6 +54,7 @@ struct Round {
     seed: u64,
     w: u16,
     h: u16,
+    arena: u8,
     events: Vec<(u32, u8, u8)>,
 }
 
@@ -74,6 +75,7 @@ fn main() {
             seed,
             w: replay["w"].as_u64().unwrap() as u16,
             h: replay["h"].as_u64().unwrap() as u16,
+            arena: replay.get("arena").and_then(|x| x.as_u64()).unwrap_or(1) as u8,
             events: replay["ev"]
                 .as_array()
                 .unwrap()
@@ -116,7 +118,7 @@ fn main() {
     let mut proj_loss_medoid_auth = 0f64;
     let mut proj_windows_auth = 0u32;
     for r in &rounds {
-        game.start_recorded_round(r.seed, r.w, r.h, r.events.clone());
+        game.start_recorded_round(r.seed, r.w, r.h, r.arena, r.events.clone());
         let mut pend: Option<([Option<Direction>; ENSEMBLE_MODELS], Option<Direction>)> = None;
         let mut prev_heading = game.cycles[0].direction;
         let mut prev_legal = worm::legal_options_from(&game, 0, prev_heading);
@@ -226,7 +228,7 @@ fn main() {
     let mut toward_hits = 0u32;
     let mut toward_total = 0u32;
     for r in &rounds {
-        game.start_recorded_round(r.seed, r.w, r.h, r.events.clone());
+        game.start_recorded_round(r.seed, r.w, r.h, r.arena, r.events.clone());
         let mut prev_heading = game.cycles[0].direction;
         let mut prev_aligned: Option<bool> = None;
         let mut prev_food_side: Option<worm::Direction> = None;

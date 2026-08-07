@@ -245,7 +245,12 @@ impl LightCycle {
     }
 }
 
+/// Current arena geometry version for NEW rounds.
+pub const ARENA_VERSION: u8 = 2;
+
 pub struct WormGame {
+    /// Arena geometry this game builds (replays pin their recorded one).
+    pub arena_version: u8,
     pub width: u16,
     pub height: u16,
     pub grid: Vec<Vec<CellType>>,
@@ -410,6 +415,10 @@ pub struct ReplayLog {
     pub round_seed: u64,
     pub width: u16,
     pub height: u16,
+    /// Arena geometry version the round was played on (see `build_grid`).
+    /// Rounds recorded before versioning existed carry no field and
+    /// replay as 1.
+    pub arena: u8,
     /// (frame stamp at the site, kind, value). Between-frame events carry
     /// the last COMPLETED frame; in-update events carry the current one.
     pub events: Vec<(u32, u8, u8)>,
@@ -428,10 +437,11 @@ impl ReplayLog {
         // JSON.parse coerces bare numbers to f64 — seeds above 2^53 came
         // back mangled and the replay diverged.
         format!(
-            "{{\"v\":2,\"seed\":\"{}\",\"w\":{},\"h\":{},\"frames\":{},\"ev\":[{}]}}",
+            "{{\"v\":2,\"seed\":\"{}\",\"w\":{},\"h\":{},\"arena\":{},\"frames\":{},\"ev\":[{}]}}",
             self.round_seed,
             self.width,
             self.height,
+            self.arena,
             frames,
             ev.join(",")
         )
@@ -558,9 +568,10 @@ impl WormGame {
             false,
         );
 
-        let grid = Self::build_grid(width, height);
+        let grid = Self::build_grid(width, height, ARENA_VERSION);
 
         let mut game = Self {
+            arena_version: ARENA_VERSION,
             width,
             height,
             grid,
@@ -669,6 +680,7 @@ impl WormGame {
             round_seed,
             width: self.width,
             height: self.height,
+            arena: self.arena_version,
             ..Default::default()
         };
     }
@@ -676,14 +688,27 @@ impl WormGame {
     /// Build the arena grid. Ring 0 (screen frame) is always Wall. When the
     /// terminal is big enough, ring 2 is the punchable arena wall and ring 1
     /// is the outer corridor — the pacman tunnel between punched holes.
-    fn build_grid(width: u16, height: u16) -> Vec<Vec<CellType>> {
+    fn build_grid(width: u16, height: u16, arena: u8) -> Vec<Vec<CellType>> {
         let mut grid = vec![vec![CellType::Empty; width as usize]; height as usize];
         let corridor = width >= 10 && height >= 10;
         for y in 0..height {
             for x in 0..width {
                 let frame = x == 0 || y == 0 || x == width - 1 || y == height - 1;
-                let arena_wall =
-                    corridor && (x == 2 || y == 2 || x == width - 3 || y == height - 3);
+                let on_ring2 =
+                    x == 2 || y == 2 || x == width - 3 || y == height - 3;
+                // ARENA V2 (owner play report, 2026-08-06): v1 ran the
+                // arena-wall rows/columns all the way to the frame, so at
+                // every corner the wall's ends CROSSED the ring-1
+                // corridor — the "pacman tunnel" was really four dead-end
+                // segments, and entering a hole then turning cornerward
+                // was death by geometry. V2 keeps the arena wall inside
+                // its own rectangle; the corridor turns the corners.
+                // V1 is kept verbatim: recorded ghosts replay on the
+                // geometry they were played on.
+                let arena_wall = corridor
+                    && on_ring2
+                    && (arena < 2
+                        || (x >= 2 && y >= 2 && x <= width - 3 && y <= height - 3));
                 if frame || arena_wall {
                     grid[y as usize][x as usize] = CellType::Wall;
                 }
@@ -2071,7 +2096,7 @@ impl WormGame {
 
         self.width = dims.width;
         self.height = dims.height;
-        self.grid = Self::build_grid(dims.width, dims.height);
+        self.grid = Self::build_grid(dims.width, dims.height, self.arena_version);
         self.cycles.clear();
         self.cycles.push(LightCycle::new(
             center_x.saturating_sub(spacing),
@@ -2177,9 +2202,11 @@ impl WormGame {
         seed: u64,
         width: u16,
         height: u16,
+        arena: u8,
         events: Vec<(u32, u8, u8)>,
     ) {
         self.fixed_dims = Some((width, height));
+        self.arena_version = arena;
         // Never bank a stale winner into the session scoreboard mid-harness.
         self.winner = None;
         self.script = None; // restart() must not consume the incoming script

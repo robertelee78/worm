@@ -2365,7 +2365,7 @@ fn test_ghost_replay_reproduces_a_recorded_round_exactly() {
 
     let mut ghost = WormGame::with_size_seed(55, 40, 999); // seed irrelevant
     ghost.cpu_autopilot = false;
-    ghost.start_recorded_round(log.round_seed, log.width, log.height, log.events.clone());
+    ghost.start_recorded_round(log.round_seed, log.width, log.height, log.arena, log.events.clone());
     while !ghost.game_over && ghost.frame_count < frames {
         ghost.update();
     }
@@ -2413,7 +2413,7 @@ fn test_ghost_replay_captures_the_fatal_turn() {
 
     let mut ghost = WormGame::with_size_seed(55, 40, 1);
     ghost.cpu_autopilot = false;
-    ghost.start_recorded_round(log.round_seed, log.width, log.height, log.events.clone());
+    ghost.start_recorded_round(log.round_seed, log.width, log.height, log.arena, log.events.clone());
     while !ghost.game_over && ghost.frame_count < frames + 4 {
         ghost.update();
     }
@@ -2525,4 +2525,25 @@ fn a_mid_round_book_latch_waits_for_the_round_boundary() {
     game.refresh_read_rate();
     assert!(game.cpu_brain.book_authority_snapshot);
     assert!(game.cpu_brain.book_spend_snapshot > 0.0);
+}
+
+/// Arena v2: the outer corridor turns the corners — the v1 cross of
+/// arena-wall ends through ring 1 made every corner a dead-end pocket
+/// (owner play report). Replayed v1 ghosts keep their recorded geometry.
+#[test]
+fn the_corridor_turns_the_corners_and_replays_keep_their_arena() {
+    use worm::CellType;
+    let game = worm::WormGame::with_size_seed(40, 30, 5);
+    // v2: corridor corner cells are walkable...
+    assert_eq!(game.grid[1][1], CellType::Empty, "corner corridor cell");
+    assert_eq!(game.grid[2][1], CellType::Empty, "corner turn (x=1,y=2)");
+    assert_eq!(game.grid[1][2], CellType::Empty, "corner turn (x=2,y=1)");
+    // ...while the arena wall's own corner still stands.
+    assert_eq!(game.grid[2][2], CellType::Wall, "arena wall corner");
+
+    // A v1 replay pins the old geometry: the wall ends cross the corridor.
+    let mut old = worm::WormGame::with_size_seed(40, 30, 5);
+    old.start_recorded_round(5, 40, 30, 1, Vec::new());
+    assert_eq!(old.grid[2][1], CellType::Wall, "v1: wall end crosses corridor");
+    assert_eq!(old.grid[1][2], CellType::Wall, "v1: wall end crosses corridor");
 }
