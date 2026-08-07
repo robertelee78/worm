@@ -82,6 +82,9 @@ def build_prompt(rec):
         "earnedReadSource": (rec.get("book") or {}).get("earnedSource"),
         "turnBookSideAccuracy": (rec.get("book") or {}).get("sideAccuracy"),
         "turnBookSideEvents": (rec.get("book") or {}).get("sideEvents"),
+        # ADR-021 Kata 3: the drift alarm — a proven change in the
+        # player's swerve grammar within the recent window.
+        "playStyleDriftDetected": rec.get("driftDetected"),
     }
     return (
         "You are the CPU opponent's notebook in a snake/Tron arcade game whose "
@@ -94,7 +97,9 @@ def build_prompt(rec):
         "happened, what it learned about you this round (cite 1-3 of the "
         "numbers — if earnedReadSource is 'book', the thing reading you is "
         "its turn book calling WHICH WAY you swerve, and turnBookSideAccuracy "
-        "is that read; say so plainly), and ONE practical tip for beating it "
+        "is that read; say so plainly; if playStyleDriftDetected is true, note "
+        "that they have changed how they play recently and it is re-learning "
+        "them), and ONE practical tip for beating it "
         "next round based only on these measurements. Tone: a rival's notebook — sharp, warm, a "
         "little unnerving.\n\n"
         f"MEASUREMENTS (JSON): {json.dumps(facts, separators=(',', ':'))}"

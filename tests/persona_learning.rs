@@ -218,6 +218,8 @@ struct Result {
     /// significant on either evidence channel — the strictest null: a
     /// habit-free opponent must never cross either bar even transiently.
     read_significant: bool,
+    /// Whether the drift alarm ever latched during the run.
+    drift_seen: bool,
     /// Whether the book EVER earned projection authority — a fair-side
     /// player must never have their defensive paths reshaped.
     projection_authority_seen: bool,
@@ -262,6 +264,7 @@ fn play(persona: Persona, games: u32, seed: u64) -> Result {
         turn_prior: [0.0; 3],
         no_forecast: 0,
         read_significant: false,
+        drift_seen: false,
         projection_authority_seen: false,
         read_lift: 0.0,
         lat_samples: 0,
@@ -301,6 +304,7 @@ fn play(persona: Persona, games: u32, seed: u64) -> Result {
                     || b.book_read.mc_latched
                     || game.cpu_brain.family_earned_read() > 0.0;
                 out.projection_authority_seen |= b.projection_authority();
+                out.drift_seen |= game.cpu_brain.ledgers.drift_latched;
             }
 
             if mv.habit_frame {
@@ -596,5 +600,40 @@ fn a_read_player_who_changes_their_game_is_honestly_unlearned() {
         game.cpu_brain.family_earned_read() == 0.0,
         "the abandoned habit must be honestly unlearned (still spending {:.2})",
         game.cpu_brain.family_earned_read()
+    );
+}
+
+/// Kata 3 (#6): a real style change trips the drift alarm; a stationary
+/// player never does. Family B: round-count looks, narration only.
+#[test]
+fn the_drift_alarm_sees_a_style_change_and_stays_quiet_otherwise() {
+    // Stationary null: 34 coin rounds — no drift may latch.
+    let r = play(Persona::SlalomCoin, 34, 555_777);
+    assert!(
+        !r.drift_seen,
+        "a stationary player must never trip the drift alarm"
+    );
+
+    // Change: 17 alternator rounds then 17 coin rounds.
+    let mut game = WormGame::with_size_seed(120, 38, 31_415);
+    let mut rng = Rng(31_415 ^ 0x9E37_79B9);
+    let mut st = PersonaState::default();
+    for g in 0..34 {
+        if g > 0 {
+            game.restart();
+        }
+        let persona = if g < 17 { Persona::SlalomAlt } else { Persona::SlalomCoin };
+        let mut frames = 0;
+        while !game.game_over && frames < 4000 {
+            let mv = act(persona, &game, &mut rng, &mut st);
+            game.change_direction(mv.dir);
+            game.update();
+            frames += 1;
+        }
+    }
+    assert!(
+        game.cpu_brain.ledgers.drift_latched || game.cpu_brain.ledgers.drift_z > 3.0,
+        "alternator->coin is a real grammar change and must be seen (z={:.1})",
+        game.cpu_brain.ledgers.drift_z
     );
 }

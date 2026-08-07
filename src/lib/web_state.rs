@@ -152,6 +152,9 @@ struct BookState {
     /// family half it came from.
     earned: f32,
     earned_source: &'static str,
+    /// The drift alarm (narration only): has this player's swerve
+    /// grammar measurably changed within the recent window?
+    drift_detected: bool,
 }
 
 #[derive(Serialize)]
@@ -416,6 +419,7 @@ impl GameState {
                         } else {
                             "forecast"
                         },
+                        drift_detected: game.cpu_brain.ledgers.drift_latched,
                     }
                 },
                 read_rate: ReadRateScopes {

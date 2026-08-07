@@ -1649,6 +1649,16 @@ pub struct LearningLedgers {
     pub rs_last_left: Option<bool>,
     /// Transient: recent player↔CPU head distances (last 10 frames).
     pub recent_dist: std::collections::VecDeque<u32>,
+    /// The drift alarm (ADR-021 Kata 3, evidence family B): Schmitt latch
+    /// over the two-window alternation comparison, tested only at
+    /// round-count geometric looks. Consequences are NARRATION ONLY (the
+    /// notebook and the round epoch record) — never spend, never resets
+    /// of evidence bookkeeping. Recomputable from the persisted
+    /// summaries, so the latch itself needs no wire.
+    pub drift_latched: bool,
+    pub drift_z: f32,
+    /// Rounds summarized so far — family B's look counter.
+    pub rounds_seen: u32,
 }
 
 impl LearningLedgers {
@@ -1758,6 +1768,37 @@ impl LearningLedgers {
         }
     }
 
+    /// Family B's statistic: recent-15-rounds vs the prior-15 window,
+    /// z on the difference of alternation proportions with exact
+    /// binomial variance. Precommitted windows — never the most
+    /// favorable split (codex).
+    pub fn drift_stat(&self) -> Option<f32> {
+        let n = self.round_summaries.len();
+        if n < 30 {
+            return None;
+        }
+        let win = |range: std::ops::Range<usize>| -> (f32, f32) {
+            let mut alts = 0u32;
+            let mut lats = 0u32;
+            for i in range {
+                let (l, a, _, _) = self.round_summaries[i];
+                lats += l.saturating_sub(1);
+                alts += a;
+            }
+            (alts as f32, lats.max(1) as f32)
+        };
+        let (a1, n1) = win(n - 15..n);
+        let (a2, n2) = win(n - 30..n - 15);
+        let p1 = a1 / n1;
+        let p2 = a2 / n2;
+        let pool = (a1 + a2) / (n1 + n2);
+        let var = pool * (1.0 - pool) * (1.0 / n1 + 1.0 / n2);
+        if var <= 0.0 {
+            return None;
+        }
+        Some((p1 - p2).abs() / var.sqrt())
+    }
+
     pub fn end_round(&mut self, frames: u32) {
         if self.rs_laterals > 0 {
             let mean_gap_x10 = self.rs_gap_sum * 10 / self.rs_laterals.max(1);
@@ -1765,6 +1806,24 @@ impl LearningLedgers {
                 .push_back((self.rs_laterals, self.rs_alternations, mean_gap_x10, frames));
             while self.round_summaries.len() > 64 {
                 self.round_summaries.pop_front();
+            }
+            self.rounds_seen = self.rounds_seen.saturating_add(1);
+            // Family B look: α = 0.005, 1 channel, round-count looks from
+            // n = 8 (registry table at look_threshold_for).
+            if let Some(z) = self.drift_stat() {
+                self.drift_z = z;
+                if let Some(bound) = ReadRate::look_threshold_for(
+                    self.rounds_seen,
+                    8,
+                    ReadRate::FAMILY_B_CHANNELS,
+                ) {
+                    if z > bound {
+                        self.drift_latched = true;
+                    }
+                }
+                if self.drift_latched && z < 1.0 {
+                    self.drift_latched = false;
+                }
             }
         }
         self.rs_laterals = 0;
