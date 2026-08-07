@@ -256,6 +256,9 @@ pub const ARENA_VERSION: u8 = 3;
 pub struct WormGame {
     /// Arena geometry this game builds (replays pin their recorded one).
     pub arena_version: u8,
+    /// Whether the current round's ledgers have been finalized (exactly-
+    /// once discipline; see finalize_round_ledgers).
+    pub ledgers_finalized: bool,
     pub width: u16,
     pub height: u16,
     pub grid: Vec<Vec<CellType>>,
@@ -577,6 +580,7 @@ impl WormGame {
 
         let mut game = Self {
             arena_version: ARENA_VERSION,
+            ledgers_finalized: false,
             width,
             height,
             grid,
@@ -638,6 +642,42 @@ impl WormGame {
         let wins = self.displayed_wins();
         let deficit = (wins[0] as f32 - wins[1] as f32) / 4.0;
         (read.max(deficit.clamp(0.0, 1.0)) / 0.6).min(1.0)
+    }
+
+    /// Resolve the finished round into the self-knowledge ledgers,
+    /// EXACTLY ONCE (ADR-021; idempotence via `ledgers_finalized`).
+    /// Called at the game-over save path and consumed by restart().
+    /// Ghost evaluation shares the discipline: replays reproduce real
+    /// history, so death attribution from them is legitimate; round
+    /// summaries (about the PLAYER) record in both modes.
+    pub fn finalize_round_ledgers(&mut self) {
+        if self.ledgers_finalized {
+            return;
+        }
+        self.ledgers_finalized = true;
+        match self.winner {
+            Some(1) => {
+                self.cpu_brain.ledgers.resolve_player_death(self.frame_count);
+                if let Some(cause) = self.death_cause {
+                    let kind = match cause {
+                        DeathCause::Laser => Some(PowerUpKind::Laser),
+                        DeathCause::TriShotBolt => Some(PowerUpKind::TriShot),
+                        DeathCause::BombBlast => Some(PowerUpKind::Bomb),
+                        _ => None,
+                    };
+                    if let Some(k) = kind {
+                        self.cpu_brain.ledgers.note_weapon_lethal(k);
+                    }
+                }
+            }
+            Some(0) => {
+                if let Some(cause) = self.death_cause {
+                    self.cpu_brain.ledgers.note_cpu_death(cause as u8);
+                }
+            }
+            _ => {}
+        }
+        self.cpu_brain.ledgers.end_round(self.frame_count);
     }
 
     /// Sharpness for SURVIVAL BASICS: any proven read ends the casual
@@ -1675,9 +1715,10 @@ impl WormGame {
                 self.cpu_brain.ledgers.mine_held_streak = 0;
             }
             if let Some(kind) = self.cycles[1].held_powerup {
-                self.cpu_brain
-                    .ledgers
-                    .note_weapon(kind, wants_fire, wants_fire);
+                // Held/gate opportunity only — an actual FIRE is recorded at
+                // the discharge site below (codex: a charging laser's
+                // telegraph frames were being counted as fires).
+                self.cpu_brain.ledgers.note_weapon(kind, wants_fire, false);
             }
             let holding_laser = self.cycles[1].held_powerup == Some(PowerUpKind::Laser);
             let fire_now = if holding_laser {
@@ -1707,6 +1748,9 @@ impl WormGame {
             };
             if fire_now {
                 self.cpu_laser_charge = 0;
+                if let Some(kind) = self.cycles[1].held_powerup {
+                    self.cpu_brain.ledgers.note_weapon_fired(kind);
+                }
                 self.fire_powerup(1);
                 if self.game_over {
                     // fire_powerup already ran the frame-end draw-parity pass.
@@ -2244,36 +2288,15 @@ impl WormGame {
             let draw = self.seal_seed ^ ((self.cpu_brain.portfolio.rounds as u64 + 1) << 17);
             self.cpu_brain.portfolio.end_round(reward, draw);
         }
-        // ADR-021 Kata 0: resolve the round into the self-knowledge
-        // ledgers (recording only). Same on-policy discipline as the
-        // portfolio: ghost evaluation never steered, so it neither opens
-        // attempts nor credits kills — but round summaries (about the
-        // PLAYER) record in both modes.
-        {
-            match self.winner {
-                Some(1) => {
-                    self.cpu_brain.ledgers.resolve_player_death(self.frame_count);
-                    if let Some(cause) = self.death_cause {
-                        let kind = match cause {
-                            DeathCause::Laser => Some(PowerUpKind::Laser),
-                            DeathCause::TriShotBolt => Some(PowerUpKind::TriShot),
-                            DeathCause::BombBlast => Some(PowerUpKind::Bomb),
-                            _ => None,
-                        };
-                        if let Some(k) = kind {
-                            self.cpu_brain.ledgers.note_weapon_lethal(k);
-                        }
-                    }
-                }
-                Some(0) => {
-                    if let Some(cause) = self.death_cause {
-                        self.cpu_brain.ledgers.note_cpu_death(cause as u8);
-                    }
-                }
-                _ => {}
-            }
-            self.cpu_brain.ledgers.end_round(self.frame_count);
-        }
+        // ADR-021 Kata 0.1 (codex verification, blocking finding 1): the
+        // ledgers finalize AT GAME OVER via finalize_round_ledgers(), which
+        // the browser save path calls before persisting — finalizing only
+        // here in restart() silently dropped every session's LAST round
+        // (its kill credit, its death attribution, its drift summary).
+        // restart() now merely CONSUMES an already-finalized record — this
+        // call is the idempotent backstop for paths that never saved.
+        self.finalize_round_ledgers();
+        self.ledgers_finalized = false;
 
         self.winner = None;
         self.frame_count = 0;
@@ -2368,12 +2391,35 @@ impl WormGame {
         self.generate_food_items();
     }
 
+    /// Is the PLAYER's head out in the ring-1 corridor (or standing in a
+    /// punched hole)? Drives SLIPSTREAM time (below).
+    pub fn player_in_corridor(&self) -> bool {
+        if !self.has_corridor() {
+            return false;
+        }
+        let (x, y) = self.cycles[self.player].head;
+        let ring1 = x == 1 || y == 1 || x == self.width - 2 || y == self.height - 2;
+        ring1 || self.grid[y as usize][x as usize] == CellType::Hole
+    }
+
     pub fn frame_delay(&self) -> Duration {
         // Speed is EARNED BY EATING: every food value point (either cycle)
         // shaves time off the frame, from a relaxed 115ms opening down to the
         // 35ms floor — proportional to the size of the food, not the clock.
         let speedup = (self.food_eaten_total as u64 / 2).min(80);
-        Duration::from_millis(115u64.saturating_sub(speedup).max(35))
+        let base = 115u64.saturating_sub(speedup).max(35);
+        // SLIPSTREAM (owner request): the outer corridor runs at half time.
+        // The holes are one cell wide and the corridor one lane — at full
+        // speed it was a death sentence; in the slipstream the WHOLE WORLD
+        // slows (both worms, same clock — symmetric physics, board
+        // knowledge), so threading back in through a punched hole becomes
+        // a play instead of a prayer. Pure wall-clock pacing: simulation
+        // and replays are frame-indexed and unaffected.
+        if self.player_in_corridor() {
+            Duration::from_millis(base * 2)
+        } else {
+            Duration::from_millis(base)
+        }
     }
 
     /// 0 = opening crawl, 100 = max speed (HUD + music/sfx intensity).

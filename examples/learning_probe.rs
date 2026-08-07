@@ -208,12 +208,19 @@ fn main() {
     // ClassBooks accuracies are decayed, so "state at end of era 2" vs
     // "state at end of era 1" is the comparison that matters.)
 
+    // The last replay's round is finalized explicitly (codex verification
+    // finding 1: only the NEXT start_recorded_round used to consume it).
+    game.finalize_round_ledgers();
+
     // ---- Kata 2 gate: 8- vs 16-bucket gap resolution, prequential ----
     // Twin KT tables over the same context factors as production
     // (food-side x just-ate x cpu-close = 12 contexts), differing only in
     // gap buckets. Per eligible frame: log-loss of the CURRENT estimate
     // against the realized turn/stay, THEN update — prequential.
     {
+        // FULL production context (codex verification finding 6): the
+        // first run hardcoded just_ate=false and omitted cpu-closing,
+        // exercising 3 of the claimed 12 contexts. All 12 now.
         let mut t8 = vec![(0.0f32, 0.0f32); 8 * 12];
         let mut t16 = vec![(0.0f32, 0.0f32); 16 * 12];
         // Backoff variant: same 8x12 cells PLUS a per-gap marginal (8) the
@@ -242,6 +249,7 @@ fn main() {
             }).collect();
             game.start_recorded_round(seed, w, h, arena, events);
             let mut gap = 0u32;
+            let mut prev_dist_gate = 0u32;
             while !game.game_over && game.frame_count <= frames {
                 let heading = game.cycles[0].prev_direction;
                 let straight_legal = worm::legal_options_from(&game, 0, heading).contains(&heading);
@@ -254,8 +262,13 @@ fn main() {
                     worm::cpu_ai::FoodSide::Left => 1,
                     worm::cpu_ai::FoodSide::Right => 2,
                 };
-                let just_ate = false; // context parity across both tables
-                let ctx = fs + 3 * (just_ate as usize);
+                let just_ate = game.cpu_brain.frames_since_food <= 3;
+                let (chx, chy) = game.cycles[1].head;
+                let dist = ((px as i32 - chx as i32).abs()
+                    + (py as i32 - chy as i32).abs()) as u32;
+                let cpu_close = dist <= 12 && dist < prev_dist_gate.max(1);
+                prev_dist_gate = dist;
+                let ctx = fs + 3 * ((just_ate as usize) + 2 * (cpu_close as usize));
                 game.update();
                 let dir = game.cycles[0].direction;
                 if let Some(t) = worm::cpu_ai::Turn::from_dirs(heading, dir) {
@@ -301,7 +314,8 @@ fn main() {
             }
         }
         println!(
-            "\n== KATA-2 GATE: gap resolution (prequential log-loss, lower=better) ==\n  8-bucket: {:.4}/frame  16-bucket: {:.4}/frame  8+BACKOFF: {:.4}/frame  over {} eligible frames",
+            "\n== KATA-2 GATE (full 12-context parity; scope: THIS corpus, {} rounds) ==\n  8-bucket: {:.4}/frame  16-bucket: {:.4}/frame  8+BACKOFF: {:.4}/frame  over {} eligible frames",
+            ordered.len(),
             ll8 / n_frames as f64,
             ll16 / n_frames as f64,
             llb / n_frames as f64,

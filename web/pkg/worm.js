@@ -56,7 +56,10 @@ export class WasmGame {
         return ret !== 0;
     }
     /**
-     * Per-player brain export → IndexedDB.
+     * Per-player brain export → IndexedDB. Finalizes the finished
+     * round's ledgers first (codex verification: the browser saves at
+     * game over, BEFORE any restart — without this the session's last
+     * round never persisted).
      * @returns {Uint8Array}
      */
     brain_save() {

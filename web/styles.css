@@ -311,3 +311,41 @@ table.history td.cpu { color: var(--magenta); }
 .bp-last { min-height: 1.35em; }
 .bp-warm, .bp-mem, .bp-habit, .bp-lifetime { min-height: 1.3em; }
 .score-mid { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+
+/* SLIPSTREAM — corridor half-time. The world drops into bullet time:
+   cool phosphor tint, a breathing teal glow, and a soft vignette. All
+   GPU-composited (filter + shadow + opacity), no per-frame JS. */
+#game-canvas {
+  transition: filter 420ms ease, box-shadow 420ms ease;
+}
+#game-canvas.slipstream {
+  filter: saturate(0.65) contrast(1.12) hue-rotate(28deg) brightness(1.06);
+  box-shadow:
+    0 0 22px rgba(64, 255, 208, 0.45),
+    inset 0 0 60px rgba(64, 255, 208, 0.18);
+  animation: slipstream-breathe 1.6s ease-in-out infinite;
+}
+@keyframes slipstream-breathe {
+  0%, 100% { box-shadow: 0 0 22px rgba(64, 255, 208, 0.45), inset 0 0 60px rgba(64, 255, 208, 0.18); }
+  50%      { box-shadow: 0 0 34px rgba(64, 255, 208, 0.75), inset 0 0 90px rgba(64, 255, 208, 0.30); }
+}
+#slipstream-label {
+  position: absolute;
+  top: 10px;
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: inherit;
+  font-size: 13px;
+  letter-spacing: 0.35em;
+  color: rgb(64, 255, 208);
+  text-shadow: 0 0 8px rgba(64, 255, 208, 0.9);
+  animation: slipstream-flicker 1.6s ease-in-out infinite;
+  pointer-events: none;
+  z-index: 5;
+}
+#slipstream-label.hidden { display: none; }
+@keyframes slipstream-flicker {
+  0%, 100% { opacity: 0.65; }
+  50%      { opacity: 1.0; }
+}

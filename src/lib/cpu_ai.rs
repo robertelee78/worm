@@ -854,11 +854,11 @@ pub const VOMM_MIN_EVENTS: u32 = 6;
 #[derive(Clone, Debug)]
 pub struct TurnPattern {
     /// Recent break outcomes, most recent last. true = Left.
-    history: Vec<bool>,
+    pub(crate) history: Vec<bool>,
     /// KT counts per (depth, context-bits): (lefts, total).
-    counts: std::collections::HashMap<(u8, u16), (f32, f32)>,
+    pub(crate) counts: std::collections::HashMap<(u8, u16), (f32, f32)>,
     /// Fixed-share weight per depth 0..=VOMM_DEPTH.
-    weights: [f32; VOMM_DEPTH + 1],
+    pub(crate) weights: [f32; VOMM_DEPTH + 1],
     pub events: u32,
 }
 
@@ -1217,13 +1217,13 @@ impl ReadRate {
     /// | Family | Channels | α | Looks |
     /// |--------|----------|---|-------|
     /// | A: player-read (per-frame) | 4: published×{McNemar, lateral}, book×{McNemar, lateral} | 0.005 | ratio 1.4 from n=20 |
-    /// | B: drift (per-round) | 1: round-summary change test | 0.005 | ratio 1.4 from n=8 rounds |
+    /// | B: drift (per-round) | 4: {alternation, mean-gap} × two-sided sign test vs frozen reference medians | 0.005 | ratio 1.4 from n=8 trials per statistic |
     ///
     /// Families are independent budgets (their consumers differ: A funds
     /// aggression via earned_snapshot; B funds only a NARRATION flag and
-    /// fast-horizon resets, never spend).
+    /// narration flag only — it never funds spend or resets evidence).
     pub const FAMILY_A_CHANNELS: f32 = 4.0;
-    pub const FAMILY_B_CHANNELS: f32 = 1.0;
+    pub const FAMILY_B_CHANNELS: f32 = 4.0;
 
     /// The family's PROVED time-uniform opening rule (codex round 3: an
     /// LIL-shaped constant is shorthand, not a theorem — this is the
@@ -1237,7 +1237,8 @@ impl ReadRate {
     /// McNemar frame is a fair coin), so Hoeffding gives the exact
     /// per-look crossing bound P(z ≥ z_k) ≤ exp(−z_k²/2), and
     /// z_k = sqrt(2·ln(1/α_k)) makes the union over every look of every
-    /// channel ≤ α_family = 0.001. No normal approximation, no
+    /// channel ≤ α_family (0.005; the power analysis at the constant
+    /// below). No normal approximation, no
     /// asymptotics, finitely many looks per lifetime. Returns the
     /// threshold when n IS a look point; None between looks, where the
     /// latch simply holds its state.
@@ -1688,15 +1689,31 @@ pub struct LearningLedgers {
     pub rs_last_left: Option<bool>,
     /// Transient: recent player↔CPU head distances (last 10 frames).
     pub recent_dist: std::collections::VecDeque<u32>,
-    /// The drift alarm (ADR-021 Kata 3, evidence family B): Schmitt latch
-    /// over the two-window alternation comparison, tested only at
-    /// round-count geometric looks. Consequences are NARRATION ONLY (the
-    /// notebook and the round epoch record) — never spend, never resets
-    /// of evidence bookkeeping. Recomputable from the persisted
-    /// summaries, so the latch itself needs no wire.
+    /// The drift alarm (ADR-021 Kata 3, REBUILT per codex verification
+    /// blocking finding 2): the original two-window pooled-variance z was
+    /// not covered by the family's Hoeffding proof. This construction IS:
+    /// a SIGN TEST against a frozen reference. The first REF_ROUNDS
+    /// summarized rounds freeze a per-statistic median; every later round
+    /// contributes one fair-coin trial per statistic (above/below its
+    /// median; ties skip). Under stationarity each trial is EXACTLY
+    /// Bernoulli(1/2) — the same centered fair-coin sum the family's
+    /// exact bound covers — and the deviation |S − n/2| is tested
+    /// two-sided at round-count geometric looks (2 statistics × 2 sides
+    /// = 4 channels in family B's budget). Consequences remain NARRATION
+    /// ONLY. All trial state persists (finding 3): the lifetime look
+    /// budget survives reloads.
     pub drift_latched: bool,
     pub drift_z: f32,
-    /// Rounds summarized so far — family B's look counter.
+    /// Frozen reference medians (alternation proportion, mean gap ×10).
+    pub ref_alt_median: f32,
+    pub ref_gap_median: f32,
+    pub ref_frozen: bool,
+    /// Sign-test tallies: (above-median count, trials) per statistic.
+    pub alt_above: u32,
+    pub alt_trials: u32,
+    pub gap_above: u32,
+    pub gap_trials: u32,
+    /// Rounds summarized so far — family B's look counter (persisted).
     pub rounds_seen: u32,
     /// Kata 5 (#2) exploration bookkeeping (transient): frames the CPU
     /// has been sitting on a mine, and whether this round's single
@@ -1708,6 +1725,16 @@ pub struct LearningLedgers {
 impl LearningLedgers {
     pub fn note_tactic(&mut self, reason: CpuDecisionReason, frame: u32) {
         if let Some(&(id, _)) = TACTIC_IDS.iter().find(|&&(_, r)| r == reason) {
+            // EPISODIC attempts (codex: exactly-once closure): consecutive
+            // frames of the same tactic inside one precommitted window are
+            // ONE attempt — the old per-frame increment inflated the
+            // denominator by the pursuit's length. A window closes by
+            // kill, by expiry, or by a different tactic taking over.
+            if let Some((open_id, opened)) = self.open_attempt {
+                if open_id == id && frame.saturating_sub(opened) <= ATTEMPT_HORIZON {
+                    return; // same episode, window stays as precommitted
+                }
+            }
             self.open_attempt = Some((id, frame));
             let e = match self.tactic_attempts.iter_mut().find(|e| e.0 == id) {
                 Some(e) => e,
@@ -1749,6 +1776,15 @@ impl LearningLedgers {
                 e.2 = e.2.saturating_add(1);
             }
             if fired {
+                e.3 = e.3.saturating_add(1);
+            }
+        }
+    }
+
+    /// An actual discharge (laser: after the telegraph completes).
+    pub fn note_weapon_fired(&mut self, kind: crate::game::PowerUpKind) {
+        if let Some(&(id, _)) = WEAPON_IDS.iter().find(|&&(_, k)| k == kind) {
+            if let Some(e) = self.weapon_ops.iter_mut().find(|e| e.0 == id) {
                 e.3 = e.3.saturating_add(1);
             }
         }
@@ -1823,35 +1859,15 @@ impl LearningLedgers {
         }
     }
 
-    /// Family B's statistic: recent-15-rounds vs the prior-15 window,
-    /// z on the difference of alternation proportions with exact
-    /// binomial variance. Precommitted windows — never the most
-    /// favorable split (codex).
-    pub fn drift_stat(&self) -> Option<f32> {
-        let n = self.round_summaries.len();
-        if n < 30 {
-            return None;
+    /// Number of rounds that freeze the drift reference medians.
+    pub const REF_ROUNDS: usize = 15;
+
+    /// The sign-test z for one tally: |S − n/2| / sqrt(n/4).
+    fn sign_z(above: u32, trials: u32) -> f32 {
+        if trials == 0 {
+            return 0.0;
         }
-        let win = |range: std::ops::Range<usize>| -> (f32, f32) {
-            let mut alts = 0u32;
-            let mut lats = 0u32;
-            for i in range {
-                let (l, a, _, _) = self.round_summaries[i];
-                lats += l.saturating_sub(1);
-                alts += a;
-            }
-            (alts as f32, lats.max(1) as f32)
-        };
-        let (a1, n1) = win(n - 15..n);
-        let (a2, n2) = win(n - 30..n - 15);
-        let p1 = a1 / n1;
-        let p2 = a2 / n2;
-        let pool = (a1 + a2) / (n1 + n2);
-        let var = pool * (1.0 - pool) * (1.0 / n1 + 1.0 / n2);
-        if var <= 0.0 {
-            return None;
-        }
-        Some((p1 - p2).abs() / var.sqrt())
+        (above as f32 - trials as f32 / 2.0).abs() / (trials as f32 / 4.0).sqrt()
     }
 
     pub fn end_round(&mut self, frames: u32) {
@@ -1863,20 +1879,67 @@ impl LearningLedgers {
                 self.round_summaries.pop_front();
             }
             self.rounds_seen = self.rounds_seen.saturating_add(1);
-            // Family B look: α = 0.005, 1 channel, round-count looks from
-            // n = 8 (registry table at look_threshold_for).
-            if let Some(z) = self.drift_stat() {
-                self.drift_z = z;
-                if let Some(bound) = ReadRate::look_threshold_for(
-                    self.rounds_seen,
-                    8,
-                    ReadRate::FAMILY_B_CHANNELS,
-                ) {
-                    if z > bound {
-                        self.drift_latched = true;
+            // Freeze the reference at REF_ROUNDS; afterwards each round is
+            // one sign-test trial per statistic.
+            let (l, a, g, _) = *self.round_summaries.back().unwrap();
+            let alt_prop = if l >= 2 { a as f32 / (l - 1) as f32 } else { f32::NAN };
+            let gap = g as f32;
+            if !self.ref_frozen {
+                if self.rounds_seen as usize == Self::REF_ROUNDS {
+                    let n = self.round_summaries.len();
+                    let start = n.saturating_sub(Self::REF_ROUNDS);
+                    let mut alts: Vec<f32> = Vec::new();
+                    let mut gaps: Vec<f32> = Vec::new();
+                    for i in start..n {
+                        let (rl, ra, rg, _) = self.round_summaries[i];
+                        if rl >= 2 {
+                            alts.push(ra as f32 / (rl - 1) as f32);
+                        }
+                        gaps.push(rg as f32);
+                    }
+                    let med = |v: &mut Vec<f32>| -> f32 {
+                        if v.is_empty() {
+                            return f32::NAN;
+                        }
+                        v.sort_by(|x, y| x.partial_cmp(y).unwrap());
+                        v[v.len() / 2]
+                    };
+                    self.ref_alt_median = med(&mut alts);
+                    self.ref_gap_median = med(&mut gaps);
+                    self.ref_frozen = true;
+                }
+            } else {
+                if alt_prop.is_finite() && self.ref_alt_median.is_finite()
+                    && alt_prop != self.ref_alt_median
+                {
+                    self.alt_trials += 1;
+                    if alt_prop > self.ref_alt_median {
+                        self.alt_above += 1;
                     }
                 }
-                if self.drift_latched && z < 1.0 {
+                if self.ref_gap_median.is_finite() && gap != self.ref_gap_median {
+                    self.gap_trials += 1;
+                    if gap > self.ref_gap_median {
+                        self.gap_above += 1;
+                    }
+                }
+                let z_alt = Self::sign_z(self.alt_above, self.alt_trials);
+                let z_gap = Self::sign_z(self.gap_above, self.gap_trials);
+                self.drift_z = z_alt.max(z_gap);
+                // Family B: 2 statistics × 2 sides = 4 channels; looks
+                // keyed to each statistic's own trial count from n = 8.
+                for (z, trials) in [(z_alt, self.alt_trials), (z_gap, self.gap_trials)] {
+                    if let Some(bound) = ReadRate::look_threshold_for(
+                        trials,
+                        8,
+                        ReadRate::FAMILY_B_CHANNELS,
+                    ) {
+                        if z > bound {
+                            self.drift_latched = true;
+                        }
+                    }
+                }
+                if self.drift_latched && self.drift_z < 1.0 {
                     self.drift_latched = false;
                 }
             }
@@ -1914,10 +1977,27 @@ struct LossLedgerWire {
     ver: u8,
     causes: Vec<(u8, u32, u32)>,
 }
+/// The pre-verification drift wire (v1: summaries only). Kept decodable
+/// so the golden tripwire passes and no live player loses their ring.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DriftEpochsWireV1 {
+    ver: u8,
+    rounds: Vec<(u32, u32, u32, u32)>,
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct DriftEpochsWire {
     ver: u8,
     rounds: Vec<(u32, u32, u32, u32)>,
+    rounds_seen: u32,
+    ref_alt_median: f32,
+    ref_gap_median: f32,
+    ref_frozen: bool,
+    alt_above: u32,
+    alt_trials: u32,
+    gap_above: u32,
+    gap_trials: u32,
+    drift_latched: bool,
 }
 
 /* ----------------------- the turn book (ADR-020 stage 2) ----------------------- */
@@ -2611,8 +2691,17 @@ impl CpuBrain {
             &mut sections,
             SEC_DRIFT_EPOCHS,
             &DriftEpochsWire {
-                ver: 1,
+                ver: 2,
                 rounds: self.ledgers.round_summaries.iter().copied().collect(),
+                rounds_seen: self.ledgers.rounds_seen,
+                ref_alt_median: self.ledgers.ref_alt_median,
+                ref_gap_median: self.ledgers.ref_gap_median,
+                ref_frozen: self.ledgers.ref_frozen,
+                alt_above: self.ledgers.alt_above,
+                alt_trials: self.ledgers.alt_trials,
+                gap_above: self.ledgers.gap_above,
+                gap_trials: self.ledgers.gap_trials,
+                drift_latched: self.ledgers.drift_latched,
             },
         );
         push_section(&mut sections, SEC_TURN_PRIOR, &self.opp_brain.turn_tally);
@@ -2697,6 +2786,71 @@ impl CpuBrain {
 
         // Accuracy is hits/total; hits > total reports above 100%.
         self.opp_pred_hits = self.opp_pred_hits.min(self.opp_pred_total);
+
+        // ADR-021 ledgers: cross-field invariants and finiteness. A
+        // violated section resets to default rather than feeding NaN or
+        // impossible counts into aversion/bandit/drift consumers.
+        {
+            let l = &mut self.ledgers;
+            let bad_tactics = l.tactic_attempts.iter().any(|e| {
+                !e.1.is_finite() || !e.2.is_finite() || e.1 < 0.0 || e.2 < 0.0
+                    || e.2 > e.1 + 1.0 || e.4 > e.3
+                    || !TACTIC_IDS.iter().any(|&(id, _)| id == e.0)
+            }) || l.tactic_attempts.len() > 16;
+            if bad_tactics {
+                l.tactic_attempts.clear();
+                report.sections_skipped += 1;
+            }
+            let bad_weapons = l.weapon_ops.iter().any(|e| {
+                e.4 > e.3 || e.3 > e.1 || e.2 > e.1
+                    || !WEAPON_IDS.iter().any(|&(id, _)| id == e.0)
+            }) || l.weapon_ops.len() > 16;
+            if bad_weapons {
+                l.weapon_ops.clear();
+                report.sections_skipped += 1;
+            }
+            let bad_losses =
+                l.loss_causes.iter().any(|e| e.2 > e.1 || e.0 > 16) || l.loss_causes.len() > 16;
+            if bad_losses {
+                l.loss_causes.clear();
+                report.sections_skipped += 1;
+            }
+            let bad_drift = l.round_summaries.len() > 64
+                || l
+                    .round_summaries
+                    .iter()
+                    .any(|&(lat, alt, _, _)| alt > lat.saturating_sub(1).max(0))
+                || !l.ref_alt_median.is_finite() && l.ref_frozen
+                || l.alt_above > l.alt_trials
+                || l.gap_above > l.gap_trials;
+            if bad_drift {
+                l.round_summaries.clear();
+                l.rounds_seen = 0;
+                l.ref_frozen = false;
+                l.ref_alt_median = 0.0;
+                l.ref_gap_median = 0.0;
+                l.alt_above = 0;
+                l.alt_trials = 0;
+                l.gap_above = 0;
+                l.gap_trials = 0;
+                l.drift_latched = false;
+                report.sections_skipped += 1;
+            }
+        }
+        // The voluntary VOMM: non-finite counts/weights poison every read.
+        {
+            let vp = &mut self.voluntary_pattern;
+            let bad = vp.history.len() > 64
+                || vp.weights.iter().any(|w| !w.is_finite() || *w < 0.0)
+                || vp
+                    .counts
+                    .values()
+                    .any(|&(l, n)| !l.is_finite() || !n.is_finite() || l < 0.0 || n < 0.0 || l > n + 1.0);
+            if bad {
+                *vp = TurnPattern::default();
+                report.sections_skipped += 1;
+            }
+        }
 
         // Persisted book state: any non-finite or negative float poisons
         // the hazard, the gate, and everything the projection trusts.
@@ -2910,6 +3064,7 @@ impl CpuBrain {
                 },
                 SEC_ACTION_OUTCOMES => {
                     match bincode::deserialize::<ActionOutcomesWire>(body) {
+                        Ok(w) if w.ver != 1 => report.sections_skipped += 1,
                         Ok(w) => {
                             brain.ledgers.tactic_attempts = w.tactics;
                             brain.ledgers.weapon_ops = w.weapons;
@@ -2918,16 +3073,37 @@ impl CpuBrain {
                     }
                 }
                 SEC_LOSS_DEFENSE => match bincode::deserialize::<LossLedgerWire>(body) {
-                    Ok(w) => brain.ledgers.loss_causes = w.causes,
-                    Err(_) => report.sections_skipped += 1,
+                    Ok(w) if w.ver == 1 => brain.ledgers.loss_causes = w.causes,
+                    _ => report.sections_skipped += 1,
                 },
                 SEC_TURN_TIMING => match bincode::deserialize::<TurnTimingWire>(body) {
-                    Ok(w) => brain.voluntary_pattern = TurnPattern::from_wire(w),
-                    Err(_) => report.sections_skipped += 1,
+                    Ok(w) if w.ver == 1 => brain.voluntary_pattern = TurnPattern::from_wire(w),
+                    _ => report.sections_skipped += 1,
                 },
                 SEC_DRIFT_EPOCHS => match bincode::deserialize::<DriftEpochsWire>(body) {
-                    Ok(w) => brain.ledgers.round_summaries = w.rounds.into_iter().collect(),
-                    Err(_) => report.sections_skipped += 1,
+                    // v1 blobs (summaries only): keep the ring, re-earn the
+                    // reference — the golden-tripwire dual-decode ritual.
+                    Err(_) => match bincode::deserialize::<DriftEpochsWireV1>(body) {
+                        Ok(w1) if w1.ver == 1 => {
+                            brain.ledgers.round_summaries = w1.rounds.into_iter().collect();
+                            brain.ledgers.rounds_seen =
+                                brain.ledgers.round_summaries.len() as u32;
+                        }
+                        _ => report.sections_skipped += 1,
+                    },
+                    Ok(w) if w.ver == 2 => {
+                        brain.ledgers.round_summaries = w.rounds.into_iter().collect();
+                        brain.ledgers.rounds_seen = w.rounds_seen;
+                        brain.ledgers.ref_alt_median = w.ref_alt_median;
+                        brain.ledgers.ref_gap_median = w.ref_gap_median;
+                        brain.ledgers.ref_frozen = w.ref_frozen;
+                        brain.ledgers.alt_above = w.alt_above;
+                        brain.ledgers.alt_trials = w.alt_trials;
+                        brain.ledgers.gap_above = w.gap_above;
+                        brain.ledgers.gap_trials = w.gap_trials;
+                        brain.ledgers.drift_latched = w.drift_latched;
+                    }
+                    Ok(_) => report.sections_skipped += 1,
                 },
                 // Forward compatibility: a section this build has never heard
                 // of is skipped by its length, not treated as corruption.
@@ -6752,6 +6928,70 @@ mod tests {
         let expected = (10.0 * 0.5 + 10.0 / 3.0) / 20.0;
         assert!((r.uniform_chance() - expected).abs() < 1e-5);
         assert!(r.uniform_chance() > 0.25, "never the old 25% claim");
+    }
+
+    /// Codex verification fix 3: a poisoned ledger section resets rather
+    /// than feeding NaN into aversion/bandit/drift consumers.
+    #[test]
+    fn poisoned_ledgers_reset_on_load() {
+        let mut brain = CpuBrain::new();
+        brain.ledgers.tactic_attempts.push((0, f32::NAN, 1.0, 5, 1));
+        brain.ledgers.loss_causes.push((2, 3, 9)); // chased > deaths
+        let mut report = BrainRestore::default();
+        brain.sanitize(&mut report);
+        assert!(brain.ledgers.tactic_attempts.is_empty());
+        assert!(brain.ledgers.loss_causes.is_empty());
+        assert!(report.sections_skipped >= 2);
+    }
+
+    /// Codex verification fix 2/3: the drift alarm's lifetime look budget
+    /// (trial tallies, reference, look counter) survives a reload — a
+    /// player cannot re-earn early looks by refreshing the page.
+    #[test]
+    fn drift_trial_state_survives_persistence() {
+        let mut brain = CpuBrain::new();
+        brain.ledgers.rounds_seen = 21;
+        brain.ledgers.ref_frozen = true;
+        brain.ledgers.ref_alt_median = 0.6;
+        brain.ledgers.ref_gap_median = 50.0;
+        brain.ledgers.alt_above = 2;
+        brain.ledgers.alt_trials = 6;
+        brain.ledgers.gap_above = 5;
+        brain.ledgers.gap_trials = 6;
+        brain.ledgers.round_summaries.push_back((10, 5, 40, 300));
+        let (r, _) = CpuBrain::from_bytes_report(&brain.to_bytes()).unwrap();
+        assert_eq!(r.ledgers.rounds_seen, 21);
+        assert!(r.ledgers.ref_frozen);
+        assert_eq!(r.ledgers.alt_trials, 6);
+        assert_eq!(r.ledgers.gap_above, 5);
+        assert_eq!(r.ledgers.round_summaries.len(), 1);
+    }
+
+    /// Codex verification fix 6: consecutive same-tactic frames are ONE
+    /// episodic attempt; a different tactic or an expired window opens a
+    /// new one; a kill closes exactly once.
+    #[test]
+    fn tactic_attempts_are_episodes_not_frames() {
+        let mut l = LearningLedgers::default();
+        for f in 0..10 {
+            l.note_tactic(CpuDecisionReason::DirectIntercept, f);
+        }
+        assert_eq!(l.tactic_attempts[0].3, 1, "one pursuit = one attempt");
+        l.note_tactic(CpuDecisionReason::CornerIntercept, 10);
+        l.note_tactic(CpuDecisionReason::DirectIntercept, 11);
+        let direct = l.tactic_attempts.iter().find(|e| e.0 == 0).unwrap();
+        assert_eq!(direct.3, 2, "tactic switch opens a new episode");
+        l.resolve_player_death(12);
+        let direct = l.tactic_attempts.iter().find(|e| e.0 == 0).unwrap();
+        assert_eq!(direct.4, 1, "kill credited once");
+        l.resolve_player_death(13);
+        let direct = l.tactic_attempts.iter().find(|e| e.0 == 0).unwrap();
+        assert_eq!(direct.4, 1, "no open attempt, no double credit");
+        // Expiry: an old window never gets the credit.
+        l.note_tactic(CpuDecisionReason::DirectIntercept, 100);
+        l.resolve_player_death(100 + ATTEMPT_HORIZON + 1);
+        let direct = l.tactic_attempts.iter().find(|e| e.0 == 0).unwrap();
+        assert_eq!(direct.4, 1, "expired window earns nothing");
     }
 
     /// THE WIRE-SHAPE TRIPWIRE (owner data-loss incident, 2026-08-07):

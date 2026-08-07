@@ -26,7 +26,10 @@ export class WasmGame {
      */
     brain_restore_was_partial(): boolean;
     /**
-     * Per-player brain export → IndexedDB.
+     * Per-player brain export → IndexedDB. Finalizes the finished
+     * round's ledgers first (codex verification: the browser saves at
+     * game over, BEFORE any restart — without this the session's last
+     * round never persisted).
      */
     brain_save(): Uint8Array;
     fire(): boolean;

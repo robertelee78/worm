@@ -98,54 +98,76 @@ fn main() {
             era_ll.push((cur_ll, cur_n));
             cur_ll = 0.0;
             cur_n = 0;
-            let b = &game.cpu_brain.class_books;
-            let hits = (b.at_hits) as u32;
-            let tot = b.at_total as u32;
-            era_side.push((hits - side_before.0.min(hits), tot - side_before.1.min(tot)));
+            // Non-decayed counters — the decayed aT tallies cannot be
+            // era-differenced (codex: the first cut printed nonsense).
+            let br = &game.cpu_brain.class_books.book_read;
+            let hits = br.hits;
+            let tot = br.samples;
+            era_side.push((hits.saturating_sub(side_before.0), tot.saturating_sub(side_before.1)));
             side_before = (hits, tot);
         }
     }
 
     println!("== SONA ENTRY GATE: is the counting stack still improving? ==");
+    println!(
+        "  corpus: {} · {} rounds · {} eras of {} (scope: THIS corpus only)",
+        path,
+        rounds.len(),
+        era_ll.len(),
+        ERA
+    );
     let mut prev: Option<f64> = None;
     let mut flat_streak = 0;
+    let mut worst_recent = 0.0f64;
+    let n_eras = era_ll.len();
     for (i, &(ll, n)) in era_ll.iter().enumerate() {
         let per = ll / n.max(1) as f64;
         let delta = prev.map(|p| (p - per) / p * 100.0);
+        let side = era_side
+            .get(i)
+            .map(|&(h, t)| format!("  side-acc {:.2} ({} ev)", h as f64 / t.max(1) as f64, t))
+            .unwrap_or_default();
         println!(
-            "  era {:>2} ({} rounds): hazard log-loss {:.4}/frame{}",
+            "  era {:>2} ({} rounds): hazard log-loss {:.4}/frame{}{}",
             i + 1,
             ERA,
             per,
             delta
                 .map(|d| format!("  ({:+.1}% vs prev era)", d))
-                .unwrap_or_default()
+                .unwrap_or_default(),
+            side
         );
         if let Some(d) = delta {
-            if d < 1.0 {
+            // FLAT means WITHIN the band — deterioration is not flatness
+            // (codex verification: 'large deterioration then +0.5%' must
+            // not open the gate).
+            if d.abs() < 1.0 {
                 flat_streak += 1;
             } else {
                 flat_streak = 0;
             }
+            // Any recent era materially WORSE = the target moved.
+            if i + 3 >= n_eras && d < -1.0 {
+                worst_recent = worst_recent.min(d);
+            }
         }
         prev = Some(per);
     }
+    let drift_latched = game.cpu_brain.ledgers.drift_latched;
     let plateaued = flat_streak >= 2;
-    // A WORSENING era is not a plateau in the challenger-earning sense —
-    // it usually means the TARGET moved (see the drift alarm). A learned
-    // challenger trained on the same drifting corpus gains no entry
-    // credit from a moving target; read this verdict alongside
-    // drift_latched before scheduling anything.
-    let worsening = era_ll
-        .windows(2)
-        .last()
-        .map(|w| w[1].0 / w[1].1.max(1) as f64 > w[0].0 / w[0].1.max(1) as f64)
-        .unwrap_or(false);
+    // The gate opens ONLY on: two consecutive within-band eras, AND no
+    // recent era materially worse (the target moved), AND the drift alarm
+    // itself quiet — checked here directly, not left to the reader
+    // (codex verification, blocking finding 5).
+    let moving = worst_recent < -1.0 || drift_latched;
     println!(
-        "\n  VERDICT: {}",
-        if plateaued && worsening {
-            "TARGET MOVING (recent eras worsen) — this is drift, not a plateau; \
-             the challenger gate does NOT open on a moving target"
+        "\n  drift alarm latched: {drift_latched} · worst recent era delta: {worst_recent:+.1}%"
+    );
+    println!(
+        "  VERDICT: {}",
+        if moving {
+            "TARGET MOVING (recent deterioration or drift latched) — not a \
+             plateau; the challenger gate does NOT open on a moving target"
         } else if plateaued {
             "PLATEAU — a challenger (SONA or otherwise) has earned an offline evaluation"
         } else {

@@ -36,6 +36,9 @@ struct GameState {
     schema_version: u8,
     w: u16,
     h: u16,
+    /// SLIPSTREAM: the player is out in the corridor and world time runs
+    /// at half speed (drives the browser's visual effect).
+    slipstream: bool,
     frame: u32,
     time: u32,
     over: bool,
@@ -340,6 +343,7 @@ impl GameState {
 
         Self {
             schema_version: STATE_SCHEMA_VERSION,
+            slipstream: game.player_in_corridor(),
             w: game.width,
             h: game.height,
             frame: game.frame_count,

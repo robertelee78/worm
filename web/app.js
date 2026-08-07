@@ -4,14 +4,14 @@
 // The ?v= must match BUILD below (and index.html's) — an unversioned glue
 // import could pair a cached old worm.js with a fresh wasm on the next
 // rebuild that changes the bindings.
-import init, { WasmGame } from './pkg/worm.js?v=19';
+import init, { WasmGame } from './pkg/worm.js?v=20';
 import { Sfx } from './audio.js';
 import { computeBoardLayout, VIEWPORT_BLOCK_GUTTER } from './layout.js';
 
 let CELL = 14; // recomputed by applyBoardLayout() to fit the measured stage
 // Bump together with the ?v= in index.html whenever the wasm bundle is
 // rebuilt — it keys the cache-busting query on the .wasm fetch.
-const BUILD = 19;
+const BUILD = 20;
 const MATCH_TARGET = 3;
 const STATE_SCHEMA_VERSION = 2;
 const ROUND_SCHEMA_VERSION = 1;
@@ -622,6 +622,15 @@ function loop(now) {
     return;
   }
   updateHum(state);
+  // SLIPSTREAM (corridor half-time): the world slows and the screen says
+  // so — cool, cheap, GPU-composited. Class toggle only; CSS owns the look.
+  {
+    const wrap = document.getElementById('game-canvas');
+    const label = document.getElementById('slipstream-label');
+    const on = !!state.slipstream;
+    if (wrap) wrap.classList.toggle('slipstream', on);
+    if (label) label.classList.toggle('hidden', !on);
+  }
   render(state);
   hud(state);
   if (paused) {

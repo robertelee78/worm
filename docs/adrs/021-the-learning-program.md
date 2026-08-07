@@ -1,10 +1,14 @@
 # ADR-021: The Learning Program — Nine Surfaces Where the CPU Learns More
 
 ## Status
-Implemented (v1) — surfaces 1–7 shipped in their consult-shaped first
-forms with receipts below; 8 is design-complete and build-deferred
-(docs/fleet-warm-start-policy.md, N≥2 humans precondition); 9 is an
-unscheduled offline challenger behind three hard gates
+Implemented (v1.1) — surfaces 1–7 shipped, then adversarially VERIFIED:
+codex's post-execution pass returned UNSOUND with six blocking findings
+(finalization leak, unproved drift statistic, unpersisted look budget,
+unversioned/unsanitized wires, plateau-gate false positive, kata-2
+context shortfall) — all six fixed with tests in the v1.1 commit, plus
+episodic attempt semantics and discharge-site laser accounting. 8 is
+design-complete and build-deferred (docs/fleet-warm-start-policy.md,
+N≥2 humans); 9 unscheduled behind the drift-vetoed plateau gate
 
 ## Date
 2026-08-06
@@ -244,3 +248,43 @@ re-latched by round 5). tests/fixtures/brain_golden.bin now pins every
 persisted shape: any change breaks the golden-decode test with a
 message ordering the dual-write ritual. Hierarchical-backoff hazard
 was also gated: NEUTRAL (0.3620 vs 0.3619), not shipped.
+
+## Verification round (codex, verdict UNSOUND → v1.1 fixes, 2026-08-07)
+
+The authority invariant survived adversarial trace ("no self-knowledge
+path increases hunt frequency without earned_snapshot" — confirmed with
+citations), but six implementation contracts did not. All fixed:
+
+1. **Finalization leak**: ledgers resolved only in restart(), so the
+   browser's game-over save dropped every session's LAST round.
+   → `finalize_round_ledgers()` (idempotent, tested), called by the
+   wasm and native save paths and consumed by restart(); probes
+   finalize their final replay.
+2. **Family B's statistic wasn't covered by its proof**: the pooled-
+   variance two-window z is not a fair-coin sum. → Rebuilt as a SIGN
+   TEST against reference medians frozen at 15 rounds: each later round
+   is one exactly-Bernoulli(1/2) trial per statistic; two statistics ×
+   two sides = 4 budgeted channels; the family's existing exact bound
+   now genuinely applies.
+3. **Look budget didn't survive reload** (rounds_seen unpersisted).
+   → All drift trial state persists (DriftEpochsWire v2, dual-decode
+   from v1 per the golden-tripwire ritual — which CAUGHT this change).
+4. **Wires unversioned/unsanitized** → versioned decode on all four
+   sections; sanitize() enforces finiteness + cross-field invariants
+   (kills≤attempts, lethal≤fires, chased≤deaths, alternations bound,
+   known ids, size caps) and the voluntary VOMM's counts; poisoned-
+   section tests.
+5. **Plateau gate false-positive** (deterioration counted as flat;
+   drift unread) → two-sided flat band, recent-deterioration veto,
+   drift latch read directly, corpus identity printed, side series
+   from non-decayed counters. Verdict on the live corpus: TARGET
+   MOVING, gate shut.
+6. **Kata-2 context shortfall** (3 of 12 contexts) → full-parity rerun
+   on 94 rounds/26,920 frames: 8 buckets still beat 16 (0.3588 vs
+   0.3613); the backoff variant now WINS marginally (0.3575) —
+   recorded as a promotion candidate pending a holdout, not shipped in
+   a fix commit.
+
+Plus (ordered 6): tactic attempts are EPISODES (one pursuit = one
+attempt, exactly-once closure, tested) and laser fires are recorded at
+the discharge site, not during telegraph charging.

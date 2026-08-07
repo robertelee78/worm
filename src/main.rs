@@ -58,7 +58,12 @@ fn brain_load_path() -> std::path::PathBuf {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn save_brain(game: &WormGame) {
+fn save_brain(game: &mut WormGame) {
+    // Finalize the finished round before persisting (codex verification:
+    // saving at game over without this drops the session's last round).
+    if game.game_over {
+        game.finalize_round_ledgers();
+    }
     let _ = game.cpu_brain.save_file(&brain_path());
 }
 
@@ -302,7 +307,7 @@ fn main() -> std::io::Result<()> {
         }
 
         if quit {
-            save_brain(&game);
+            save_brain(&mut game);
             unsafe {
                 libc::tcsetattr(fd, libc::TCSAFLUSH, &old_termios);
             }
@@ -357,7 +362,7 @@ fn main() -> std::io::Result<()> {
             // Persist the per-player brain after every game — crash-safe
             // cross-session learning (also saved on quit). The inner loop
             // below blocks until restart/quit, so this runs once per game.
-            save_brain(&game);
+            save_brain(&mut game);
             execute!(
                 stdout,
                 SetForegroundColor(Color::Red),
@@ -395,7 +400,7 @@ fn main() -> std::io::Result<()> {
                         if n > 0 {
                             match game_over_key(&buf[..n]) {
                                 GameOverKey::Quit => {
-                                    save_brain(&game);
+                                    save_brain(&mut game);
                                     unsafe {
                                         libc::tcsetattr(fd, libc::TCSAFLUSH, &old_termios);
                                     }

@@ -2584,3 +2584,40 @@ fn a_bolt_ahead_of_its_firer_kills_first() {
     assert_eq!(game.winner, Some(0), "the firer wins by the bolt");
     assert!(game.cycles[0].alive, "the firer never reaches the corpse");
 }
+
+/// Codex verification fix 1: the session's LAST round persists. The
+/// browser saves at game over, before any restart — finalization must
+/// happen on the save path, exactly once, and restart must not double it.
+#[test]
+fn the_last_round_of_a_session_is_not_lost() {
+    let mut game = worm::WormGame::with_size_seed(40, 30, 9);
+    for _ in 0..10 {
+        game.cpu_brain.ledgers.note_frame(4, None, 0); // player close
+    }
+    game.winner = Some(0);
+    game.death_cause = Some(worm::DeathCause::EnemyTrail);
+    game.game_over = true;
+    // The save path finalizes...
+    game.finalize_round_ledgers();
+    assert_eq!(game.cpu_brain.ledgers.loss_causes[0].1, 1, "death recorded");
+    assert_eq!(game.cpu_brain.ledgers.loss_causes[0].2, 1, "chase attributed");
+    // ...idempotently...
+    game.finalize_round_ledgers();
+    assert_eq!(game.cpu_brain.ledgers.loss_causes[0].1, 1, "exactly once");
+    // ...and restart() consuming the same round adds nothing.
+    game.restart();
+    assert_eq!(game.cpu_brain.ledgers.loss_causes[0].1, 1, "restart consumes, not doubles");
+}
+
+/// SLIPSTREAM (owner request): the outer corridor runs at half time —
+/// the whole world clock, symmetric for both worms — and only while the
+/// player is actually out there.
+#[test]
+fn the_corridor_runs_at_half_time() {
+    let mut game = worm::WormGame::with_size_seed(40, 30, 5);
+    let base = game.frame_delay().as_millis();
+    game.cycles[0].head = (1, 5); // ring-1 corridor
+    assert_eq!(game.frame_delay().as_millis(), base * 2, "slipstream engaged");
+    game.cycles[0].head = (10, 10); // back inside the arena
+    assert_eq!(game.frame_delay().as_millis(), base, "normal time inside");
+}

@@ -107,8 +107,14 @@ impl WasmGame {
         crate::game::format_sfx_json(&crate::game::drain_sfx_events())
     }
 
-    /// Per-player brain export → IndexedDB.
-    pub fn brain_save(&self) -> Vec<u8> {
+    /// Per-player brain export → IndexedDB. Finalizes the finished
+    /// round's ledgers first (codex verification: the browser saves at
+    /// game over, BEFORE any restart — without this the session's last
+    /// round never persisted).
+    pub fn brain_save(&mut self) -> Vec<u8> {
+        if self.game.game_over {
+            self.game.finalize_round_ledgers();
+        }
         self.game.cpu_brain.to_bytes()
     }
 
