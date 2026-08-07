@@ -305,6 +305,33 @@ wins+draws — the discipline snap touches only proven-read play).
 
 Stage 3 — M14: the voluntary-turn VOMM as an ensemble model.
 
+### Stage 3 — executed (2026-08-06)
+
+M13 `alt` ("Rhythm reader" on the HUD): a second TurnPattern (VOMM)
+instance fed every voluntary lateral, exposed as an ensemble model that
+speaks whenever it has ≥ VOMM_MIN_EVENTS. Global weights bury it on
+straight volume BY DESIGN; the turn book scores it on the only frames
+it exists for and elects it there. Receipts:
+
+- Metronome alternator: book aT **0.54 → 0.98**; the gate now publishes
+  123 swerve forecasts per 12-game probe at **100% hit**; overall
+  published accuracy on its swerves 31% → 68%. The strict-alternator
+  acceptance test is UN-IGNORED and green (z >> 5).
+- Owner corpus: `alt` scores **60.5%** on his voluntary turns — the new
+  best single model on the frames that decide games (eatW 54.8%) —
+  while scoring 1% on straight frames, exactly the specialist shape
+  the sleeping-experts design wants. book_read stays latched
+  (spendable 0.33, coverage 1.00).
+- Roster 13 → 14: SEC_ENSEMBLE's fixed arrays make old ensemble
+  sections drop on decode (weights only — per-round state anyway);
+  ClassBooksWire is roster-tolerant and keeps the hazard. Web tables
+  updated in lockstep (MODEL_NAMES, MODEL_INFO with the `??` fallback,
+  BUILD 17→18) — the MODEL_INFO page-killer class cannot recur.
+- Full gauntlet green after the roster change: domination 93/96 warm/
+  cold and habitual 88% reading 0.54; NULLs hold on every family
+  channel; novice opening unchanged; live-site probes (legacy-state
+  poisoning + page boot) pass against the rebuilt wasm.
+
 Proof bar (per the kata): rca_probe re-run with the PRODUCTION baseline
 (codex fix) on the owner corpus — published voluntary-turn accuracy must
 move from 9% toward book-T's measured skill (~55-65%); ghost_eval

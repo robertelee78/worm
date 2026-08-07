@@ -11,12 +11,12 @@ import { computeBoardLayout, VIEWPORT_BLOCK_GUTTER } from './layout.js';
 let CELL = 14; // recomputed by applyBoardLayout() to fit the measured stage
 // Bump together with the ?v= in index.html whenever the wasm bundle is
 // rebuilt — it keys the cache-busting query on the .wasm fetch.
-const BUILD = 17;
+const BUILD = 18;
 const MATCH_TARGET = 3;
 const STATE_SCHEMA_VERSION = 2;
 const ROUND_SCHEMA_VERSION = 1;
 const MAX_ROUND_HISTORY = 200;
-const MODEL_NAMES = ['rep', 'pat', 'frq', 'due', 'wlR', 'wlL', 'knn', 'eat', 'hunt', 'arm', 'eatW', 'huntW', 'armW'];
+const MODEL_NAMES = ['rep', 'pat', 'frq', 'due', 'wlR', 'wlL', 'knn', 'eat', 'hunt', 'arm', 'eatW', 'huntW', 'armW', 'alt'];
 const DIR_GLYPH = ['▲', '▼', '◀', '▶'];
 const CELL_EMPTY = 0, CELL_WALL = 1, CELL_PLAYER = 2, CELL_CPU = 3, CELL_FOOD = 4, CELL_HOLE = 5, CELL_POWERUP = 6;
 
@@ -770,6 +770,7 @@ const MODEL_INFO = MODEL_NAMES.map((key) => ({
   eatW: { name: 'Food-seeker · weaving', blurb: 'same errand, weaving there' },
   huntW: { name: 'Hunter · weaving', blurb: 'same hunt, weaving in' },
   armW: { name: 'Arming-up · weaving', blurb: 'same errand, weaving there' },
+  alt: { name: 'Rhythm reader', blurb: 'your swerve cadence and which way next' },
 }[key] ?? { name: key, blurb: '' }));
 
 let modelRows = null;

@@ -1101,9 +1101,16 @@ impl WormGame {
                         }
                     }
                 }
-                // The dedicated hazard counter: voluntary laterals only.
+                // The dedicated hazard counter: voluntary laterals only —
+                // and the voluntary-turn VOMM (M13 `alt`) sees the same
+                // stream.
                 if straight_legal && turned_lateral {
                     self.cpu_brain.gap_since_voluntary = 0;
+                    if let Some(t) = player_turn {
+                        self.cpu_brain
+                            .voluntary_pattern
+                            .observe(t == crate::cpu_ai::Turn::Left);
+                    }
                 } else {
                     self.cpu_brain.gap_since_voluntary =
                         self.cpu_brain.gap_since_voluntary.saturating_add(1);

@@ -1446,6 +1446,11 @@ pub struct CpuBrain {
     /// habit across sessions.
     #[serde(skip)]
     pub turn_pattern: TurnPattern,
+    /// The voluntary-turn VOMM feeding ensemble model M13 `alt` — sees
+    /// every voluntary lateral, where the forced instance sees only
+    /// cornered breaks (ADR-020 stage 3). Transient, like its sibling.
+    #[serde(skip)]
+    pub voluntary_pattern: TurnPattern,
     /// Which temperaments beat THIS human — knowledge about them, persisted.
     #[serde(skip)]
     pub portfolio: Portfolio,
@@ -1857,6 +1862,7 @@ impl Default for CpuBrain {
             ensemble: Ensemble::default(),
             lifetime_read: ReadRate::default(),
             turn_pattern: TurnPattern::default(),
+            voluntary_pattern: TurnPattern::default(),
             portfolio: Portfolio::default(),
             intent_targets: [None; 2],
             class_books: ClassBooks::default(),
@@ -4131,7 +4137,7 @@ fn left_turn(dir: Direction) -> Direction {
  * rps-ai's per-game record); the k-NN memory beneath persists as the corpus.
  */
 
-pub const ENSEMBLE_MODELS: usize = 13;
+pub const ENSEMBLE_MODELS: usize = 14;
 /// Index of the k-NN model — the warm-corpus score bonus attaches here, not
 /// to "the last model", which stopped being the k-NN when the intent models
 /// joined.
@@ -4143,9 +4149,13 @@ pub const KNN_MODEL: usize = 6;
 /// any turn is equally short — the router's habit). The fixed-share weights
 /// elect whichever style THIS human actually travels with, which is the
 /// product claim in one mechanism. Slots 7-9 keep their historical indices.
+/// M13 `alt` is the voluntary-turn VOMM (ADR-020 stage 3): a SECOND
+/// TurnPattern instance fed every voluntary lateral — the owner's
+/// alternation lives here. The forced-only instance keeps its distinct
+/// "which way when cornered" semantics for the legal mask.
 pub const MODEL_NAMES: [&str; ENSEMBLE_MODELS] = [
     "rep", "pat", "frq", "due", "wlR", "wlL", "knn", "eat", "hunt", "arm", "eatW", "huntW",
-    "armW",
+    "armW", "alt",
 ];
 /// Score bonus for the sophisticated model once warm (rps-ai's +0.15).
 pub(crate) const KNN_SCORE_BONUS: f32 = 0.15;
@@ -4694,6 +4704,21 @@ pub fn compute_ensemble(
     let (eat, eat_w, eat_commit) = m_eat_family(game, brain.intent_targets[0]);
     let (hunt, hunt_w) = m_hunt_family(game);
     let (arm, arm_w, arm_commit) = m_arm_family(game, brain.intent_targets[1]);
+    // M13 `alt`: the side of the player's next VOLUNTARY swerve, from the
+    // voluntary-turn VOMM. Speaks every frame once it has evidence — the
+    // global weights bury it on straight-heavy volume by construction,
+    // and that is fine: the TURN BOOK scores it only on the frames it
+    // exists for, and elects it there.
+    let alt = if brain.voluntary_pattern.events >= VOMM_MIN_EVENTS {
+        let heading = game.cycles[0].direction;
+        if brain.voluntary_pattern.p_left() >= 0.5 {
+            Some(left_turn(heading))
+        } else {
+            Some(right_turn(heading))
+        }
+    } else {
+        None
+    };
     let pending = [
         m_repeat(tail),
         m_pattern(tail),
@@ -4708,6 +4733,7 @@ pub fn compute_ensemble(
         eat_w,
         hunt_w,
         arm_w,
+        alt,
     ];
 
     let e = &brain.ensemble;

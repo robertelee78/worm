@@ -518,7 +518,6 @@ fn null_control_coinflip_lifetime_read_stays_null() {
 /// until M14 (the voluntary-turn VOMM) lands; run with -- --ignored to
 /// measure progress.
 #[test]
-#[ignore = "stage-3 target: voluntary-turn VOMM (ADR-020)"]
 fn acceptance_a_strict_alternator_is_learned() {
     let r = play(Persona::SlalomAlt, 12, 20260806);
     report("slalom-alt (ACCEPTANCE)", &r);
