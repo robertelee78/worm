@@ -6754,6 +6754,54 @@ mod tests {
         assert!(r.uniform_chance() > 0.25, "never the old 25% claim");
     }
 
+    /// THE WIRE-SHAPE TRIPWIRE (owner data-loss incident, 2026-08-07):
+    /// stage 2.2 widened ClassBooksWire without versioned decode, and the
+    /// owner's saved book section silently failed bincode — his earned
+    /// read was WIPED once (the first four rounds of his next session
+    /// show earned=0). bincode is not field-tolerant; the never-wipe rule
+    /// therefore needs a tripwire, not vigilance. This test decodes a
+    /// COMMITTED golden brain file: any change to any persisted shape
+    /// breaks it, forcing the dual-write ritual (SEC_READ_RATE v1/v2
+    /// pattern) instead of a silent player wipe.
+    #[test]
+    fn the_golden_brain_still_decodes() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/brain_golden.bin");
+        let bytes = match std::fs::read(path) {
+            Ok(b) => b,
+            Err(_) => {
+                // First run: mint the fixture from a populated brain.
+                let mut brain = CpuBrain::new();
+                for i in 0..40 {
+                    let side = if i % 2 == 0 { Turn::Left } else { Turn::Right };
+                    brain.lifetime_read.record(3, side, side, [true; 3], true);
+                    brain.class_books.book_read.record(3, side, side, [true; 3], true);
+                    brain.voluntary_pattern.observe(i % 2 == 0);
+                    brain.class_books.observe_hazard(i % 96, i % 3 == 0);
+                }
+                brain.class_books.observe_turn_book(true);
+                brain.ledgers.tactic_attempts.push((0, 5.0, 2.0, 5, 2));
+                brain.ledgers.loss_causes.push((2, 3, 2));
+                let b = brain.to_bytes();
+                std::fs::create_dir_all(
+                    concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures"),
+                )
+                .unwrap();
+                std::fs::write(path, &b).unwrap();
+                b
+            }
+        };
+        let (brain, report) = CpuBrain::from_bytes_report(&bytes)
+            .expect("the golden brain must always decode");
+        assert_eq!(
+            report.sections_skipped, 0,
+            "a persisted section no longer decodes — you are about to wipe \
+             real players; use the dual-write pattern (SEC_READ_RATE v1/v2)"
+        );
+        assert!(brain.lifetime_read.samples > 0);
+        assert!(brain.class_books.book_read.samples > 0);
+        assert!(brain.voluntary_pattern.events > 0);
+    }
+
     /// Kata 2 (#4+#7): the rhythm reader's grammar survives sessions —
     /// a returning alternator is read from round one, not re-learned.
     #[test]

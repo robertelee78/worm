@@ -2119,13 +2119,37 @@ impl WormGame {
         self.cpu_brain.book_spend_snapshot = self.cpu_brain.class_books.spendable();
         self.cpu_brain.book_authority_snapshot =
             self.cpu_brain.class_books.projection_authority();
-        // ADR-021 Kata 4: the tactic ledger's one preference, snapshot at
-        // the boundary like every other in-round consumer's input.
+        // ADR-021 Kata 4 v2 (rUv rvf-solver's core idea, counting-native):
+        // THOMPSON SAMPLING over the two intercepts' posteriors instead of
+        // a greedy argmax — principled exploration that keeps measuring
+        // the loser without a schedule. One sample per ROUND (authority
+        // discipline), drawn deterministically from (seal_seed, rounds) so
+        // seeded runs and replays stay bit-identical; normal approximation
+        // to the Beta posterior, adequate at the n>=10 maturity floor.
         self.cpu_brain.tactic_prefer_direct = match (
             self.cpu_brain.ledgers.tactic_kill_rate(1),
             self.cpu_brain.ledgers.tactic_kill_rate(0),
         ) {
-            (Some(corner), Some(direct)) => direct > corner,
+            (Some(corner), Some(direct)) => {
+                let n_c = self.cpu_brain.ledgers.tactic_attempts.iter()
+                    .find(|e| e.0 == 1).map(|e| e.1).unwrap_or(1.0);
+                let n_d = self.cpu_brain.ledgers.tactic_attempts.iter()
+                    .find(|e| e.0 == 0).map(|e| e.1).unwrap_or(1.0);
+                let h = crate::cpu_ai::fnv1a64(
+                    &[self.seal_seed.to_le_bytes().as_slice(),
+                      (self.cpu_brain.portfolio.rounds as u64).to_le_bytes().as_slice()]
+                    .concat(),
+                );
+                // Two unit uniforms from the hash halves -> Box-Muller.
+                let u1 = ((h >> 32) as f32 / u32::MAX as f32).clamp(1e-6, 1.0 - 1e-6);
+                let u2 = ((h & 0xFFFF_FFFF) as f32 / u32::MAX as f32).clamp(1e-6, 1.0 - 1e-6);
+                let r = (-2.0 * u1.ln()).sqrt();
+                let z1 = r * (std::f32::consts::TAU * u2).cos();
+                let z2 = r * (std::f32::consts::TAU * u2).sin();
+                let s_c = corner + z1 * (corner * (1.0 - corner) / (n_c + 1.0)).sqrt();
+                let s_d = direct + z2 * (direct * (1.0 - direct) / (n_d + 1.0)).sqrt();
+                s_d > s_c
+            }
             _ => false,
         };
         // The active playstyle scales how hard the read is SPENT, never the

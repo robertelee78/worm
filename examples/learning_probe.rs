@@ -32,6 +32,7 @@ fn main() {
     // Spawn book: player's first 3 direction CHANGES per round (kind 0
     // events in the opening 60 frames), as a sequence signature.
     let mut spawn_sigs: HashMap<String, u32> = HashMap::new();
+    let mut era1_hz: Option<(Vec<f32>, Vec<f32>)> = None;
     // Bait/weapon supply: CPU fires by held weapon at fire time + whether
     // the player died within 40 frames after.
     let mut fires: HashMap<&'static str, (u32, u32)> = HashMap::new(); // (fired, lethal)
@@ -161,6 +162,7 @@ fn main() {
                 b.turn_events,
                 game.cpu_brain.voluntary_pattern.events
             );
+            era1_hz = Some((b.hz_turn.to_vec(), b.hz_total.to_vec()));
         }
     }
     {
@@ -171,6 +173,33 @@ fn main() {
             b.spendable(),
             b.turn_events
         );
+        // The DRIFT SIGNATURE (#5 of the ruvector deep map, counting-
+        // native): WHICH situations changed between eras — hazard-rate
+        // delta per cell, mass-weighted. This is the sentence the drift
+        // alarm will someday hand the notebook.
+        if let Some((t1, n1)) = &era1_hz {
+            let mut deltas: Vec<(usize, f32, f32)> = (0..worm::cpu_ai::HAZARD_CELLS)
+                .filter(|&i| n1[i] >= 5.0 && b.hz_total[i] - n1[i] >= 5.0)
+                .map(|i| {
+                    let h1 = (t1[i] + 0.5) / (n1[i] + 1.0);
+                    let h2 = ((b.hz_turn[i] - t1[i]).max(0.0) + 0.5)
+                        / ((b.hz_total[i] - n1[i]).max(0.0) + 1.0);
+                    (i, h1, h2)
+                })
+                .collect();
+            deltas.sort_by(|a, b2| {
+                (b2.2 - b2.1).abs().partial_cmp(&(a.2 - a.1).abs()).unwrap()
+            });
+            println!("[drift signature] top changed situations (cell: era1->era2 turn rate):");
+            for &(i, h1, h2) in deltas.iter().take(5) {
+                let gap = i % 8;
+                let rest = i / 8;
+                let side = ["food-ahead", "food-left", "food-right"][rest % 3];
+                let ate = if (rest / 3) % 2 == 1 { "+just-ate" } else { "" };
+                let close = if (rest / 6) % 2 == 1 { "+chased" } else { "" };
+                println!("  gap{gap} {side}{ate}{close}: {:.0}% -> {:.0}%", h1 * 100.0, h2 * 100.0);
+            }
+        }
     }
 
     // Era snapshot of book health (consult question C: does the measured
@@ -187,8 +216,14 @@ fn main() {
     {
         let mut t8 = vec![(0.0f32, 0.0f32); 8 * 12];
         let mut t16 = vec![(0.0f32, 0.0f32); 16 * 12];
+        // Backoff variant: same 8x12 cells PLUS a per-gap marginal (8) the
+        // cell shrinks toward with k=5 pseudo-mass — thin cells borrow
+        // strength from "situations like this" instead of sitting at 0.5.
+        let mut tb = vec![(0.0f32, 0.0f32); 8 * 12];
+        let mut tb_marg = vec![(0.0f32, 0.0f32); 8];
         let mut ll8 = 0f64;
         let mut ll16 = 0f64;
+        let mut llb = 0f64;
         let mut n_frames = 0u64;
         let mut game = WormGame::with_size_seed(55, 40, 1);
         game.cpu_autopilot = false;
@@ -230,11 +265,25 @@ fn main() {
                         let c16 = (gap as usize).min(15) + 16 * ctx;
                         let p8 = (t8[c8].0 + 0.5) / (t8[c8].1 + 1.0);
                         let p16 = (t16[c16].0 + 0.5) / (t16[c16].1 + 1.0);
+                        let g8 = (gap as usize).min(7);
+                        let pm = (tb_marg[g8].0 + 0.5) / (tb_marg[g8].1 + 1.0);
+                        let k = 5.0f32;
+                        let pb = (tb[c8].0 + k * pm) / (tb[c8].1 + k);
                         let y = lateral;
                         ll8 -= if y { (p8 as f64).ln() } else { (1.0 - p8 as f64).ln() };
                         ll16 -= if y { (p16 as f64).ln() } else { (1.0 - p16 as f64).ln() };
+                        llb -= if y { (pb as f64).ln() } else { (1.0 - pb as f64).ln() };
                         n_frames += 1;
-                        for (tab, cell) in [(&mut t8, c8), (&mut t16, c16)] {
+                        {
+                            let m = &mut tb_marg[g8];
+                            m.0 *= 0.995;
+                            m.1 *= 0.995;
+                            m.1 += 1.0;
+                            if y {
+                                m.0 += 1.0;
+                            }
+                        }
+                        for (tab, cell) in [(&mut t8, c8), (&mut t16, c16), (&mut tb, c8)] {
                             tab[cell].0 *= 0.995;
                             tab[cell].1 *= 0.995;
                             tab[cell].1 += 1.0;
@@ -252,9 +301,10 @@ fn main() {
             }
         }
         println!(
-            "\n== KATA-2 GATE: gap resolution (prequential log-loss, lower=better) ==\n  8-bucket: {:.4}/frame  16-bucket: {:.4}/frame  over {} eligible frames",
+            "\n== KATA-2 GATE: gap resolution (prequential log-loss, lower=better) ==\n  8-bucket: {:.4}/frame  16-bucket: {:.4}/frame  8+BACKOFF: {:.4}/frame  over {} eligible frames",
             ll8 / n_frames as f64,
             ll16 / n_frames as f64,
+            llb / n_frames as f64,
             n_frames
         );
     }

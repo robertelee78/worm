@@ -36,6 +36,19 @@ player's own play must outweigh the fleet.
   evaluator's completeness checks, and caps any single device's
   contribution to an archetype at 20%.
 
+## Amendment (2026-08-07): copy-on-write branch semantics preferred
+
+The pseudo-count injection above remains the fallback, but the BETTER
+shape — matching rUv's RVCOW/agenticow branch model — is: archetype =
+base container, each new player = a copy-on-write branch of it.
+Provenance is native (the branch ancestry IS the receipt), deletion is
+dropping lineage, and "briefed on players like you" becomes a literal,
+inspectable parent pointer instead of bookkeeping. The cap rule
+translates: the base contributes at most ~3 rounds of equivalent mass
+to any posterior, enforced at branch time. Evidence-channel isolation
+is unchanged: branches inherit ESTIMATES only, never evidence
+bookkeeping — every branch earns its own read from zero.
+
 ## Infrastructure (committed choice, ruvector-native)
 
 Server-side only, beside the collector: RVF single-file store, HNSW

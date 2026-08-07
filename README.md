@@ -113,6 +113,28 @@ read went from 6% (habit models only) to ~76-85%
 difficulty multiplier would just restore the arbitrary clock ramp ADR-007
 deleted.
 
+### The learning program: nine ways it studies you
+
+[ADR-021](docs/adrs/021-the-learning-program.md) turned "where else can
+it learn?" into nine measured surfaces, built kata-by-kata under two
+external design consults: a tactic ledger with Thompson-sampled
+preferences (which intercept kills YOU), a weapon opportunity book
+with a bounded bait-exploration floor, a per-cause death ledger that
+raises its escape floors against players who box it in, a persisted
+swerve grammar (your rhythm is read from round one when you return),
+a drift alarm (its own anytime-valid evidence family) that notices
+when you change your game and says so, an epistemic self-map of the
+situations it has never seen you in, and an envelopment alarm that
+feels its space collapsing before the box closes. Two more are
+deliberately gated: fleet warm-starting (policy written, waits for a
+second returning human) and any neural challenger (a plateau detector
+measures its entry gate weekly — and currently reports the target
+MOVING: the first player is measurably adapting to being read, which
+holds that door shut). Every aggressive consumer spends only
+round-boundary snapshots of family-gated evidence; everything else is
+narration. A committed golden brain file makes wiping a player's
+learning a test failure instead of an accident.
+
 ### The turn book: reading the frames that decide games
 
 The owner's own 45-round ghost corpus then exposed the next wall

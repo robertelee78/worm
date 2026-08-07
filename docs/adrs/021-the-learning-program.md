@@ -205,3 +205,42 @@ surface).
   (SEC_FLEET_PRIOR_RECEIPT, disclosure, deletion, poisoning caps),
   ruvector-native server-side infra. Build waits for a second
   returning human.
+
+## The ruvector deep-map round (2026-08-07, executed)
+
+Five "untried" items from the grounded deep map, each tried in its
+honest form, with executable receipts:
+
+1. **Thompson-sampled tactic preference (v2)** — replaces the greedy
+   argmax at the round boundary: normal-approximated Beta posteriors,
+   one deterministic draw per round from (seal_seed, rounds) — replay
+   and seed-run safe. rvf-solver's core idea, counting-native.
+2. **COW branch semantics** amended into the fleet policy: archetype =
+   base container, player = branch; ancestry is the provenance receipt;
+   branches inherit estimates only, never evidence.
+3. **Live crate trial** (scratch project, real crates.io):
+   ruvector-mincut 2.0.6 — builds, finds the thin-bridge cut value
+   correctly; partition() semantics returned an unexpected split and
+   need a closer read before any product use. rvf-runtime 0.3.2 —
+   create/ingest_batch/query roundtrip WORKS (API drifted from the
+   ADR snippets: RvfOptions.dimension, ingest_batch(&[&[f32]], &[u64],
+   meta), SearchResult.id — recorded so the fleet build starts from
+   truth). The fleet's infrastructure is real and verified.
+4. **The plateau gate is now automated**: scripts/weekly-learning-audit.sh
+   (cron, Mondays 08:53) runs sona_probe + the learning supplies into
+   .harness/learning-audit.log — the heavy-learner gate is checked
+   weekly without anyone remembering to.
+5. **The drift signature** (counting-native mincut-question): per-cell
+   era-over-era hazard deltas name WHICH situations changed. First run
+   on the owner: stopped panic-weaving under pursuit (gap1
+   food-left+chased 65%→18%), delays corrections much longer (gap7
+   food-left 14%→55%), new post-pickup double-turn (gap0 just-ate
+   4%→36%). This is the drift alarm's future notebook sentence.
+
+Also this round: **the wire tripwire** — the owner's book section was
+silently wiped once by stage 2.2's unversioned ClassBooksWire widening
+(his next session's first four rounds show earned=0; the read
+re-latched by round 5). tests/fixtures/brain_golden.bin now pins every
+persisted shape: any change breaks the golden-decode test with a
+message ordering the dual-write ritual. Hierarchical-backoff hazard
+was also gated: NEUTRAL (0.3620 vs 0.3619), not shipped.
