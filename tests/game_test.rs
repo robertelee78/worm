@@ -2482,6 +2482,7 @@ fn a_stale_book_record_never_scores() {
         target_frame: 999_999,
         cell: 3,
         side: Some(worm::Direction::Left),
+        food_side_dir: None,
     });
     game.update();
     let b = &game.cpu_brain.class_books;

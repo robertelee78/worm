@@ -91,11 +91,14 @@ pub fn tuning() -> &'static Tuning {
         bold_spend: env_f32("WORM_TUNE_BOLD_SPEND", 0.40),
         bold_drive: env_f32("WORM_TUNE_BOLD_DRIVE", 1.0),
         open_latency: env_f32("WORM_TUNE_OPEN_LATENCY", 6.0),
-        // Default OFF: paired grading on the owner corpus measured the
-        // bend slightly WORSE on the authority-active subset (8075 vs
-        // 7989 summed loss over 1134 windows). The machinery stays for
-        // Darwin and for players whose hazard genuinely spikes.
-        book_bend: env_f32("WORM_TUNE_BOOK_BEND", 0.0),
+        // Default ON — EARNED by measurement, in two steps (ADR-014
+        // discipline): with the original 64-cell aligned-boolean hazard
+        // the bend measured WORSE on the authority-active subset (8075
+        // vs 7989 over 1,134 windows) and shipped off; with the 96-cell
+        // food-side hazard and the learned toward-food split (stage 2.2)
+        // it WINS: 15,247 vs 15,463 over 2,075 authority-active windows
+        // on the 63-round owner corpus. Darwin can still veto it.
+        book_bend: env_f32("WORM_TUNE_BOOK_BEND", 1.0),
         book_spend: env_f32("WORM_TUNE_BOOK_SPEND", 1.0),
     })
 }

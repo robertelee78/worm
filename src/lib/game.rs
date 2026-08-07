@@ -1085,6 +1085,11 @@ impl WormGame {
                         // genuine two-sided choices count — with one legal
                         // lateral the side is board-determined.
                         if turned_lateral && both_laterals_legal {
+                            if let Some(fd) = p.food_side_dir {
+                                self.cpu_brain
+                                    .class_books
+                                    .observe_toward_food(fd == player_dir_this_frame);
+                            }
                             self.cpu_brain.class_books.side_opportunities =
                                 self.cpu_brain.class_books.side_opportunities.saturating_add(1);
                             if let Some(side) = p.side {
@@ -1474,22 +1479,17 @@ impl WormGame {
                 let cpu_close =
                     dist <= 12 && dist < self.cpu_brain.prev_pc_dist.max(1);
                 self.cpu_brain.prev_pc_dist = dist;
-                let aligned = self
+                let nearest = self
                     .food_items
                     .iter()
                     .min_by_key(|&&(fx, fy, _)| {
                         (fx as i32 - px as i32).abs() + (fy as i32 - py as i32).abs()
                     })
-                    .map(|&(fx, fy, _)| {
-                        let (dx, dy) = heading.as_delta();
-                        (fx as i32 - px as i32) * dx as i32
-                            + (fy as i32 - py as i32) * dy as i32
-                            > 0
-                    })
-                    .unwrap_or(true);
+                    .map(|&(fx, fy, _)| (fx, fy));
+                let fside = crate::cpu_ai::food_side(px, py, heading, nearest);
                 let cell = crate::cpu_ai::hazard_cell(
                     self.cpu_brain.gap_since_voluntary,
-                    aligned,
+                    fside,
                     self.cpu_brain.frames_since_food <= 3,
                     cpu_close,
                 );
@@ -1498,6 +1498,15 @@ impl WormGame {
                     target_frame: self.frame_count + 1,
                     cell,
                     side: side.map(|(_, d)| d),
+                    food_side_dir: match fside {
+                        crate::cpu_ai::FoodSide::Left => {
+                            Some(crate::cpu_ai::left_turn(heading))
+                        }
+                        crate::cpu_ai::FoodSide::Right => {
+                            Some(crate::cpu_ai::right_turn(heading))
+                        }
+                        crate::cpu_ai::FoodSide::Ahead => None,
+                    },
                 });
                 // Fold the book's precommitment (target frame, context
                 // cell, side) into the reveal chain. This is an INTERNAL

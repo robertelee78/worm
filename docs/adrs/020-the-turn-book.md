@@ -294,6 +294,35 @@ family, at every frame, across three seeds, and a fair-side book
 never wins projection authority. Novice opening unchanged (~22%
 wins+draws — the discipline snap touches only proven-read play).
 
+### Stage 2.2 — the WHY gets geometry (2026-08-06, post-verification)
+
+The projection's food-geometry upgrade, k3's top "want", executed:
+
+- The hazard's aligned boolean became a 3-way FOOD-SIDE feature
+  (ahead-closing / off-LEFT / off-RIGHT; 96 cells) — the owner's
+  measured why-structure is overshoot-and-correct, and which side the
+  food sits on carries the correction's direction. His sharpest cell
+  under the new features: gap-6 × food-left × just-ate at h = 0.61
+  (was 0.54 under the old features).
+- A learned correction prior joins ClassBooks: P(voluntary turn breaks
+  toward the food side | food off to a side), decayed KT (he measured
+  59% in the RCA). It feeds ONLY the projection's side split when the
+  book abstains — never an evidence channel. NULL-safe by
+  construction (a coin-side player teaches it 0.5) and covered by the
+  existing per-frame family assertions.
+- The scenario-medoid projection now advances the food-side feature
+  along the horizon and splits each turn-at-t scenario's side mass
+  per step.
+
+**Measured, and the default flipped on the receipt**: paired 5-frame
+loss on the 63-round corpus, authority-active subset — bend 15,247 vs
+straight 15,463 over 2,075 windows (bend wins 1.4%), where the
+pre-geometry bend LOST by 1% and shipped default-off. book_bend now
+defaults ON, with both measurements recorded at the knob. Gauntlet,
+NULLs (per-frame, all channels), and the novice opening are unchanged.
+Persisted 64-cell hazard sections drop gracefully (cell-count-keyed
+wire) and re-earn.
+
 ### Receipts reconciliation (kimi-k3 final verification)
 
 The numbers in this document come from DIFFERENT corpus exports and

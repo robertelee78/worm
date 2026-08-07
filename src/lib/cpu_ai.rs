@@ -1531,13 +1531,22 @@ pub struct PendingBook {
     pub cell: usize,
     /// The book's side pick, None when no lateral model spoke.
     pub side: Option<Direction>,
+    /// The lateral direction TOWARD the nearest food at commit time
+    /// (None when food was ahead/absent) — trains the correction prior.
+    pub food_side_dir: Option<Direction>,
 }
 
 /* ----------------------- the turn book (ADR-020 stage 2) ----------------------- */
 
 /// Number of hazard cells: gap-since-voluntary-turn (8 buckets) ×
-/// food-aligned (2) × just-ate (2) × cpu-closing (2).
-pub const HAZARD_CELLS: usize = 64;
+/// food-side (3: ahead-closing / off to the LEFT / off to the RIGHT) ×
+/// just-ate (2) × cpu-closing (2). The 3-way food-side feature replaces
+/// the original aligned boolean (ADR-020 stage 2.2): the owner's measured
+/// why-structure is overshoot-and-correct — P(turn | misaligned) 16.5%
+/// vs 10.4% aligned, and WHICH side the food sits on carries the
+/// correction's direction. Persisted 64-cell sections drop gracefully
+/// (the wire is cell-count-keyed) and the hazard re-earns.
+pub const HAZARD_CELLS: usize = 96;
 /// Voluntary-turn events the book must have scored before the gate may
 /// fire at all (kimi-k3: maturity floor; ~22 events arrive per round
 /// against the owner, so this is about a round and a half of warmup).
@@ -1588,6 +1597,12 @@ pub struct ClassBooks {
     /// excellent accuracy on an undisclosed subset.
     pub side_opportunities: u32,
     pub side_declarations: u32,
+    /// Learned correction prior (stage 2.2): of the voluntary laterals
+    /// taken while the food sat off to one side, how many broke TOWARD
+    /// that side. Decayed KT pair; feeds ONLY the projection's side split
+    /// when the book abstains — never an evidence channel.
+    pub toward_food: f32,
+    pub toward_total: f32,
     /// The book's own honest evidence record: its precommitted side picks
     /// scored on genuine two-sided voluntary turns through the SAME
     /// machinery as the published read — class-aware legality-aware
@@ -1615,6 +1630,8 @@ impl Default for ClassBooks {
             turn_events: 0,
             side_opportunities: 0,
             side_declarations: 0,
+            toward_food: 0.0,
+            toward_total: 0.0,
             book_read: ReadRate::default(),
             gate_open: false,
         }
@@ -1689,6 +1706,21 @@ impl ClassBooks {
     /// stays zero (codex round 2).
     pub fn projection_authority(&self) -> bool {
         self.turn_events >= BOOK_MATURITY && self.book_read.earned_read() > 0.0
+    }
+
+    /// KT estimate of P(voluntary turn breaks toward the food side |
+    /// food off to a side). 0.5 at no data.
+    pub fn q_toward_food(&self) -> f32 {
+        (self.toward_food + 0.5) / (self.toward_total + 1.0)
+    }
+
+    pub fn observe_toward_food(&mut self, toward: bool) {
+        self.toward_food *= BOOK_DECAY;
+        self.toward_total *= BOOK_DECAY;
+        self.toward_total += 1.0;
+        if toward {
+            self.toward_food += 1.0;
+        }
     }
 
     /// Fraction of genuine side choices where the book declared a side.
@@ -1809,6 +1841,8 @@ struct ClassBooksWire {
     turn_events: u32,
     side_opportunities: u32,
     side_declarations: u32,
+    toward_food: f32,
+    toward_total: f32,
     book_read: ReadRate,
     gate_open: bool,
 }
@@ -1828,6 +1862,8 @@ impl From<&ClassBooks> for ClassBooksWire {
             turn_events: b.turn_events,
             side_opportunities: b.side_opportunities,
             side_declarations: b.side_declarations,
+            toward_food: b.toward_food,
+            toward_total: b.toward_total,
             book_read: b.book_read,
             gate_open: b.gate_open,
         }
@@ -1857,20 +1893,66 @@ impl ClassBooksWire {
         b.turn_events = self.turn_events;
         b.side_opportunities = self.side_opportunities;
         b.side_declarations = self.side_declarations;
+        b.toward_food = self.toward_food;
+        b.toward_total = self.toward_total;
         b.book_read = self.book_read;
         b.gate_open = self.gate_open;
         b
     }
 }
 
+/// Which side of the player's heading the nearest food sits on.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum FoodSide {
+    /// Heading is closing on it — no correction due.
+    Ahead,
+    /// Off to the player's LEFT: an overshoot correction breaks left.
+    Left,
+    /// Off to the player's RIGHT.
+    Right,
+}
+
+/// Classify the nearest food relative to a heading from a position.
+/// `Ahead` when the heading still closes on it (or there is no food);
+/// otherwise the perpendicular side it sits on (ties toward Ahead).
+pub fn food_side(
+    px: u16,
+    py: u16,
+    heading: Direction,
+    nearest: Option<(u16, u16)>,
+) -> FoodSide {
+    let Some((fx, fy)) = nearest else {
+        return FoodSide::Ahead;
+    };
+    let (dx, dy) = heading.as_delta();
+    let (rx, ry) = (fx as i32 - px as i32, fy as i32 - py as i32);
+    if rx * dx as i32 + ry * dy as i32 > 0 {
+        return FoodSide::Ahead;
+    }
+    // Cross product sign: positive = food on the heading's right.
+    let cross = dx as i32 * ry - dy as i32 * rx;
+    if cross > 0 {
+        FoodSide::Right
+    } else if cross < 0 {
+        FoodSide::Left
+    } else {
+        FoodSide::Ahead
+    }
+}
+
 /// Bucket the hazard context into a cell index.
 /// gap: frames since the player's last voluntary lateral (0..7+);
-/// aligned: their heading is closing on the nearest food;
+/// side: where the nearest food sits relative to their heading;
 /// just_ate: they picked food up within the last 3 frames;
 /// cpu_close: the CPU is within 12 cells and closing.
-pub fn hazard_cell(gap: u32, aligned: bool, just_ate: bool, cpu_close: bool) -> usize {
+pub fn hazard_cell(gap: u32, side: FoodSide, just_ate: bool, cpu_close: bool) -> usize {
     let g = (gap as usize).min(7);
-    g | ((aligned as usize) << 3) | ((just_ate as usize) << 4) | ((cpu_close as usize) << 5)
+    let s = match side {
+        FoodSide::Ahead => 0usize,
+        FoodSide::Left => 1,
+        FoodSide::Right => 2,
+    };
+    g + 8 * (s + 3 * ((just_ate as usize) + 2 * (cpu_close as usize)))
 }
 
 impl Default for CpuBrain {
@@ -2196,6 +2278,8 @@ impl CpuBrain {
                         b.at_total,
                         b.book_read.lat_chance,
                         b.book_read.lat_var,
+                        b.toward_food,
+                        b.toward_total,
                     ]
                     .iter(),
                 )
@@ -3866,21 +3950,18 @@ fn predict_player_positions_book(
         .copied();
     let mut surv = 1.0f32;
     let mut turn_mass: Vec<f32> = Vec::with_capacity(max_frames);
+    let mut step_food_side: Vec<FoodSide> = Vec::with_capacity(max_frames);
     let mut prev_dist = brain.prev_pc_dist;
     for (step, &(px, py)) in base.iter().enumerate() {
-        let aligned = nearest_food
-            .map(|(fx, fy, _)| {
-                let (dx, dy) = heading.as_delta();
-                (fx as i32 - px as i32) * dx as i32 + (fy as i32 - py as i32) * dy as i32 > 0
-            })
-            .unwrap_or(true);
+        let fside = food_side(px, py, heading, nearest_food.map(|(fx, fy, _)| (fx, fy)));
+        step_food_side.push(fside);
         let dist =
             ((px as i32 - cx as i32).abs() + (py as i32 - cy as i32).abs()) as u32;
         let cpu_close = dist <= 12 && dist < prev_dist.max(1);
         prev_dist = dist;
         let cell = hazard_cell(
             brain.gap_since_voluntary.saturating_add(step as u32),
-            aligned,
+            fside,
             brain.frames_since_food.saturating_add(step as u32) <= 3,
             cpu_close,
         );
@@ -3890,19 +3971,30 @@ fn predict_player_positions_book(
     }
     let no_turn_mass = surv;
 
-    // Side split: the book's declared side carries its calibrated
-    // accuracy; the other side the remainder. No declaration → the
-    // learned turn prior decides the split.
+    // Side split, PER STEP (stage 2.2): the book's declared side carries
+    // its calibrated accuracy; with no declaration, the learned
+    // overshoot-correction prior speaks — a turn taken while the food
+    // sits off to one side breaks toward that side with probability
+    // q_toward_food (the owner measured 59%). No food in play → the
+    // turn prior, as before.
     let a_t = brain.class_books.a_turn().clamp(0.5, 1.0);
+    let q_food = brain.class_books.q_toward_food().clamp(0.0, 1.0);
     let side_pref = brain.pending_book.and_then(|p| p.side);
-    let (p_l, p_r) = match side_pref {
-        Some(d) if d == l => (a_t, 1.0 - a_t),
-        Some(d) if d == r => (1.0 - a_t, a_t),
-        _ => {
-            let prior = brain.opp_brain.turn_prior();
-            let (wl, wr) = (prior[turn_index(Turn::Left)], prior[turn_index(Turn::Right)]);
-            let s = (wl + wr).max(1e-6);
-            (wl / s, wr / s)
+    let split_at = |step: usize| -> (f32, f32) {
+        match side_pref {
+            Some(d) if d == l => (a_t, 1.0 - a_t),
+            Some(d) if d == r => (1.0 - a_t, a_t),
+            _ => match step_food_side.get(step) {
+                Some(FoodSide::Left) => (q_food, 1.0 - q_food),
+                Some(FoodSide::Right) => (1.0 - q_food, q_food),
+                _ => {
+                    let prior = brain.opp_brain.turn_prior();
+                    let (wl, wr) =
+                        (prior[turn_index(Turn::Left)], prior[turn_index(Turn::Right)]);
+                    let s = (wl + wr).max(1e-6);
+                    (wl / s, wr / s)
+                }
+            },
         }
     };
 
@@ -3957,6 +4049,7 @@ fn predict_player_positions_book(
         if turn_mass[t] <= 1e-4 {
             continue;
         }
+        let (p_l, p_r) = split_at(t);
         scenarios.push((turn_mass[t] * p_l, walk_bent(t, l)));
         scenarios.push((turn_mass[t] * p_r, walk_bent(t, r)));
     }
@@ -4083,7 +4176,7 @@ fn predict_player_positions_iterative(
     positions
 }
 
-fn right_turn(dir: Direction) -> Direction {
+pub fn right_turn(dir: Direction) -> Direction {
     match dir {
         Direction::Up => Direction::Right,
         Direction::Right => Direction::Down,
@@ -4092,7 +4185,7 @@ fn right_turn(dir: Direction) -> Direction {
     }
 }
 
-fn left_turn(dir: Direction) -> Direction {
+pub fn left_turn(dir: Direction) -> Direction {
     match dir {
         Direction::Up => Direction::Left,
         Direction::Left => Direction::Down,
