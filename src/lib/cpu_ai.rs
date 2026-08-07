@@ -1568,6 +1568,15 @@ pub struct CpuBrain {
     pub book_spend_snapshot: f32,
     #[serde(skip)]
     pub book_authority_snapshot: bool,
+    /// Kata 4 (#1): round-boundary snapshot of the tactic ledger's one
+    /// active preference — direct intercept over corner when BOTH are
+    /// mature and the ledger says direct kills this player better. Its
+    /// consumer is a YIELD (the corner layer steps aside), which can only
+    /// make a frame LESS aggressive — self-knowledge re-ranking already
+    /// gated options, exactly the agreed envelope. The incumbent rule
+    /// order is the null; the gauntlet is the regression tripwire.
+    #[serde(skip)]
+    pub tactic_prefer_direct: bool,
     /// Self-knowledge instrumentation (ADR-021 Kata 0). Persisted in its
     /// own sections; recording-only until later katas activate readers.
     #[serde(skip)]
@@ -1659,6 +1668,11 @@ pub struct LearningLedgers {
     pub drift_z: f32,
     /// Rounds summarized so far — family B's look counter.
     pub rounds_seen: u32,
+    /// Kata 5 (#2) exploration bookkeeping (transient): frames the CPU
+    /// has been sitting on a mine, and whether this round's single
+    /// exploratory placement is spent.
+    pub mine_held_streak: u32,
+    pub explore_used: bool,
 }
 
 impl LearningLedgers {
@@ -1734,6 +1748,17 @@ impl LearningLedgers {
             .map(|e| e.2)
             .unwrap_or(0);
         (0.06 * chased_trail as f32).min(0.5)
+    }
+
+    /// Kata 4 (#1): decayed kill-rate for a tactic, None below the
+    /// maturity floor (10 non-decayed attempts) — an immature ledger
+    /// abstains rather than steering on noise.
+    pub fn tactic_kill_rate(&self, id: u8) -> Option<f32> {
+        self.tactic_attempts
+            .iter()
+            .find(|e| e.0 == id)
+            .filter(|e| e.3 >= 10)
+            .map(|e| (e.2 + 0.5) / (e.1 + 1.0))
     }
 
     pub fn note_cpu_death(&mut self, cause_id: u8) {
@@ -1832,6 +1857,8 @@ impl LearningLedgers {
         self.rs_last_left = None;
         self.open_attempt = None;
         self.recent_dist.clear();
+        self.mine_held_streak = 0;
+        self.explore_used = false;
     }
 }
 
@@ -2048,6 +2075,29 @@ impl ClassBooks {
         if toward {
             self.toward_food += 1.0;
         }
+    }
+
+    /// Kata 6 (#3): the epistemic self-map, count-based (both consults:
+    /// 96 static cells need direct mass, not connectivity — the
+    /// ruvector-mincut dep was evaluated and declined for v1, verdict in
+    /// ADR-021). Returns (populated, thin, unseen) hazard cells; decayed
+    /// mass, so thinness reflects CURRENCY, not ancient history. Facts,
+    /// not hypotheses — no evidence gate; consumers are narration only.
+    pub fn map_summary(&self) -> (u32, u32, u32) {
+        let mut populated = 0;
+        let mut thin = 0;
+        let mut unseen = 0;
+        for cell in 0..HAZARD_CELLS {
+            if self.hz_total[cell] < 1.0 {
+                unseen += 1;
+            } else if self.hz_total[cell] < 5.0 {
+                populated += 1;
+                thin += 1;
+            } else {
+                populated += 1;
+            }
+        }
+        (populated, thin, unseen)
     }
 
     /// Fraction of genuine side choices where the book declared a side.
@@ -2307,6 +2357,7 @@ impl Default for CpuBrain {
             earned_snapshot: 0.0,
             book_spend_snapshot: 0.0,
             book_authority_snapshot: false,
+            tactic_prefer_direct: false,
             ledgers: LearningLedgers::default(),
             pending_book: None,
         }
@@ -5893,6 +5944,12 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
         }
     }
 
+    // ADR-021 Kata 4: when the tactic ledger has matured on BOTH
+    // intercepts and says direct kills this player better, the corner
+    // layer yields the frame to it (a strictly less-aggressive move on
+    // frames where direct then declines).
+    let corner_yields = game.cpu_brain.tactic_prefer_direct;
+
     // --- CHOKEPOINT INTERCEPT: cut across to corners against wall-followers ---
     // When the player is a wall-follower (confidence high, direction stable),
     // predict which corner they'll reach and cut across to lay a trail barrier.
@@ -5906,7 +5963,7 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
     // so this cannot open before ~10 observed real choices regardless; the
     // hunt floor still vets every destination. Lowered to buy engagement
     // without touching a survival floor.
-    if player_pred_conf >= crate::tuning::tuning().corner_gate {
+    if !corner_yields && player_pred_conf >= crate::tuning::tuning().corner_gate {
         // Predict the corner the player will reach next.
         // Wall-followers turn right at corners. We predict their path to the next corner.
         let corner_target = predict_next_corner(game, &game.cycles[0], player_pred_dir);

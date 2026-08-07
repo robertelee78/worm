@@ -1630,7 +1630,32 @@ impl WormGame {
             // fires, so it charges visibly for LASER_TELEGRAPH_FRAMES first
             // (red embers along the beam) — crossing the CPU's firing line is
             // dodgeable instead of an unannounced instant death.
-            let wants_fire = crate::cpu_ai::should_fire(self, 1);
+            let mut wants_fire = crate::cpu_ai::should_fire(self, 1);
+            // ADR-021 Kata 5 (#2): the bait book's supply-generator. The
+            // geometric gate stays the incumbent; a mine the CPU has sat
+            // on for 40+ frames may be placed ONCE per round anyway —
+            // mine only (placement is the least directly lethal weapon
+            // and the disguise is the thing being measured), never in a
+            // player's first three rounds (the novice opening is a priced
+            // contract), and only with room to leave the trigger ring.
+            // Player-independent, bounded, disclosed — an exploration
+            // floor, not learned aggression.
+            if !wants_fire
+                && self.cycles[1].held_powerup == Some(PowerUpKind::Bomb)
+                && self.cpu_brain.ledgers.mine_held_streak >= 40
+                && !self.cpu_brain.ledgers.explore_used
+                && self.cpu_brain.ledgers.rounds_seen >= 3
+                && crate::cpu_ai::legal_directions(self, &self.cycles[1]).len() >= 2
+            {
+                wants_fire = true;
+                self.cpu_brain.ledgers.explore_used = true;
+            }
+            if self.cycles[1].held_powerup == Some(PowerUpKind::Bomb) {
+                self.cpu_brain.ledgers.mine_held_streak =
+                    self.cpu_brain.ledgers.mine_held_streak.saturating_add(1);
+            } else {
+                self.cpu_brain.ledgers.mine_held_streak = 0;
+            }
             if let Some(kind) = self.cycles[1].held_powerup {
                 self.cpu_brain
                     .ledgers
@@ -2094,6 +2119,15 @@ impl WormGame {
         self.cpu_brain.book_spend_snapshot = self.cpu_brain.class_books.spendable();
         self.cpu_brain.book_authority_snapshot =
             self.cpu_brain.class_books.projection_authority();
+        // ADR-021 Kata 4: the tactic ledger's one preference, snapshot at
+        // the boundary like every other in-round consumer's input.
+        self.cpu_brain.tactic_prefer_direct = match (
+            self.cpu_brain.ledgers.tactic_kill_rate(1),
+            self.cpu_brain.ledgers.tactic_kill_rate(0),
+        ) {
+            (Some(corner), Some(direct)) => direct > corner,
+            _ => false,
+        };
         // The active playstyle scales how hard the read is SPENT, never the
         // read itself: cautious plays under its evidence, relentless over it.
         // Survival floors are untouched by every style.

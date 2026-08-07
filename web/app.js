@@ -1025,6 +1025,8 @@ function roundRecord(s) {
     memoryDelta: Math.max(0, s.brain.memory.opponentObserved -
       (roundMemoryStart ?? s.brain.memory.opponentObserved)),
     driftDetected: !!(s.brain.book && s.brain.book.driftDetected),
+    mapUnseen: s.brain.book?.mapUnseen ?? null,
+    mapThin: s.brain.book?.mapThin ?? null,
     book: s.brain.book ? {
       sideAccuracy: Number.isFinite(s.brain.book.sideAccuracy) ? s.brain.book.sideAccuracy : null,
       sideEvents: s.brain.book.sideEvents ?? 0,

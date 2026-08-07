@@ -1,9 +1,10 @@
 # ADR-021: The Learning Program — Nine Surfaces Where the CPU Learns More
 
 ## Status
-Proposed — design in consult (codex + kimi-k3, in flight); this document
-carries the spike data and constraints now, and gains its Decision
-sections as each surface's kata completes
+Implemented (v1) — surfaces 1–7 shipped in their consult-shaped first
+forms with receipts below; 8 is design-complete and build-deferred
+(docs/fleet-warm-start-policy.md, N≥2 humans precondition); 9 is an
+unscheduled offline challenger behind three hard gates
 
 ## Date
 2026-08-06
@@ -161,3 +162,46 @@ surface).
 8. **#9 SONA**: unscheduled offline challenger; bars = beats the
    counting stack prequentially, compiles to one HUD sentence,
    deterministic wasm inference.
+
+## Kata record (all executed 2026-08-06/07)
+
+- **Kata 0** — registry + ledgers + downward-crossing persona; ghost
+  bisect proved metric-neutrality and re-baselined the program at
+  +2.5%/13,120 (stage 2.2's gate coupling, previously unreported).
+- **Kata 1 (#5)** — boxer aversion: chased enemy-trail deaths raise the
+  escape floor +6%/kill, cap +50%, floors only rise, chase-gated;
+  Darwin ESCAPE_* static sweep ran alongside (no static winner —
+  validating the learner as the right tool).
+- **Kata 2 (#4+#7)** — the consult gate REJECTED 16 gap buckets
+  (prequential log-loss 0.3642 vs 0.3619 — sparsity beats shape on
+  this corpus; 8 stays). The durable half shipped: the voluntary VOMM
+  persists (SEC_TURN_TIMING), so the rhythm/opening read survives
+  sessions — the honest core of the spawn book, with codex's
+  hindsight-scored signature explicitly not built.
+- **Kata 3 (#6)** — drift alarm: two-window alternation z at
+  round-count looks, family B, Schmitt-latched, narration-only
+  (nothing resets, nothing spends). End-to-end: alternator→coin trips
+  it; 34 stationary rounds never do.
+- **Kata 4 (#1)** — tactic bandit v1: precommitted-window ledger
+  matured at ≥10 attempts/tactic; its one consumer is a YIELD (corner
+  intercept steps aside when the ledger says direct kills this player
+  better) — strictly non-aggression-raising, snapshot at round
+  boundary, incumbent order as the null, gauntlet unchanged.
+- **Kata 5 (#2)** — bait supply-generator: one exploratory mine
+  placement per round after 40 held frames, never in a player's first
+  three rounds, room-to-leave preserved; novice probe BYTE-IDENTICAL
+  (5/30/5). Learned per-weapon exploitation stays off until the
+  opportunity ledger matures (~10 fires/weapon).
+- **Kata 6 (#3)** — epistemic self-map, count-based: (populated, thin,
+  unseen) over decayed hazard mass; notebook + web state carry it as
+  coverage QUANTITY, kept apart from earned significance. The
+  ruvector-mincut dependency was evaluated against its live API and
+  declined for v1 (both consults: 96 static cells need mass, not
+  connectivity); active-curiosity steering deferred — the only
+  steerable context dimension (proximity) is already what curiosity
+  maximizes.
+- **Kata 7 (#8)** — docs/fleet-warm-start-policy.md: the merge rule
+  (pseudo-counts, ~3-round cap, separate fields), honesty invariants
+  (SEC_FLEET_PRIOR_RECEIPT, disclosure, deletion, poisoning caps),
+  ruvector-native server-side infra. Build waits for a second
+  returning human.

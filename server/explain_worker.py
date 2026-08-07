@@ -85,6 +85,11 @@ def build_prompt(rec):
         # ADR-021 Kata 3: the drift alarm — a proven change in the
         # player's swerve grammar within the recent window.
         "playStyleDriftDetected": rec.get("driftDetected"),
+        # ADR-021 Kata 6: the epistemic self-map — situations it has
+        # never seen this player in (quantity of coverage, NOT read
+        # significance; keep the two distinct if mentioned).
+        "situationsNeverSeen": rec.get("mapUnseen"),
+        "situationsThinlySeen": rec.get("mapThin"),
     }
     return (
         "You are the CPU opponent's notebook in a snake/Tron arcade game whose "

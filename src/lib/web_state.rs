@@ -155,6 +155,13 @@ struct BookState {
     /// The drift alarm (narration only): has this player's swerve
     /// grammar measurably changed within the recent window?
     drift_detected: bool,
+    /// The epistemic self-map: of the CPU's situation cells for THIS
+    /// player, how many are populated / thin / never seen. Quantity, not
+    /// significance — kept apart from `earned` on purpose (conflating
+    /// them is the phantom-confidence class).
+    map_populated: u32,
+    map_thin: u32,
+    map_unseen: u32,
 }
 
 #[derive(Serialize)]
@@ -420,6 +427,18 @@ impl GameState {
                             "forecast"
                         },
                         drift_detected: game.cpu_brain.ledgers.drift_latched,
+                        map_populated: {
+                            let (p, _, _) = b.map_summary();
+                            p
+                        },
+                        map_thin: {
+                            let (_, t, _) = b.map_summary();
+                            t
+                        },
+                        map_unseen: {
+                            let (_, _, u) = b.map_summary();
+                            u
+                        },
                     }
                 },
                 read_rate: ReadRateScopes {
