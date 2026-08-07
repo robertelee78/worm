@@ -289,6 +289,11 @@ fn play(persona: Persona, games: u32, seed: u64) -> Result {
             {
                 let r = &game.cpu_brain.lifetime_read;
                 let b = &game.cpu_brain.class_books;
+                // is_significant() is the one-shot exact reporter checked
+                // here as a CANARY only — a random-walk maximum that
+                // could in principle flake on a fresh seed with no leak
+                // present. The look-boundary LATCHES are the authority
+                // difficulty actually spends (kimi-k3, finding 3).
                 out.read_significant |= r.is_significant()
                     || r.lateral_significant()
                     || r.mc_latched
@@ -339,6 +344,18 @@ fn report(name: &str, r: &Result) {
         r.chance() * 100.0,
         r.z()
     );
+    // When every habit frame is a LATERAL (the slalom personas), the
+    // honest side-null is 1/2, not 1/options — the z above is the
+    // harness's coarse instrument and prints high on a fair-side
+    // slalomer while every production channel is correctly null
+    // (kimi-k3 final verification, finding 2). Print the conditional
+    // comparison alongside so the line cannot be misread.
+    if r.persona_turn[0] == 0 && r.habit_frames > 0 {
+        println!(
+            "    side-conditional: read {:>5.1}% vs side-null 50.0% (production channels are the authority)",
+            r.rate() * 100.0
+        );
+    }
     println!(
         "    persona turns at habit frames  S{} L{} R{}   |  cpu predicted  S{} L{} R{}   |  no-forecast {}",
         r.persona_turn[0], r.persona_turn[1], r.persona_turn[2],

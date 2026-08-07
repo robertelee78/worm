@@ -294,6 +294,21 @@ family, at every frame, across three seeds, and a fair-side book
 never wins projection authority. Novice opening unchanged (~22%
 wins+draws — the discipline snap touches only proven-read play).
 
+### Receipts reconciliation (kimi-k3 final verification)
+
+The numbers in this document come from DIFFERENT corpus exports and
+builds, bound here explicitly: stage-1/2 receipts (8,390 frames, 983
+events, coverage 0.99, lift +2.8/+2.9%) measured the 45-round export
+of the owner corpus on the build current at each stage; the final
+receipts (13,120 frames, 986 events, coverage 1.00, +2.7%) measured
+the 63-round export — 18 new rounds played against the honest build —
+after the codex-round-3 fixes. The metronome probe's counts (123 vs
+64 published forecasts) bracket the same fixes: the boundary and
+snapshot changes altered game trajectories, and the assertions bind
+the design guarantees (aT, hazard spike, gate fires, >90% hit), not
+the chaotic supply. Same instruments, different data — never the same
+number silently remeasured.
+
 ### Proof bar, rewritten (stage 2 measured; supersedes the original)
 
 - a. Book side skill: aT ≥ 0.65 with coverage ≥ 0.9 on genuine

@@ -1022,24 +1022,6 @@ pub struct ReadRate {
 }
 
 impl ReadRate {
-    /// The commonest turn seen SO FAR. Ties break to the lowest index, so the
-    /// baseline is deterministic and a run is replayable. `None` before any
-    /// evidence — a predictor with no data has no call, and that counts as a
-    /// miss rather than a free pass.
-    fn modal_turn(&self) -> Option<Turn> {
-        let max = *self.taken.iter().max()?;
-        if max == 0 {
-            return None;
-        }
-        (0..TURNS)
-            .find(|&i| self.taken[i] == max)
-            .map(|i| match i {
-                0 => Turn::Straight,
-                1 => Turn::Left,
-                _ => Turn::Right,
-            })
-    }
-
     /// The commonest turn seen so far AMONG the given legal set — the
     /// baseline restricted to what the board actually allowed this frame.
     /// Ties break to the lowest index (Straight, Left, Right) for
@@ -2206,7 +2188,17 @@ impl CpuBrain {
                 .iter()
                 .chain(b.hz_total.iter())
                 .chain(b.wt_slow.iter())
-                .chain([b.as_hits, b.as_total, b.at_hits, b.at_total].iter())
+                .chain(
+                    [
+                        b.as_hits,
+                        b.as_total,
+                        b.at_hits,
+                        b.at_total,
+                        b.book_read.lat_chance,
+                        b.book_read.lat_var,
+                    ]
+                    .iter(),
+                )
                 .any(|v| !v.is_finite() || *v < 0.0);
             if bad {
                 *b = ClassBooks::default();
@@ -3001,68 +2993,6 @@ fn best_food_target(
     best.map(|(_, d, open)| (d, open))
 }
 
-fn bfs_nearest_food_dir(
-    game: &WormGame,
-    sx: u16,
-    sy: u16,
-    legal: &[Direction],
-) -> Option<(Direction, f32)> {
-    if game.food_items.is_empty() && game.powerups.is_empty() {
-        return None;
-    }
-
-    let mut visited = vec![vec![false; game.width as usize]; game.height as usize];
-    let mut queue: VecDeque<(u16, u16, Direction)> = VecDeque::new();
-
-    // Seed the queue with all legal first steps.
-    for &d in legal {
-        let (dx, dy) = d.as_delta();
-        let nx = sx as i16 + dx;
-        let ny = sy as i16 + dy;
-        if nx < 0 || ny < 0 || nx >= game.width as i16 || ny >= game.height as i16 {
-            continue;
-        }
-        let (nx, ny) = (nx as u16, ny as u16);
-        if (nx, ny) != (sx, sy) && !visited[ny as usize][nx as usize] {
-            visited[ny as usize][nx as usize] = true;
-            queue.push_back((nx, ny, d));
-        }
-    }
-
-    let dirs = [(0i16, -1i16), (0, 1), (-1, 0), (1, 0)];
-
-    while let Some((x, y, start_dir)) = queue.pop_front() {
-        // Check if this cell is a collectible (food or power-up).
-        if matches!(
-            game.grid[y as usize][x as usize],
-            CellType::Food | CellType::PowerUp
-        ) {
-            let open = count_open_space(game, x, y);
-            return Some((start_dir, open));
-        }
-
-        // Expand neighbors: travel through any occupiable non-food cell
-        // (walls and trails block; holes and power-ups are walkable).
-        for (dx, dy) in &dirs {
-            let nx = x as i16 + dx;
-            let ny = y as i16 + dy;
-            if nx < 0 || ny < 0 || nx >= game.width as i16 || ny >= game.height as i16 {
-                continue;
-            }
-            let (nx, ny) = (nx as u16, ny as u16);
-            if !visited[ny as usize][nx as usize]
-                && matches!(
-                    game.grid[ny as usize][nx as usize],
-                    CellType::Empty | CellType::Hole | CellType::PowerUp
-                )
-            {
-                visited[ny as usize][nx as usize] = true;
-                queue.push_back((nx, ny, start_dir));
-            }
-        }
-    }
-    None
-}
 
 /// Per-direction Manhattan distance to the nearest food, in the half-plane
 /// the direction faces: `along + perp` for targets ahead, `cap` for targets
