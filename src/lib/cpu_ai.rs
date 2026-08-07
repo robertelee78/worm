@@ -130,7 +130,9 @@ pub fn hunt_floor_cells(game: &WormGame, who: usize, read_rate: f32) -> f32 {
     // decays as the CPU sharpens — a U over the learning arc: bold at first
     // contact, tight while consolidating, committed once it knows you.
     let spend =
-        (t.hunt_spend * read.powf(t.hunt_curve) + t.bold_spend * (1.0 - game.sharpness())).min(0.85);
+        (t.hunt_spend * read.powf(t.hunt_curve)
+        + t.bold_spend * (1.0 - game.sharpness()) * game.boldness_scale())
+    .min(0.85);
     (escape_floor_cells(game, who) * (1.0 - spend)).max(t.escape_margin)
 }
 
@@ -986,6 +988,27 @@ pub struct ReadRate {
     /// counted anywhere.
     pub cpu_only: u32,
     pub mode_only: u32,
+    /// The LATERAL channel (ADR-020 stage 1): forecast performance on the
+    /// frames where the player actually turned, scored against uniform
+    /// chance over the options they faced. McNemar above answers "better
+    /// than the class-aware modal base?"; against a pure modal habit that
+    /// is honestly NO — the base calls the habit too — yet the read is
+    /// real. This channel answers the other honest question, "better than
+    /// chance where it counts?", and a null player is at chance on it by
+    /// definition.
+    pub lat_samples: u32,
+    pub lat_hits: u32,
+    /// Sum of per-frame uniform chance (1/options) over lateral frames.
+    pub lat_chance: f32,
+    /// Sum of per-frame p(1-p) — the exact variance of the chance rival.
+    pub lat_var: f32,
+    /// Schmitt latch on the lateral channel: proven at 3 sigma, and it
+    /// stays proven until the evidence decays below 1 sigma. Without
+    /// hysteresis the absolute excess is frozen once earned while variance
+    /// keeps growing, so a genuine read drifts back under a single fixed
+    /// gate and sharpness flaps dozy mid-session. A null never crosses
+    /// 3 sigma, so the latch never manufactures a read.
+    pub lat_latched: bool,
 }
 
 impl ReadRate {
@@ -1007,17 +1030,91 @@ impl ReadRate {
             })
     }
 
-    pub fn record(&mut self, options: u8, actual: Turn, hit: bool) {
+    /// The commonest turn seen so far AMONG the given legal set — the
+    /// baseline restricted to what the board actually allowed this frame.
+    /// Ties break to the lowest index (Straight, Left, Right) for
+    /// replayability; None before any evidence, which counts as a miss,
+    /// not a free pass.
+    fn modal_among(&self, legal: [bool; TURNS]) -> Option<Turn> {
+        let max = (0..TURNS)
+            .filter(|&i| legal[i])
+            .map(|i| self.taken[i])
+            .max()?;
+        if max == 0 {
+            return None;
+        }
+        (0..TURNS)
+            .find(|&i| legal[i] && self.taken[i] == max)
+            .map(|i| match i {
+                0 => Turn::Straight,
+                1 => Turn::Left,
+                _ => Turn::Right,
+            })
+    }
+
+    pub fn record(
+        &mut self,
+        options: u8,
+        actual: Turn,
+        predicted: Turn,
+        legal: [bool; TURNS],
+        hit: bool,
+    ) {
         // Score the baseline BEFORE folding this frame in, so it never peeks
         // at the outcome it is being judged on — the same information the CPU
         // had, at the same instant.
-        let mode_hit = self.modal_turn() == Some(actual);
+        //
+        // INFORMATION PARITY (ADR-020 stage 1, both halves): the baseline
+        // gets everything public the CPU's forecast had —
+        //
+        //  * the LEGAL set: on a forced turn the CPU calls the only exit
+        //    from board knowledge alone; a baseline never told what was
+        //    legal is structurally wrong there, and every such frame is a
+        //    fabricated point of "evidence" (a habit-free slalomer measured
+        //    lift 0.35, SIGNIFICANT, from exactly this leak);
+        //  * the forecast's own CLASS: when the published forecast is
+        //    itself a TURN, the base answers with the commonest LATERAL —
+        //    otherwise every turn forecast competes against a rival that
+        //    structurally answers "straight", the discordant stream goes
+        //    one-sided by construction, and a chance-level turn predictor
+        //    grades as significantly "learned".
+        let mode_hit = if predicted != Turn::Straight {
+            let lateral_only = [false, legal[1], legal[2]];
+            let pick = if lateral_only.iter().any(|&b| b) {
+                self.modal_among(lateral_only)
+            } else {
+                self.modal_among(legal)
+            };
+            pick == Some(actual)
+        } else {
+            self.modal_among(legal) == Some(actual)
+        };
 
         self.samples += 1;
         self.taken[turn_index(actual)] += 1;
         self.opts[(options as usize).min(3)] += 1;
         if hit {
             self.hits += 1;
+        }
+        // Real choices only: a single-exit turn is board knowledge (p=1,
+        // zero variance, guaranteed hit) — folding those in dilutes the
+        // rate toward chance while a handful of true choices swing the
+        // lift magnitude wildly. Measured vs the domination persona:
+        // ~740 of 758 lateral frames were single-option.
+        if actual != Turn::Straight && options >= 2 {
+            let p = 1.0 / (options as f32);
+            self.lat_samples += 1;
+            self.lat_chance += p;
+            self.lat_var += p * (1.0 - p);
+            if hit {
+                self.lat_hits += 1;
+            }
+            let z = self.lateral_z();
+            if z > 3.0 && self.lat_samples >= 20 {
+                self.lat_latched = true;
+            } else if z < 1.0 {
+                self.lat_latched = false;
+            }
         }
         if mode_hit {
             self.mode_hits += 1;
@@ -1028,6 +1125,53 @@ impl ReadRate {
             (false, true) => self.mode_only += 1,
             _ => {}
         }
+    }
+
+    /// Lift of the lateral-frame forecast over uniform chance, 0 when the
+    /// evidence does not clear a 3-sigma binomial bar. Straight frames are
+    /// excluded by construction, so "predict the usual thing" scores zero
+    /// here and cannot inflate it.
+    pub fn lateral_lift(&self) -> f32 {
+        if !self.lateral_significant() {
+            return 0.0;
+        }
+        let rate = self.lat_hits as f32 / self.lat_samples as f32;
+        let chance = self.lat_chance / self.lat_samples as f32;
+        if chance >= 1.0 {
+            return 0.0;
+        }
+        ((rate - chance) / (1.0 - chance)).clamp(0.0, 1.0)
+    }
+
+    /// The lateral channel's z against chance (exact per-frame variance).
+    fn lateral_z(&self) -> f32 {
+        if self.lat_var <= 0.0 {
+            return 0.0;
+        }
+        (self.lat_hits as f32 - self.lat_chance) / self.lat_var.sqrt()
+    }
+
+    /// Whether the lateral channel's evidence is proven — the Schmitt
+    /// latch's current state (see `lat_latched`).
+    pub fn lateral_significant(&self) -> bool {
+        self.lat_latched || (self.lat_samples >= 20 && self.lateral_z() > 3.0)
+    }
+
+    /// The read the CPU has actually EARNED — the number sharpness is
+    /// allowed to spend. Two evidence channels, each with its own
+    /// significance bar, take the max:
+    ///  * McNemar lift over the class-aware modal base (catches edges the
+    ///    base cannot express, e.g. alternation);
+    ///  * lateral lift over uniform chance (catches habits the base ALSO
+    ///    calls — a real read even though the discordant stream is silent).
+    /// A null player clears neither, so an unearned read is exactly 0.
+    pub fn earned_read(&self) -> f32 {
+        let mcnemar = if self.is_ready() && self.is_significant() {
+            self.lift().max(0.0)
+        } else {
+            0.0
+        };
+        mcnemar.max(self.lateral_lift())
     }
 
     /// Raw hit rate. On its own this number is not evidence of anything.
@@ -1424,7 +1568,12 @@ impl CpuBrain {
             },
         );
         push_section(&mut sections, SEC_ENSEMBLE, &self.ensemble);
-        push_section(&mut sections, SEC_READ_RATE, &self.lifetime_read);
+        push_section(
+            &mut sections,
+            SEC_READ_RATE,
+            &ReadRateWireV1::from(&self.lifetime_read),
+        );
+        push_section(&mut sections, SEC_READ_RATE2, &self.lifetime_read);
         push_section(&mut sections, SEC_TURN_PRIOR, &self.opp_brain.turn_tally);
         push_section(&mut sections, SEC_PORTFOLIO, &self.portfolio);
 
@@ -1664,7 +1813,11 @@ impl CpuBrain {
                     Ok(t) => brain.opp_brain.turn_tally = t,
                     Err(_) => report.sections_skipped += 1,
                 },
-                SEC_READ_RATE => match bincode::deserialize::<ReadRate>(body) {
+                SEC_READ_RATE => match bincode::deserialize::<ReadRateWireV1>(body) {
+                    Ok(r) => brain.lifetime_read = r.into(),
+                    Err(_) => report.sections_skipped += 1,
+                },
+                SEC_READ_RATE2 => match bincode::deserialize::<ReadRate>(body) {
                     Ok(r) => brain.lifetime_read = r,
                     Err(_) => report.sections_skipped += 1,
                 },
@@ -1742,6 +1895,54 @@ const SEC_READ_RATE: u16 = 6;
 const SEC_TURN_PRIOR: u16 = 7;
 /// The Exp3 playstyle weights — which temperaments beat this human.
 const SEC_PORTFOLIO: u16 = 8;
+/// The widened lifetime read (adds the lateral evidence channel, ADR-020).
+/// `bincode` is not field-tolerant, so the widened `ReadRate` gets a NEW
+/// section id; `SEC_READ_RATE` keeps carrying the v1 projection so an older
+/// build reading a newer save still recovers the core read instead of
+/// wiping what the CPU learned about the human. The writer emits v1 before
+/// v2, so on load the full record wins.
+const SEC_READ_RATE2: u16 = 10;
+
+/// The pre-ADR-020 `ReadRate` shape, kept as the v1 wire projection.
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ReadRateWireV1 {
+    hits: u32,
+    samples: u32,
+    taken: [u32; TURNS],
+    opts: [u32; 4],
+    mode_hits: u32,
+    cpu_only: u32,
+    mode_only: u32,
+}
+
+impl From<&ReadRate> for ReadRateWireV1 {
+    fn from(r: &ReadRate) -> Self {
+        ReadRateWireV1 {
+            hits: r.hits,
+            samples: r.samples,
+            taken: r.taken,
+            opts: r.opts,
+            mode_hits: r.mode_hits,
+            cpu_only: r.cpu_only,
+            mode_only: r.mode_only,
+        }
+    }
+}
+
+impl From<ReadRateWireV1> for ReadRate {
+    fn from(w: ReadRateWireV1) -> Self {
+        ReadRate {
+            hits: w.hits,
+            samples: w.samples,
+            taken: w.taken,
+            opts: w.opts,
+            mode_hits: w.mode_hits,
+            cpu_only: w.cpu_only,
+            mode_only: w.mode_only,
+            ..ReadRate::default()
+        }
+    }
+}
 
 /// One `(vector, direction, reward, seq)` row. The vector is a length-prefixed
 /// `Vec<f32>` rather than a fixed array precisely so a dimension change is a
@@ -4100,13 +4301,35 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
     //
     // Explainable as: "it doesn't act on a read until it has watched you make
     // about ten real choices."
-    let read_conf = (game.cpu_brain.opp_brain.turn_observations() / 10.0).min(1.0);
+    // Evidence = LATERAL turns actually scored (voluntary and forced alike;
+    // the owner corpus has 1,015 voluntary vs 5 forced — the old
+    // forced-turn-only tally starved this ramp to ~0.5 against him forever,
+    // so no forecast quality could ever open the intercept gates). Rides the
+    // persisted lifetime read, so returning players keep their evidence.
+    // Quantity × quality, both honest (ADR-020 stage 1). The ramp counts
+    // LATERAL turns actually scored (the owner corpus has 1,015 voluntary
+    // vs 5 forced — the old forced-turn-only tally starved this to ~0.5
+    // against him forever). But quantity alone must not open the gates:
+    // warm sessions accumulate laterals in one game, and a full-open gate
+    // behind a forecast with no earned read was measured hunting the CPU
+    // into walls (warm 77% vs cold 93% — memory COSTING wins). Quality is
+    // the earned read itself, so the gates open exactly as fast as the
+    // evidence that the forecast deserves them.
+    let read_conf = ((game.cpu_brain.lifetime_read.taken[1]
+        + game.cpu_brain.lifetime_read.taken[2]) as f32
+        / 10.0)
+        .min(1.0)
+        * game.cpu_brain.lifetime_read.earned_read();
     // THE BEATABLE OPENING's second half: before there is a read, the hunt
     // gates may run on RAW forecast confidence (straight-line extrapolation
     // chasing) — eager, imperfect, killable. The DBR observation ramp takes
     // over as real choices accumulate, and boldness fades with the read.
     let read_conf =
-        read_conf.max(crate::tuning::tuning().bold_drive * (1.0 - game.sharpness()));
+        read_conf.max(
+            crate::tuning::tuning().bold_drive
+                * (1.0 - game.sharpness())
+                * game.boldness_scale(),
+        );
     // Two confidences, split on purpose (codex silent-model finding, then
     // measured):
     //  - track_conf gates DEFENSIVE use of the projected path. When the
@@ -4432,7 +4655,18 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
                     let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
                     let closer = (nx as i16 - px as i16).abs() + (ny as i16 - py as i16).abs()
                         < dist_now;
-                    closer && count_open_space(game, nx, ny) >= escape_cells
+                    // Never approach down the player's own driving lane: a
+                    // curiosity step there plus a dozy held heading is a
+                    // manufactured HEAD-ON (measured: 3 of 5 warm draws).
+                    // The player's lane is the strip ±1 cell around the ray
+                    // ahead of their head; side and rear approaches keep the
+                    // encounters — and the earned trail kills — coming.
+                    let (pdx, pdy) = game.cycles[0].direction.as_delta();
+                    let (rx, ry) = (nx as i16 - px as i16, ny as i16 - py as i16);
+                    let ahead = rx * pdx as i16 + ry * pdy as i16 > 0;
+                    let lane_off = (rx * pdy as i16 - ry * pdx as i16).abs();
+                    let head_on_lane = ahead && lane_off <= 1;
+                    closer && !head_on_lane && count_open_space(game, nx, ny) >= escape_cells
                 })
                 .max_by_key(|&d| {
                     let (ddx, ddy) = d.as_delta();
@@ -5097,10 +5331,10 @@ mod tests {
         // Player goes straight 80% of the time. CPU always guesses straight —
         // exactly what the baseline does, so they hit and miss together.
         for _ in 0..80 {
-            r.record(3, Turn::Straight, true);
+            r.record(3, Turn::Straight, Turn::Straight, [true; 3], true);
         }
         for _ in 0..20 {
-            r.record(3, Turn::Left, false);
+            r.record(3, Turn::Left, Turn::Straight, [true; 3], false);
         }
 
         assert!(r.rate() > 0.79, "raw rate looks respectable: {}", r.rate());
@@ -5112,21 +5346,26 @@ mod tests {
         assert!(!r.is_significant());
     }
 
-    /// Catching the turns the baseline misses is the only thing that counts —
-    /// and it is exactly what shows up as discordant pairs.
+    /// Catching what the baseline CANNOT is the only thing that counts.
+    /// Under the class-conditional baseline (ADR-020) a habitual always-Left
+    /// breaker is called by the base's lateral modal too — no credit there.
+    /// What the lagging modal can never call is ALTERNATION: predicting each
+    /// switch lands a discordant point every time.
     #[test]
     fn calling_the_turns_is_what_earns_significance() {
         let mut r = ReadRate::default();
         for _ in 0..80 {
-            r.record(3, Turn::Straight, true); // both right, no evidence
+            r.record(3, Turn::Straight, Turn::Straight, [true; 3], true); // both right, no evidence
         }
-        for _ in 0..20 {
-            r.record(3, Turn::Left, true); // CPU right, baseline wrong
+        for i in 0..20 {
+            // Player alternates R,L,R,L…; CPU has the alternation read.
+            let t = if i % 2 == 0 { Turn::Right } else { Turn::Left };
+            r.record(3, t, t, [true; 3], true); // CPU right, lagging modal wrong
         }
 
-        // 20 turns, plus the very first frame where the baseline had no data
-        // yet and therefore no call.
-        assert_eq!(r.cpu_only, 21, "every turn called is a point of evidence");
+        // 20 alternating turns the modal base always trails, plus the very
+        // first frame where the baseline had no data yet and made no call.
+        assert_eq!(r.cpu_only, 21, "every switch called is a point of evidence");
         assert_eq!(r.mode_only, 0);
         assert!(r.is_ready());
         assert!(r.is_significant(), "p = {}", r.p_value());
@@ -5141,9 +5380,21 @@ mod tests {
         let mut r = ReadRate::default();
         // Disagreements split evenly — the CPU wins some, the baseline wins
         // just as many. That is what "no better" looks like.
-        for i in 0..200 {
-            let turn = if i % 3 == 0 { Turn::Left } else { Turn::Straight };
-            r.record(3, turn, i % 2 == 0);
+        // Seed a Left lateral habit so the class-aware base has a stable
+        // modal call, then feed 20 discordant frames split dead even: the
+        // CPU calls the off-modal turn right as often as it fumbles the
+        // modal one. That is what "no better than the base" looks like.
+        for _ in 0..10 {
+            r.record(3, Turn::Left, Turn::Left, [true; 3], true);
+        }
+        for i in 0..20 {
+            if i % 2 == 0 {
+                // Player breaks off-modal (Right); CPU calls it, base can't.
+                r.record(3, Turn::Right, Turn::Right, [true; 3], true);
+            } else {
+                // Player takes the modal Left; CPU guesses Right and misses.
+                r.record(3, Turn::Left, Turn::Right, [true; 3], false);
+            }
         }
         assert!(r.is_ready(), "plenty of disagreements to judge on");
         assert!(
@@ -5181,10 +5432,10 @@ mod tests {
     fn uniform_chance_never_assumes_four_options() {
         let mut r = ReadRate::default();
         for _ in 0..10 {
-            r.record(2, Turn::Straight, true); // two ways out -> 1/2
+            r.record(2, Turn::Straight, Turn::Straight, [true, true, false], true); // two ways out -> 1/2
         }
         for _ in 0..10 {
-            r.record(3, Turn::Straight, true); // three ways out -> 1/3
+            r.record(3, Turn::Straight, Turn::Straight, [true; 3], true); // three ways out -> 1/3
         }
         let expected = (10.0 * 0.5 + 10.0 / 3.0) / 20.0;
         assert!((r.uniform_chance() - expected).abs() < 1e-5);
@@ -5197,7 +5448,7 @@ mod tests {
     fn read_rate_survives_persistence() {
         let mut brain = CpuBrain::new();
         for _ in 0..40 {
-            brain.lifetime_read.record(3, Turn::Left, true);
+            brain.lifetime_read.record(3, Turn::Left, Turn::Left, [true; 3], true);
         }
         let (restored, report) = CpuBrain::from_bytes_report(&brain.to_bytes()).unwrap();
         assert_eq!(restored.lifetime_read.samples, 40);

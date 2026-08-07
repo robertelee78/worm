@@ -75,6 +75,26 @@ enum Persona {
     /// Picks uniformly whenever it has a real choice. NULL — there is nothing
     /// to learn and the CPU must not appear to learn it.
     Coinflip,
+    /// Turns VOLUNTARILY every few frames — straight is open, it swerves
+    /// anyway — with the side chosen by a fair coin. The food-farming slalom
+    /// rhythm with no side habit at all. NULL for the honest baseline
+    /// (ADR-020): a gated or class-blind scorer reads this ghost as
+    /// "learned"; the class-conditional McNemar must not.
+    SlalomCoin,
+    /// The same voluntary cadence, but strictly ALTERNATING sides — the
+    /// measured owner signature (P(alternate)=62%, turn every ~5 frames)
+    /// distilled to its learnable core. Stage-3 acceptance target.
+    SlalomAlt,
+}
+
+/// Cross-frame memory for personas whose habit spans frames.
+#[derive(Default)]
+struct PersonaState {
+    /// Frames since the last voluntary lateral swerve.
+    gap: u32,
+    /// The side of the last LATERAL turn, as 'L'/'R'. Tracking the last
+    /// lateral — not the last frame — is what makes alternation a habit.
+    last_lateral: Option<char>,
 }
 
 /// What the persona did, and whether it was a real exercise of its habit.
@@ -85,7 +105,7 @@ struct Move {
     habit_frame: bool,
 }
 
-fn act(p: Persona, game: &WormGame, rng: &mut Rng) -> Move {
+fn act(p: Persona, game: &WormGame, rng: &mut Rng, st: &mut PersonaState) -> Move {
     let cur = game.cycles[0].direction;
     let (l, r) = (left_of(cur), right_of(cur));
     let straight_open = can_step(game, cur);
@@ -138,6 +158,46 @@ fn act(p: Persona, game: &WormGame, rng: &mut Rng) -> Move {
                 habit_frame: true,
             }
         }
+        Persona::SlalomCoin | Persona::SlalomAlt => {
+            let due = st.gap >= 4;
+            if due && sides.len() == 2 && straight_open {
+                // A genuinely voluntary swerve: straight was open, both
+                // sides were open, the persona turned anyway.
+                let side = match p {
+                    Persona::SlalomAlt => match st.last_lateral {
+                        Some('L') => r,
+                        Some('R') => l,
+                        _ => l,
+                    },
+                    _ => {
+                        if rng.next_f32() < 0.5 {
+                            l
+                        } else {
+                            r
+                        }
+                    }
+                };
+                st.gap = 0;
+                st.last_lateral = Some(if side == l { 'L' } else { 'R' });
+                return Move { dir: side, habit_frame: true };
+            }
+            if straight_open {
+                st.gap += 1;
+                return Move { dir: cur, habit_frame: false };
+            }
+            // Cornered: take whichever side is open (coin on both — forced
+            // turns must carry no side signal for either slalom persona).
+            st.gap = 0;
+            let dir = if sides.len() == 2 {
+                if rng.next_f32() < 0.5 { l } else { r }
+            } else {
+                *sides.first().unwrap_or(&cur)
+            };
+            if dir == l || dir == r {
+                st.last_lateral = Some(if dir == l { 'L' } else { 'R' });
+            }
+            Move { dir, habit_frame: false }
+        }
     }
 }
 
@@ -154,6 +214,11 @@ struct Result {
     turn_prior: [f32; 3],
     /// Habit frames where the CPU issued no forecast at all.
     no_forecast: u32,
+    /// Whether ANY per-round check of the lifetime read came out
+    /// significant on either evidence channel — the strictest null: a
+    /// habit-free opponent must never cross either bar even transiently.
+    read_significant: bool,
+    read_lift: f32,
 }
 
 impl Result {
@@ -180,6 +245,7 @@ impl Result {
 fn play(persona: Persona, games: u32, seed: u64) -> Result {
     let mut game = WormGame::with_size_seed(120, 38, seed);
     let mut rng = Rng(seed ^ 0x9E37_79B9);
+    let mut st = PersonaState::default();
     let mut out = Result {
         habit_frames: 0,
         habit_hits: 0,
@@ -188,6 +254,8 @@ fn play(persona: Persona, games: u32, seed: u64) -> Result {
         cpu_turn: [0; 3],
         turn_prior: [0.0; 3],
         no_forecast: 0,
+        read_significant: false,
+        read_lift: 0.0,
     };
 
     for g in 0..games {
@@ -196,7 +264,7 @@ fn play(persona: Persona, games: u32, seed: u64) -> Result {
         }
         let mut frames = 0;
         while !game.game_over && frames < 4000 {
-            let mv = act(persona, &game, &mut rng);
+            let mv = act(persona, &game, &mut rng, &mut st);
             // How many ways the persona could have gone — the honest
             // denominator for "could it have guessed?".
             let options = worm::option_count(&game, 0).max(1);
@@ -232,8 +300,11 @@ fn play(persona: Persona, games: u32, seed: u64) -> Result {
                 }
             }
         }
+        let r = &game.cpu_brain.lifetime_read;
+        out.read_significant |= r.is_significant() || r.lateral_significant();
     }
     out.turn_prior = game.cpu_brain.opp_brain.turn_prior();
+    out.read_lift = game.cpu_brain.lifetime_read.lift();
     out
 }
 
@@ -361,5 +432,62 @@ fn acceptance_a_relative_turn_habit_is_learned() {
     println!(
         "    learned turn prior  straight {:.3}  left {:.3}  right {:.3}",
         r.turn_prior[0], r.turn_prior[1], r.turn_prior[2]
+    );
+}
+
+/// ADR-020's honesty guarantee, end to end. A fair-coin voluntary slalomer
+/// has the owner's RHYTHM (a swerve every ~5 frames) and no side habit at
+/// all. Under a class-blind baseline every turn-forecast frame competes
+/// against a rival that structurally answers "straight", the discordant
+/// stream goes one-sided by construction, and this ghost grades as
+/// significantly "learned" — fake lift. The class-conditional McNemar must
+/// keep it null, through the REAL update() pipeline, not a hand-fed tally.
+#[test]
+fn null_control_a_fair_coin_slalomer_never_reads_as_learned() {
+    let r = play(Persona::SlalomCoin, 12, 77_2026);
+    report("slalom-coin (NULL)", &r);
+    assert!(
+        r.habit_frames >= 100,
+        "not enough voluntary swerves to conclude anything: {}",
+        r.habit_frames
+    );
+    assert!(
+        !r.read_significant,
+        "a side-habit-free slalomer must NOT come out significant \
+         (lift={:.2}) — the baseline is class-blind again",
+        r.read_lift
+    );
+}
+
+/// Same guarantee for the original habitless opponent, on the lifetime read
+/// itself (the z-score null above uses the suite's own instrument; this one
+/// asserts on the number that actually drives sharpness and the HUD).
+#[test]
+fn null_control_coinflip_lifetime_read_stays_null() {
+    let r = play(Persona::Coinflip, 12, 4242);
+    assert!(
+        !r.read_significant,
+        "a coinflip opponent must never wake the CPU (lift={:.2})",
+        r.read_lift
+    );
+}
+
+/// Stage-3 acceptance (ADR-020): a strict alternator is the owner's measured
+/// signature distilled to its learnable core, and the modal baseline can
+/// NEVER call it — every point of read here is honest evidence. Ignored
+/// until M14 (the voluntary-turn VOMM) lands; run with -- --ignored to
+/// measure progress.
+#[test]
+#[ignore = "stage-3 target: voluntary-turn VOMM (ADR-020)"]
+fn acceptance_a_strict_alternator_is_learned() {
+    let r = play(Persona::SlalomAlt, 12, 20260806);
+    report("slalom-alt (ACCEPTANCE)", &r);
+    assert!(r.habit_frames >= 100);
+    assert!(
+        r.z() > 5.0,
+        "an alternating slalom must be read far above chance — read {:.1}% vs {:.1}% (z={:.1})",
+        r.rate() * 100.0,
+        r.chance() * 100.0,
+        r.z()
     );
 }

@@ -624,6 +624,19 @@ impl WormGame {
         (read.max(deficit.clamp(0.0, 1.0)) / 0.6).min(1.0)
     }
 
+    /// How much manufactured opening recklessness (the bold_* knobs) is
+    /// still warranted: 1.0 at first contact and even scores, fading to 0
+    /// as the CPU pulls AHEAD on the visible scoreboard. Boldness exists to
+    /// make first games exciting and killable; a CPU already winning while
+    /// unsharp does not need manufactured risk (measured: the half-woken
+    /// middle of a warm arc gave back ~10 points of win rate to it).
+    /// Public information only, same as sharpness.
+    pub fn boldness_scale(&self) -> f32 {
+        let wins = self.displayed_wins();
+        let lead = wins[1] as f32 - wins[0] as f32;
+        (1.0 - (lead - 1.0) / 3.0).clamp(0.0, 1.0)
+    }
+
     /// Reseed the round RNG from a fresh per-round seed and start the ghost
     /// log. `forced` replays a recorded round; `None` derives the seed from
     /// the current stream, so an entire session stays a pure function of the
@@ -939,8 +952,37 @@ impl WormGame {
                     // (tests write `direction` directly, bypassing the latch),
                     // so that frame is skipped rather than unwrapped.
                     if let Some(turn) = player_turn {
-                        self.round_read.record(player_options, turn, hit);
-                        self.cpu_brain.lifetime_read.record(player_options, turn, hit);
+                        // The forecast's own class, same anchor as the actual
+                        // turn — feeds the class-conditional baseline.
+                        let predicted_turn = crate::cpu_ai::Turn::from_dirs(
+                            player_heading,
+                            predicted,
+                        )
+                        .unwrap_or(crate::cpu_ai::Turn::Straight);
+                        // The board's legal set this frame, as relative
+                        // turns — public knowledge both predictors get.
+                        let mut legal_turns = [false; 3];
+                        for &d in &legal_now {
+                            if let Some(t) =
+                                crate::cpu_ai::Turn::from_dirs(player_heading, d)
+                            {
+                                legal_turns[crate::cpu_ai::turn_index(t)] = true;
+                            }
+                        }
+                        self.round_read.record(
+                            player_options,
+                            turn,
+                            predicted_turn,
+                            legal_turns,
+                            hit,
+                        );
+                        self.cpu_brain.lifetime_read.record(
+                            player_options,
+                            turn,
+                            predicted_turn,
+                            legal_turns,
+                            hit,
+                        );
                     }
                     // Reveal: fold this seal and the move it was scored
                     // against into a single round-long chain the player can
@@ -1795,7 +1837,12 @@ impl WormGame {
     /// CPU's aggression by being boring.
     pub fn refresh_read_rate(&mut self) {
         let read = &self.cpu_brain.lifetime_read;
-        let base = if read.is_ready() { read.lift() } else { 0.0 };
+        // SIGNIFICANCE-GATED (ADR-020 stage 1): only evidence that clears a
+        // significance bar may drive sharpness — a null player must never
+        // wake the CPU on fluctuation. earned_read() is the max of the two
+        // honest channels (McNemar over the class-aware base, lateral over
+        // chance), each individually gated.
+        let base = read.earned_read();
         // The active playstyle scales how hard the read is SPENT, never the
         // read itself: cautious plays under its evidence, relentless over it.
         // Survival floors are untouched by every style.

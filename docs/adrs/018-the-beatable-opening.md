@@ -19,6 +19,17 @@ and novice win-rate is a candidate second fitness axis). Gates after
 refinement: WARM 29-1 (97%) lift 84 vs COLD 28-0-2 (93%), habitual 36-3-1
 (90%) lift 83.
 
+## Amended
+2026-08-06 (ADR-020 stage 1, both measured against warm domination arms):
+Curiosity closes distance but never approaches down the player's own
+driving lane (±1 cell ahead of their head) — the lane approach plus a
+dozy held heading manufactured HEAD-ON draws, and the opening's earned
+kill is the trail, not the kamikaze. The bold_* knobs scale by
+`boldness_scale()`: full at first contact and even scores, fading to
+zero as the CPU pulls ahead on the visible scoreboard — manufactured
+recklessness is a first-contact affordance, and a CPU already winning
+while unsharp does not need it.
+
 ## Date
 2026-08-06
 
