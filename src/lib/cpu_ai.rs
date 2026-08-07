@@ -67,6 +67,28 @@ fn escape_floor_cells(game: &WormGame, who: usize) -> f32 {
         // does not wake the opening), and a player who never chases
         // leaves it at exactly 1.0.
         let aversion = 1.0 + game.cpu_brain.ledgers.boxer_aversion();
+        // THE ENVELOPMENT ALARM (task #13 v1): when the CPU's own open
+        // region has collapsed to under 60% of what it was 8 decisions
+        // ago WITH the player nearby, the walls are closing — evacuate
+        // standards rise NOW (+50%), not at the last legal frame. Board
+        // knowledge (both players can see the space), defensive only,
+        // and it decays the moment the space stops shrinking.
+        let envelopment = {
+            let ring = &game.cpu_brain.region_ring;
+            let collapsing = ring.len() >= 8
+                && ring.back().copied().unwrap_or(0)
+                    < ring.front().copied().unwrap_or(1) * 6 / 10;
+            let (px, py) = game.cycles[0].head;
+            let (chx, chy) = game.cycles[1].head;
+            let near = ((px as i32 - chx as i32).abs() + (py as i32 - chy as i32).abs())
+                <= 12;
+            if collapsing && near {
+                1.5
+            } else {
+                1.0
+            }
+        };
+        let aversion = aversion * envelopment;
         (own_len * t.escape_multiple + t.escape_margin) * discipline * aversion
     }
 }
@@ -1568,6 +1590,14 @@ pub struct CpuBrain {
     pub book_spend_snapshot: f32,
     #[serde(skip)]
     pub book_authority_snapshot: bool,
+    /// The space game's v1 (task #13, spike-redirected): the CPU's open
+    /// region size over the last 8 decisions. Static trap-throats
+    /// measured near-nonexistent (2 moments in 63 rounds); what kills
+    /// the CPU is DYNAMIC envelopment — trail walls collapsing its
+    /// space (27 of 45 corpus deaths). Board knowledge, defensive only.
+    /// Transient.
+    #[serde(skip)]
+    pub region_ring: std::collections::VecDeque<u32>,
     /// Kata 4 (#1): round-boundary snapshot of the tactic ledger's one
     /// active preference — direct intercept over corner when BOTH are
     /// mature and the ledger says direct kills this player better. Its
@@ -2358,6 +2388,7 @@ impl Default for CpuBrain {
             book_spend_snapshot: 0.0,
             book_authority_snapshot: false,
             tactic_prefer_direct: false,
+            region_ring: std::collections::VecDeque::new(),
             ledgers: LearningLedgers::default(),
             pending_book: None,
         }
@@ -5450,6 +5481,16 @@ fn beam_cells(game: &WormGame, hx: u16, hy: u16, dx: i16, dy: i16) -> Vec<(u16, 
 /// deterministic argmax (the 5% explore lives only in the close-evasion
 /// branch).
 pub fn cpu_decide(game: &mut WormGame) -> Direction {
+    // Feed the envelopment ring: the CPU's open region size, once per
+    // decision (task #13 v1).
+    {
+        let (hx, hy) = game.cycles[1].head;
+        let region = count_open_space(game, hx, hy) as u32;
+        game.cpu_brain.region_ring.push_back(region);
+        while game.cpu_brain.region_ring.len() > 8 {
+            game.cpu_brain.region_ring.pop_front();
+        }
+    }
     let mut decision_forecast = None;
     let mut decision_projection = None;
     macro_rules! choose {

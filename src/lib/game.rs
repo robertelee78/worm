@@ -2253,6 +2253,7 @@ impl WormGame {
         self.cpu_brain.frames_since_food = 99;
         self.cpu_brain.prev_pc_dist = 0;
         self.cpu_brain.pending_book = None;
+        self.cpu_brain.region_ring.clear();
         self.cpu_brain.last_opp_prediction = None;
         self.cpu_history.clear();
         self.powerups.clear();
