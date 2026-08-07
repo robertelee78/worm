@@ -24,10 +24,10 @@ struct BaseMirror {
 }
 impl BaseMirror {
     fn modal_among(&self, legal: [bool; 3]) -> Option<usize> {
+        // EXACT production parity (codex round 3): at zero history every
+        // legal candidate ties and the lowest index wins — the base
+        // always answers when something is legal, same as ReadRate.
         let max = (0..3).filter(|&i| legal[i]).map(|i| self.taken[i]).max()?;
-        if max == 0 {
-            return None;
-        }
         (0..3).find(|&i| legal[i] && self.taken[i] == max)
     }
     fn predict(&self, predicted_class_turn: bool, legal: [bool; 3]) -> Option<usize> {
@@ -112,6 +112,9 @@ fn main() {
     let mut proj_loss_straight = 0f64;
     let mut proj_loss_medoid = 0f64;
     let mut proj_windows = 0u32;
+    let mut proj_loss_straight_auth = 0f64;
+    let mut proj_loss_medoid_auth = 0f64;
+    let mut proj_windows_auth = 0u32;
     for r in &rounds {
         game.start_recorded_round(r.seed, r.w, r.h, r.events.clone());
         let mut pend: Option<([Option<Direction>; ENSEMBLE_MODELS], Option<Direction>)> = None;
@@ -144,6 +147,11 @@ fn main() {
                     proj_loss_straight += loss(base);
                     proj_loss_medoid += loss(bent);
                     proj_windows += 1;
+                    if game.cpu_brain.book_authority_snapshot {
+                        proj_loss_straight_auth += loss(base);
+                        proj_loss_medoid_auth += loss(bent);
+                        proj_windows_auth += 1;
+                    }
                     proj_pending = None;
                 }
             }
@@ -329,6 +337,10 @@ fn main() {
         println!(
             "   projection paired loss (sum manhattan over 5f, lower=better): straight={:.0} medoid={:.0} on {} scored windows",
             proj_loss_straight, proj_loss_medoid, proj_windows
+        );
+        println!(
+            "   authority-active subset: straight={:.0} medoid={:.0} on {} windows",
+            proj_loss_straight_auth, proj_loss_medoid_auth, proj_windows_auth
         );
     }
 

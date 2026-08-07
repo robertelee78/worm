@@ -2489,3 +2489,40 @@ fn a_stale_book_record_never_scores() {
     assert_eq!(trained, 0.0, "stale record trained the hazard");
     assert_eq!(b.side_opportunities, 0);
 }
+
+/// A book latch that opens MID-ROUND must not grant projection authority
+/// or defensive spend until a round boundary sees it (ADR-020 stage 2.1,
+/// codex round 3). The snapshot is the only value in-round consumers read.
+#[test]
+fn a_mid_round_book_latch_waits_for_the_round_boundary() {
+    let mut game = worm::WormGame::with_size_seed(40, 30, 11);
+    // Manufacture a strong, latched book mid-round — the live values.
+    game.cpu_brain.class_books.turn_events = 100;
+    for i in 0..160u64 {
+        let s = i.wrapping_mul(6364136223846793005).wrapping_add(3);
+        let side = if ((s >> 33) % 10) < 9 {
+            worm::cpu_ai::Turn::Left
+        } else {
+            worm::cpu_ai::Turn::Right
+        };
+        game.cpu_brain.class_books.book_read.record(
+            3,
+            side,
+            worm::cpu_ai::Turn::Left,
+            [true; 3],
+            side == worm::cpu_ai::Turn::Left,
+        );
+    }
+    game.cpu_brain.class_books.side_opportunities = 160;
+    game.cpu_brain.class_books.side_declarations = 160;
+    assert!(
+        game.cpu_brain.class_books.projection_authority(),
+        "live authority should hold (test setup)"
+    );
+    // The snapshots have not been refreshed: no in-round consumer may act.
+    assert!(!game.cpu_brain.book_authority_snapshot);
+    assert_eq!(game.cpu_brain.book_spend_snapshot, 0.0);
+    game.refresh_read_rate();
+    assert!(game.cpu_brain.book_authority_snapshot);
+    assert!(game.cpu_brain.book_spend_snapshot > 0.0);
+}

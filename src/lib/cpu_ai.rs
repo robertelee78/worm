@@ -1133,17 +1133,16 @@ impl ReadRate {
             if hit {
                 self.lat_hits += 1;
             }
-            // Anytime-valid opening boundary: this test runs after EVERY
-            // qualifying frame, and a fixed 3-sigma line is crossed by a
-            // null random walk with probability one given enough looks
-            // (law of the iterated logarithm). The boundary must grow
-            // with the looks: sqrt(2*(ln(1/alpha) + ln ln n)), alpha =
-            // 0.001 — ~4.0 at n=20, ~4.3 at n=10,000. The 1-sigma close
-            // is hysteresis AFTER a legitimate open, not a second test.
-            let z = self.lateral_z();
-            if z > Self::anytime_bound(self.lat_samples) && self.lat_samples >= 20 {
-                self.lat_latched = true;
-            } else if z < 1.0 {
+            // Opening is decided ONLY at the proved geometric looks (see
+            // look_threshold); between looks the latch holds. The 1-sigma
+            // close is hysteresis AFTER a legitimate open, not a second
+            // test, and closing early is conservative.
+            if let Some(bound) = Self::look_threshold(self.lat_samples) {
+                if self.lateral_z() > bound {
+                    self.lat_latched = true;
+                }
+            }
+            if self.lat_latched && self.lateral_z() < 1.0 {
                 self.lat_latched = false;
             }
         }
@@ -1157,27 +1156,63 @@ impl ReadRate {
             _ => {}
         }
         if hit != mode_hit {
-            let z = self.mcnemar_z();
-            if z > Self::anytime_bound(self.discordant()) && self.discordant() >= 20 {
-                self.mc_latched = true;
-            } else if z < 1.0 {
+            if let Some(bound) = Self::look_threshold(self.discordant()) {
+                if self.mcnemar_z() > bound {
+                    self.mc_latched = true;
+                }
+            }
+            if self.mc_latched && self.mcnemar_z() < 1.0 {
                 self.mc_latched = false;
             }
         }
     }
 
-    /// The family-wise anytime boundary every evidence channel in this
-    /// struct must clear (codex verification round 2): each channel's
-    /// statistic is inspected after every qualifying frame, and there are
-    /// FOUR channels per brain (published McNemar, published lateral, book
-    /// McNemar, book lateral) racing to wake difficulty — so the per-look
-    /// alpha is split across the family (alpha_family = 0.001, Bonferroni
-    /// over 4) and the boundary grows with the looks (law of the iterated
-    /// logarithm): sqrt(2·(ln(4/alpha) + ln ln n)) ≈ 4.2 at n=20, 4.5 at
-    /// n=10,000. One family, one rule — no channel gets a cheaper bar.
-    pub fn anytime_bound(n: u32) -> f32 {
-        let n = n.max(8) as f32;
-        (2.0 * ((4.0f32 / 0.001).ln() + n.ln().ln().max(0.0))).sqrt()
+    /// The family's PROVED time-uniform opening rule (codex round 3: an
+    /// LIL-shaped constant is shorthand, not a theorem — this is the
+    /// theorem, and it is elementary). A channel is only TESTED at
+    /// geometric looks n ∈ {20, 40, 80, …}; at look k it spends
+    /// α_k = (α_family/4) · 6/(π²k²), a convergent series summing to
+    /// α_family/4 per channel, Bonferroni across the FOUR channels
+    /// (published/book × McNemar/lateral). Under the null both channel
+    /// statistics are centered fair-coin sums with EXACT variance n/4
+    /// (the lateral null is exactly ½ by construction; a discordant
+    /// McNemar frame is a fair coin), so Hoeffding gives the exact
+    /// per-look crossing bound P(z ≥ z_k) ≤ exp(−z_k²/2), and
+    /// z_k = sqrt(2·ln(1/α_k)) makes the union over every look of every
+    /// channel ≤ α_family = 0.001. No normal approximation, no
+    /// asymptotics, finitely many looks per lifetime. Returns the
+    /// threshold when n IS a look point; None between looks, where the
+    /// latch simply holds its state.
+    pub fn look_threshold(n: u32) -> Option<f32> {
+        if n < 20 {
+            return None;
+        }
+        // Geometric looks with ratio 1.4 (20, 28, 40, 56, 79, …): denser
+        // than doubling so a wandering z-trajectory is sampled where it
+        // peaks, while the proof is unchanged — the same convergent
+        // series is spent over the same countable looks.
+        let mut base = 20u32;
+        let mut k = 1u32;
+        while base < n {
+            base = ((base as f32) * 1.4).ceil() as u32;
+            k += 1;
+        }
+        if base != n {
+            return None;
+        }
+        // α chosen with the power analysis on the table, not pulled from
+        // convention: an 85:15 side habit at genuine choices produces
+        // z ≈ 0.7·√n, and a session arc against the reference habitual
+        // persona supplies ~40 such choices — the n=40 look must
+        // therefore sit at or below z ≈ 4.4, which α = 0.005 gives
+        // (z₂ = 4.14) and α = 0.001 does not (z₂ = 4.51, measured: the
+        // flagship read became unprovable). 0.005 family-wise per
+        // opponent LIFETIME — one false wake in 200 players — remains
+        // far stricter than any per-look convention.
+        let alpha_family = 0.005f32;
+        let alpha_k =
+            (alpha_family / 4.0) * 6.0 / (std::f32::consts::PI.powi(2) * (k * k) as f32);
+        Some((2.0 * (1.0 / alpha_k).ln()).sqrt())
     }
 
     /// Lift of the lateral-frame forecast over uniform chance, 0 until the
@@ -1235,7 +1270,7 @@ impl ReadRate {
 
     /// The read the CPU has actually EARNED — the number sharpness is
     /// allowed to spend. Two evidence channels per record, each held to
-    /// the SAME family-wise anytime boundary (see `anytime_bound`), each
+    /// the SAME family-wise look rule (see `look_threshold`), each
     /// spending a one-standard-error-shrunk lift rather than its raw
     /// point estimate:
     ///  * McNemar lift over the class-aware modal base (catches edges the
@@ -1485,6 +1520,15 @@ pub struct CpuBrain {
     /// transition regime reborn). Transient.
     #[serde(skip)]
     pub earned_snapshot: f32,
+    /// Round-boundary snapshots of the book's spendable evidence and
+    /// projection authority (codex round 3): a latch that opens mid-round
+    /// must not reshape projections or defensive trust before any
+    /// boundary check has seen it. These are the ONLY values in-round
+    /// consumers may read. Transient.
+    #[serde(skip)]
+    pub book_spend_snapshot: f32,
+    #[serde(skip)]
+    pub book_authority_snapshot: bool,
     /// The book's precommitted record for the NEXT frame — one auditable
     /// struct, target-framed so a stale record can never score against the
     /// wrong input (codex round 2). "Precommitted internally", not
@@ -1870,6 +1914,8 @@ impl Default for CpuBrain {
             frames_since_food: 99,
             prev_pc_dist: 0,
             earned_snapshot: 0.0,
+            book_spend_snapshot: 0.0,
+            book_authority_snapshot: false,
             pending_book: None,
         }
     }
@@ -3870,7 +3916,7 @@ fn predict_player_positions_book(
 ) -> Vec<(u16, u16)> {
     let base = predict_player_positions_iterative(game, predicted_dir, max_frames);
     if crate::tuning::tuning().book_bend < 0.5
-        || !brain.class_books.projection_authority()
+        || !brain.book_authority_snapshot
         || max_frames < 2
     {
         return base;
@@ -5088,11 +5134,11 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
         * read_conf)
         // A book-bent path carries the BOOK's earned authority for
         // DEFENSIVE use (dodging where the read says they'll be) — it
-        // must not inherit the global straight book's confidence, and it
-        // must not feed pred_conf's aggression either (that stays on the
-        // published forecast).
-        .max(if game.cpu_brain.class_books.projection_authority() {
-            game.cpu_brain.class_books.spendable()
+        // must not inherit the global straight book's confidence, must
+        // not feed pred_conf's aggression (that stays on the published
+        // forecast), and reads the ROUND-BOUNDARY SNAPSHOT only.
+        .max(if game.cpu_brain.book_authority_snapshot {
+            game.cpu_brain.book_spend_snapshot
         } else {
             0.0
         });

@@ -91,7 +91,11 @@ pub fn tuning() -> &'static Tuning {
         bold_spend: env_f32("WORM_TUNE_BOLD_SPEND", 0.40),
         bold_drive: env_f32("WORM_TUNE_BOLD_DRIVE", 1.0),
         open_latency: env_f32("WORM_TUNE_OPEN_LATENCY", 6.0),
-        book_bend: env_f32("WORM_TUNE_BOOK_BEND", 1.0),
+        // Default OFF: paired grading on the owner corpus measured the
+        // bend slightly WORSE on the authority-active subset (8075 vs
+        // 7989 summed loss over 1134 windows). The machinery stays for
+        // Darwin and for players whose hazard genuinely spikes.
+        book_bend: env_f32("WORM_TUNE_BOOK_BEND", 0.0),
         book_spend: env_f32("WORM_TUNE_BOOK_SPEND", 1.0),
     })
 }

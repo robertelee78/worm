@@ -504,12 +504,15 @@ fn null_control_a_fair_coin_slalomer_never_reads_as_learned() {
 /// asserts on the number that actually drives sharpness and the HUD).
 #[test]
 fn null_control_coinflip_lifetime_read_stays_null() {
-    let r = play(Persona::Coinflip, 12, 4242);
-    assert!(
-        !r.read_significant,
-        "a coinflip opponent must never wake the CPU at ANY frame (earned={:.2})",
-        r.read_lift
-    );
+    for seed in [4242u64, 90_210, 6_060_842] {
+        let r = play(Persona::Coinflip, 12, seed);
+        assert!(
+            !r.read_significant,
+            "seed {seed}: a coinflip opponent must never wake the CPU at ANY frame (earned={:.2})",
+            r.read_lift
+        );
+        assert!(!r.projection_authority_seen, "seed {seed}: no authority");
+    }
 }
 
 /// Stage-3 acceptance (ADR-020): a strict alternator is the owner's measured

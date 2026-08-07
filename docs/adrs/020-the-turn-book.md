@@ -1,8 +1,9 @@
 # ADR-020: The Turn Book — Reading the Player on the Frames That Decide Games
 
 ## Status
-Accepted — implementing in three staged commits (this document is the plan
-of record; each stage lands with its own receipts)
+Implemented — all three stages executed with receipts (below), externally
+verified across four consult rounds (codex ×3, kimi-k3 ×1); the final
+verification round's four blockers are resolved in the closing commit
 
 ## Date
 2026-08-06
@@ -251,9 +252,14 @@ blockers", both resolved):
 
 1. **The evidence family** (the codex blocker): every channel —
    published McNemar, published lateral, book McNemar, book lateral —
-   now shares ONE anytime-valid boundary sqrt(2(ln(4/α)+lnln n)) with
-   the α split across the family, Schmitt latches, and every spend is
-   an SE-shrunk lift, never the raw point estimate. The book's
+   is tested ONLY at geometric looks n ∈ {20, 40, 80, …}, spending
+   α_k = (α/4)·6/(π²k²) per look with exact Hoeffding crossing bounds
+   (both null statistics are fair-coin sums with exact variance n/4),
+   union-bounded to a PROVED family-wise α = 0.001 — no asymptotics,
+   no normal approximation, finitely many looks (the first cut's
+   LIL-shaped bound was verification-rejected as shorthand, not
+   theorem). Schmitt latches hold between looks; every spend is an
+   SE-shrunk lift, never the raw point estimate. The book's
    evidence lives in `book_read`: its PRECOMMITTED side picks scored
    on genuine two-sided voluntary turns through the same ReadRate
    machinery, nulls and all, scaled by declaration coverage.
@@ -265,10 +271,12 @@ blockers", both resolved):
 2. **Projection** (the other blocker): scenario-based weighted-medoid
    projection (no-turn + turn-at-t × side, survival-adjusted masses,
    book-calibrated side split, path-loss medoid — codex's design,
-   no forced bend, authority-gated). **Measured NEUTRAL on the owner
-   corpus** (paired 5-frame loss 11445 vs 11433 over 1671 windows):
-   kept behind `projection_authority()` and the WORM_TUNE_BOOK_BEND
-   arm switch, claims nothing, candidate for Darwin.
+   no forced bend, authority-gated). **Measured slightly NEGATIVE on the
+   owner corpus** (authority-active subset: 8075 vs 7989 summed paired
+   loss over 1,134 windows) — so it ships DEFAULT-OFF behind
+   `projection_authority()` and WORM_TUNE_BOOK_BEND, per the ADR-014
+   measured-revert discipline. The machinery stays for Darwin and for
+   high-hazard players.
 3. **The transition regime, finally attributed and fixed**: with
    honest evidence the read arrives MID-arc, and survival discipline
    scaled by partial sharpness produced a half-woken middle that lost

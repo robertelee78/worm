@@ -1474,12 +1474,16 @@ impl WormGame {
                     cell,
                     side: side.map(|(_, d)| d),
                 });
-                // Fold the book's precommitment into the reveal chain so
-                // the counterfactual is auditable after the fact, even
-                // though the public seal covers only the published
-                // forecast.
+                // Fold the book's precommitment (target frame, context
+                // cell, side) into the reveal chain. This is an INTERNAL
+                // sequencing invariant — it pins that the pick existed
+                // before the outcome inside this build — not a
+                // third-party-verifiable commitment: the public seal
+                // covers only the published forecast, and the precommit
+                // record is not exposed in the disclosed state.
                 self.seal_chain = crate::cpu_ai::fnv1a64(&[
                     self.seal_chain.to_le_bytes().as_slice(),
+                    (self.frame_count + 1).to_le_bytes().as_slice(),
                     &[cell as u8, side.map(|(_, d)| d as u8 + 1).unwrap_or(0)],
                 ]
                 .concat());
@@ -2032,6 +2036,9 @@ impl WormGame {
         // hunts before a boundary check has seen it).
         let base = self.cpu_brain.family_earned_read();
         self.cpu_brain.earned_snapshot = base;
+        self.cpu_brain.book_spend_snapshot = self.cpu_brain.class_books.spendable();
+        self.cpu_brain.book_authority_snapshot =
+            self.cpu_brain.class_books.projection_authority();
         // The active playstyle scales how hard the read is SPENT, never the
         // read itself: cautious plays under its evidence, relentless over it.
         // Survival floors are untouched by every style.
