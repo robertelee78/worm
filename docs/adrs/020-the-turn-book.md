@@ -141,9 +141,12 @@ Everything above landed, plus four findings the plan did not contain:
    3σ, released below 1σ — without hysteresis a proven read's fixed
    excess drifts under a single gate as variance grows and sharpness
    flaps). `earned_read()` = max of the two gated channels; sharpness,
-   difficulty, and the hunt-gate confidence ramp all spend ONLY that.
-   Nulls clear neither channel — asserted end-to-end at every round
-   boundary, not just the endpoint.
+   difficulty, and the hunt-gate confidence ramp spend that. (One
+   documented non-read exception: the hunt confidence is floored by the
+   bold_* OPENING affordance — `bold_drive × (1−sharpness) ×
+   boldness_scale()` — which is deliberate first-contact aggression, not
+   read evidence, and fades with sharpness or scoreboard lead.) Nulls
+   clear neither channel — asserted end-to-end at EVERY FRAME.
 3. **Quantity × quality on the hunt ramp.** The voluntary-turn evidence
    ramp alone maxed out in one warm game and opened full-confidence
    hunts behind an unproven forecast (measured: warm arms LOSING to
@@ -164,13 +167,56 @@ Novice opening unchanged (~25% wins+draws). All suites green: lib 43,
 game_test 76, persona 5 (+1 stage-3 ignore), domination 1 (+1 ignore).
 
 **Known honest regression, now the STAGE-2 GATE:** pooled over two
-30-game arms, warm 82% vs cold 97% against the domination persona. The
-losses concentrate in the half-woken transition regime (partial
-discipline, hunts enabled at confidences no gate was tuned for) — a
-regime the fabricated forced-turn lift used to skip by making warm arms
-fully sharp from game 2. `learning_converts_into_winning` is `#[ignore]`
-with this reason in the code; un-ignoring it UNCHANGED is part of stage
-2's proof bar, alongside the original bar below.
+30-game arms, warm 82% vs cold 97% against the domination persona.
+Working hypothesis (NOT yet instrumented — attribution is stage-2
+work): the losses accumulate in the half-woken middle of the arc,
+where partial discipline coexists with enabled hunts at confidences no
+gate was tuned for — a regime the fabricated forced-turn lift used to
+skip by making warm arms fully sharp from game 2.
+`learning_converts_into_winning` is `#[ignore]` with this reason in
+the code; its warm-vs-cold bar carries a formal non-inferiority margin
+of 5 points on 60-game pooled arms (binomial noise sd ≈ 4.6 points).
+Un-ignoring it is part of stage 2's proof bar, alongside the original
+bar below.
+
+### Stage 1.1 — external verification round (codex, verdict UNSOUND → fixed)
+
+Codex verified the committed stage 1 against this ADR and found the
+lateral channel's null OUTCOME-CONDITIONED: it sampled frames where
+the player did turn but scored against 1/options INCLUDING straight.
+Conditioned on a lateral outcome a uniform player picks each side at
+1/2 (and with one legal lateral the side is certain), so an
+always-Left forecast systematically beat the stated chance and could
+latch a fake read — the exact class of defect stage 1 exists to kill,
+reproduced in a unit test before fixing. Corrections, all landed:
+
+- The lateral channel claims SIDE evidence only: recorded solely when
+  BOTH laterals are legal, null exactly 1/2. Timing skill earns
+  nothing here by construction — it must be claimed by a predictor
+  scored on all its declarations including straight false alarms (the
+  stage-2 hazard book).
+- The repeated-look 3σ open was not anytime-valid (a null random walk
+  crosses any fixed line eventually). The opening boundary now grows
+  with the looks — sqrt(2(ln 1000 + ln ln n)) ≈ 4.0–4.3 — with the 1σ
+  close kept as post-open hysteresis only.
+- `modal_among` answers at zero history (lowest-index legal), closing
+  the bounded first-occurrence cpu_only bias at forced laterals.
+- NULL personas assert at every FRAME (read_conf consults the latch
+  mid-round), and the slalom null asserts the channel was actually
+  exercised (≥30 real choices scored).
+- Wire: v2 precedence over v1 is explicit, not file-order luck; a
+  v1-only load (old build, or a downgrade cycle that stripped v2)
+  keeps everything that is knowledge about the human but ZEROES the
+  discordant bookkeeping — a mixed class-blind/class-aware McNemar
+  stream cannot be untangled, so significance is re-earned. Lateral
+  evidence is lost on downgrade by construction; accepted cost.
+- The misnamed missing-section test now actually strips both read
+  sections; a reordered-blob test pins the precedence rule.
+
+Post-fix receipts: all NULLs hold per-frame; the habitual read is
+still earned at real choices (peak 0.70 under the corrected null,
+domination 85%); owner corpus honest lift unchanged at +2.8%
+significant; suite 48 lib + 76 game + 5 persona + domination green.
 
 Stage 2 — THE TURN BOOK: hazard (KT cells over gap × alignment ×
 just-ate × cpu-closing, two-horizon fixed-share, log-loss), a

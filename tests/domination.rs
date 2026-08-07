@@ -239,10 +239,12 @@ fn learning_converts_into_winning() {
         "the warm CPU must have genuinely read the player (earned read {:.2})",
         warm_lift
     );
-    // A small slack on the pooled 60-game arms: the honest read arrives
-    // mid-arc now (the fabricated forced-turn evidence is gone), so warm
-    // arms spend their first games in the beatable opening BY DESIGN while
-    // cold rides default strength every game. Beyond-noise deficits fail.
+    // Formal non-inferiority margin, not hand-waving: delta = 5 points on
+    // pooled 60-game arms whose binomial noise sd is ~4.6 points. The
+    // honest read arrives mid-arc now (the fabricated forced-turn
+    // evidence is gone), so warm arms spend their first games in the
+    // beatable opening BY DESIGN while cold rides default strength every
+    // game. Beyond-noise deficits fail.
     assert!(
         warm.win_rate() >= cold.win_rate() - 0.05,
         "remembering the player must never make the CPU WORSE — \

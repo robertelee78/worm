@@ -1040,9 +1040,13 @@ impl ReadRate {
             .filter(|&i| legal[i])
             .map(|i| self.taken[i])
             .max()?;
-        if max == 0 {
-            return None;
-        }
+        // Zero history is not "no call": a real rival still answers, and
+        // with a sole legal option the answer is board knowledge. Leaving
+        // the base silent here made the first occurrence of any unseen
+        // forced lateral a guaranteed structural cpu_only point (codex
+        // verification finding — bounded initialization bias, but bias).
+        // With max == 0 every legal candidate ties and the lowest index
+        // wins, deterministically and replayably.
         (0..TURNS)
             .find(|&i| legal[i] && self.taken[i] == max)
             .map(|i| match i {
@@ -1096,21 +1100,40 @@ impl ReadRate {
         if hit {
             self.hits += 1;
         }
-        // Real choices only: a single-exit turn is board knowledge (p=1,
-        // zero variance, guaranteed hit) — folding those in dilutes the
-        // rate toward chance while a handful of true choices swing the
-        // lift magnitude wildly. Measured vs the domination persona:
-        // ~740 of 758 lateral frames were single-option.
-        if actual != Turn::Straight && options >= 2 {
-            let p = 1.0 / (options as f32);
+        // SIDE evidence only, under the CORRECT conditional null (codex
+        // verification finding, the one that made stage 1 unsound as first
+        // committed): this channel samples frames where the player DID
+        // turn, so the null must be the distribution of sides GIVEN a
+        // turn — uniform over the legal laterals — not 1/options
+        // including straight. Scored against 1/options, an always-Left
+        // forecast beats a fair coin by construction (50% hits vs a
+        // claimed 33% chance), and with only one legal lateral the side
+        // is CERTAIN given the outcome yet was scored as a coin toss.
+        // Frames with fewer than two legal laterals therefore carry zero
+        // side information and are excluded outright; with both laterals
+        // legal the null is exactly 1/2. Timing skill ("they turn NOW")
+        // deliberately earns nothing here — it must be claimed by a
+        // predictor scored on ALL its declarations, straight false alarms
+        // included (the stage-2 hazard book).
+        if actual != Turn::Straight && legal[1] && legal[2] {
+            let p = 0.5;
             self.lat_samples += 1;
             self.lat_chance += p;
             self.lat_var += p * (1.0 - p);
             if hit {
                 self.lat_hits += 1;
             }
+            // Anytime-valid opening boundary: this test runs after EVERY
+            // qualifying frame, and a fixed 3-sigma line is crossed by a
+            // null random walk with probability one given enough looks
+            // (law of the iterated logarithm). The boundary must grow
+            // with the looks: sqrt(2*(ln(1/alpha) + ln ln n)), alpha =
+            // 0.001 — ~4.0 at n=20, ~4.3 at n=10,000. The 1-sigma close
+            // is hysteresis AFTER a legitimate open, not a second test.
+            let n = self.lat_samples.max(8) as f32;
+            let bound = (2.0 * ((1.0f32 / 0.001).ln() + n.ln().ln().max(0.0))).sqrt();
             let z = self.lateral_z();
-            if z > 3.0 && self.lat_samples >= 20 {
+            if z > bound && self.lat_samples >= 20 {
                 self.lat_latched = true;
             } else if z < 1.0 {
                 self.lat_latched = false;
@@ -1152,9 +1175,11 @@ impl ReadRate {
     }
 
     /// Whether the lateral channel's evidence is proven — the Schmitt
-    /// latch's current state (see `lat_latched`).
+    /// latch's current state (see `lat_latched`). The latch is the sole
+    /// authority: it is updated under the anytime-valid boundary at the
+    /// only moments new evidence arrives.
     pub fn lateral_significant(&self) -> bool {
-        self.lat_latched || (self.lat_samples >= 20 && self.lateral_z() > 3.0)
+        self.lat_latched
     }
 
     /// The read the CPU has actually EARNED — the number sharpness is
@@ -1714,6 +1739,7 @@ impl CpuBrain {
         };
 
         let mut off = 4usize;
+        let mut read_rate_v2_seen = false;
         for _ in 0..count {
             if off + 6 > payload.len() {
                 break; // truncated frame — keep what we already decoded
@@ -1813,12 +1839,22 @@ impl CpuBrain {
                     Ok(t) => brain.opp_brain.turn_tally = t,
                     Err(_) => report.sections_skipped += 1,
                 },
+                // Version precedence is explicit, not an accident of file
+                // order: once the widened v2 record has decoded, a v1
+                // projection in the same blob must never clobber it.
                 SEC_READ_RATE => match bincode::deserialize::<ReadRateWireV1>(body) {
-                    Ok(r) => brain.lifetime_read = r.into(),
+                    Ok(r) => {
+                        if !read_rate_v2_seen {
+                            brain.lifetime_read = r.into();
+                        }
+                    }
                     Err(_) => report.sections_skipped += 1,
                 },
                 SEC_READ_RATE2 => match bincode::deserialize::<ReadRate>(body) {
-                    Ok(r) => brain.lifetime_read = r,
+                    Ok(r) => {
+                        brain.lifetime_read = r;
+                        read_rate_v2_seen = true;
+                    }
                     Err(_) => report.sections_skipped += 1,
                 },
                 // Forward compatibility: a section this build has never heard
@@ -1936,9 +1972,19 @@ impl From<ReadRateWireV1> for ReadRate {
             samples: w.samples,
             taken: w.taken,
             opts: w.opts,
-            mode_hits: w.mode_hits,
-            cpu_only: w.cpu_only,
-            mode_only: w.mode_only,
+            // Downgrade semantics, defined (codex finding): a v1-only blob
+            // was written either by a pre-ADR-020 build (class-blind
+            // baseline) or by an old build that kept appending class-blind
+            // observations after stripping the v2 section. Either way the
+            // discordant-pair stream mixes baseline regimes the honest
+            // McNemar cannot untangle — so the significance BOOKKEEPING
+            // resets and must be re-earned, while everything that is
+            // knowledge about the HUMAN (taken, hits, samples, opts)
+            // survives. Lateral evidence is lost on downgrade by
+            // construction; that is the accepted cost.
+            mode_hits: 0,
+            cpu_only: 0,
+            mode_only: 0,
             ..ReadRate::default()
         }
     }
@@ -5363,9 +5409,10 @@ mod tests {
             r.record(3, t, t, [true; 3], true); // CPU right, lagging modal wrong
         }
 
-        // 20 alternating turns the modal base always trails, plus the very
-        // first frame where the baseline had no data yet and made no call.
-        assert_eq!(r.cpu_only, 21, "every switch called is a point of evidence");
+        // 20 alternating turns the modal base always trails. (The very
+        // first frame is concordant now: a zero-history base answers the
+        // lowest-index legal option — Straight — rather than forfeiting.)
+        assert_eq!(r.cpu_only, 20, "every switch called is a point of evidence");
         assert_eq!(r.mode_only, 0);
         assert!(r.is_ready());
         assert!(r.is_significant(), "p = {}", r.p_value());
@@ -5442,6 +5489,103 @@ mod tests {
         assert!(r.uniform_chance() > 0.25, "never the old 25% claim");
     }
 
+    /// The exact defect the external verification caught in the first
+    /// stage-1 commit: the lateral channel samples frames where the player
+    /// DID turn, so its null is uniform over legal LATERALS. An always-Left
+    /// forecast against a fair-coin side chooser hits exactly that null —
+    /// it must never latch, at any horizon.
+    #[test]
+    fn an_always_left_forecast_never_latches_on_a_fair_side_chooser() {
+        let mut r = ReadRate::default();
+        let mut s: u64 = 7;
+        for _ in 0..4000 {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let side = if (s >> 33) & 1 == 0 { Turn::Left } else { Turn::Right };
+            r.record(3, side, Turn::Left, [true; 3], side == Turn::Left);
+            assert!(
+                !r.lateral_significant(),
+                "coin sides read as a side habit at n={} (hits={} chance={})",
+                r.lat_samples,
+                r.lat_hits,
+                r.lat_chance
+            );
+        }
+    }
+
+    /// With a single legal lateral the side is CERTAIN given the turn:
+    /// those frames carry zero side information and must not be recorded.
+    #[test]
+    fn a_sole_legal_lateral_carries_no_side_evidence() {
+        let mut r = ReadRate::default();
+        for _ in 0..500 {
+            r.record(2, Turn::Left, Turn::Left, [true, true, false], true);
+        }
+        assert_eq!(r.lat_samples, 0);
+        assert!(!r.lateral_significant());
+    }
+
+    /// A genuine side habit at real two-lateral choices IS earned — the
+    /// positive control for the corrected null.
+    #[test]
+    fn a_real_side_habit_is_earned_at_real_choices() {
+        let mut r = ReadRate::default();
+        let mut s: u64 = 3;
+        for _ in 0..120 {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+            // 90:10 left-breaker, CPU forecasts Left every time.
+            let side = if ((s >> 33) % 10) < 9 { Turn::Left } else { Turn::Right };
+            r.record(3, side, Turn::Left, [true; 3], side == Turn::Left);
+        }
+        assert!(
+            r.lateral_significant(),
+            "a 90:10 habit at 120 real choices must clear the anytime bound (hits={} n={})",
+            r.lat_hits,
+            r.lat_samples
+        );
+        assert!(r.lateral_lift() > 0.5);
+    }
+
+    /// A v1 projection decoded AFTER the v2 section (abnormal file order)
+    /// must not clobber the widened record — precedence is by version, not
+    /// by position.
+    #[test]
+    fn v1_after_v2_does_not_clobber_the_widened_record() {
+        let mut brain = CpuBrain::new();
+        for _ in 0..40 {
+            brain.lifetime_read.record(3, Turn::Left, Turn::Left, [true; 3], true);
+        }
+        let bytes = brain.to_bytes();
+        let count = u16::from_le_bytes(bytes[6..8].try_into().unwrap());
+        let mut v1: Option<&[u8]> = None;
+        let mut v2: Option<&[u8]> = None;
+        let mut others: Vec<(u16, &[u8])> = Vec::new();
+        let mut pos = 8usize;
+        for _ in 0..count {
+            let tag = u16::from_le_bytes(bytes[pos..pos + 2].try_into().unwrap());
+            let len =
+                u32::from_le_bytes(bytes[pos + 2..pos + 6].try_into().unwrap()) as usize;
+            let body = &bytes[pos + 6..pos + 6 + len];
+            match tag {
+                SEC_READ_RATE => v1 = Some(body),
+                SEC_READ_RATE2 => v2 = Some(body),
+                _ => others.push((tag, body)),
+            }
+            pos += 6 + len;
+        }
+        let mut reordered = bytes[..6].to_vec();
+        reordered.extend_from_slice(&count.to_le_bytes());
+        let mut ordered: Vec<(u16, &[u8])> = others;
+        ordered.push((SEC_READ_RATE2, v2.unwrap()));
+        ordered.push((SEC_READ_RATE, v1.unwrap()));
+        for (tag, body) in ordered {
+            reordered.extend_from_slice(&tag.to_le_bytes());
+            reordered.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            reordered.extend_from_slice(body);
+        }
+        let (restored, _) = CpuBrain::from_bytes_report(&reordered).unwrap();
+        assert_eq!(restored.lifetime_read, brain.lifetime_read);
+    }
+
     /// A read rate must survive a save/load cycle, or the cross-session curve
     /// the product is built around resets every launch.
     #[test]
@@ -5516,13 +5660,30 @@ mod tests {
         brain.opp_pred_hits = 5;
         brain.opp_pred_total = 9;
         let bytes = brain.to_bytes();
-        // Drop the trailing section by rewriting the section count. The
-        // header is magic(4) + format u16 + count u16 — an earlier version
-        // of this test edited offset 4..6, the FORMAT field, and therefore
-        // dropped nothing.
-        let mut older = bytes.clone();
-        let count = u16::from_le_bytes(older[6..8].try_into().unwrap());
-        older[6..8].copy_from_slice(&(count - 1).to_le_bytes());
+        // Strip BOTH read-rate sections (v1 tag 6, v2 tag 10) — earlier
+        // versions of this test decremented the section count, which (a)
+        // for a while edited the FORMAT field by mistake and (b) at best
+        // dropped the TRAILING section, which is the portfolio, not the
+        // read. This now removes exactly what its name claims.
+        let count = u16::from_le_bytes(bytes[6..8].try_into().unwrap());
+        let mut kept: Vec<(u16, &[u8])> = Vec::new();
+        let mut pos = 8usize;
+        for _ in 0..count {
+            let tag = u16::from_le_bytes(bytes[pos..pos + 2].try_into().unwrap());
+            let len =
+                u32::from_le_bytes(bytes[pos + 2..pos + 6].try_into().unwrap()) as usize;
+            if tag != SEC_READ_RATE && tag != SEC_READ_RATE2 {
+                kept.push((tag, &bytes[pos + 6..pos + 6 + len]));
+            }
+            pos += 6 + len;
+        }
+        let mut older = bytes[..6].to_vec();
+        older.extend_from_slice(&(kept.len() as u16).to_le_bytes());
+        for (tag, body) in kept {
+            older.extend_from_slice(&tag.to_le_bytes());
+            older.extend_from_slice(&(body.len() as u32).to_le_bytes());
+            older.extend_from_slice(body);
+        }
 
         let (restored, report) = CpuBrain::from_bytes_report(&older).unwrap();
         assert!(report.ensemble_kept);

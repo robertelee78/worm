@@ -218,7 +218,11 @@ struct Result {
     /// significant on either evidence channel — the strictest null: a
     /// habit-free opponent must never cross either bar even transiently.
     read_significant: bool,
+    /// earned_read() at the end of the run — what sharpness would spend.
     read_lift: f32,
+    /// How many real two-lateral choices the production channel scored —
+    /// proof the null actually exercised the machinery it guards.
+    lat_samples: u32,
 }
 
 impl Result {
@@ -256,6 +260,7 @@ fn play(persona: Persona, games: u32, seed: u64) -> Result {
         no_forecast: 0,
         read_significant: false,
         read_lift: 0.0,
+        lat_samples: 0,
     };
 
     for g in 0..games {
@@ -273,6 +278,13 @@ fn play(persona: Persona, games: u32, seed: u64) -> Result {
             game.change_direction(mv.dir);
             game.update();
             frames += 1;
+            // EVERY frame, not just round boundaries: read_conf consults
+            // the latch mid-round, so a transiently-manufactured read
+            // would spend itself before any boundary check saw it.
+            {
+                let r = &game.cpu_brain.lifetime_read;
+                out.read_significant |= r.is_significant() || r.lateral_significant();
+            }
 
             if mv.habit_frame {
                 let ti = |t: worm::Turn| match t {
@@ -300,11 +312,10 @@ fn play(persona: Persona, games: u32, seed: u64) -> Result {
                 }
             }
         }
-        let r = &game.cpu_brain.lifetime_read;
-        out.read_significant |= r.is_significant() || r.lateral_significant();
     }
     out.turn_prior = game.cpu_brain.opp_brain.turn_prior();
-    out.read_lift = game.cpu_brain.lifetime_read.lift();
+    out.read_lift = game.cpu_brain.lifetime_read.earned_read();
+    out.lat_samples = game.cpu_brain.lifetime_read.lat_samples;
     out
 }
 
@@ -452,10 +463,16 @@ fn null_control_a_fair_coin_slalomer_never_reads_as_learned() {
         r.habit_frames
     );
     assert!(
+        r.lat_samples >= 30,
+        "the null must actually exercise the lateral channel: only {} real choices scored",
+        r.lat_samples
+    );
+    assert!(
         !r.read_significant,
-        "a side-habit-free slalomer must NOT come out significant \
-         (lift={:.2}) — the baseline is class-blind again",
-        r.read_lift
+        "a side-habit-free slalomer must NOT come out significant at ANY frame \
+         (earned={:.2}, lat n={})",
+        r.read_lift,
+        r.lat_samples
     );
 }
 
@@ -467,7 +484,7 @@ fn null_control_coinflip_lifetime_read_stays_null() {
     let r = play(Persona::Coinflip, 12, 4242);
     assert!(
         !r.read_significant,
-        "a coinflip opponent must never wake the CPU (lift={:.2})",
+        "a coinflip opponent must never wake the CPU at ANY frame (earned={:.2})",
         r.read_lift
     );
 }
