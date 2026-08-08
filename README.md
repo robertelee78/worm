@@ -33,7 +33,11 @@ Most "adaptive" games can congratulate themselves for nothing. Imagine
 a rival that predicts *straight* while you are trapped in a corridor,
 then calls the inevitable move proof that it understands you. That
 number can look excellent even when the board supplied the answer — in
-worm, roughly 95% of frames are routine straight travel.
+worm, roughly 95% of frames are routine straight travel. A clock-based
+difficulty ramp has the same problem: time passed, but no intelligence
+was earned. The consequence is personal: you cannot tell whether the
+opponent adapted to *you* or merely got stronger behind a confident
+dashboard.
 
 So worm removes every cheap way its opponent could appear intelligent:
 forecasts are scored only on genuine decisions, published (hash-sealed)
@@ -46,6 +50,34 @@ this repository is void.**
 <br clear="right"/>
 
 ![The big idea: forced moves and easy agreements fall away; precommitted wins on real choices remain](docs/media/insight.svg)
+
+---
+
+## A game wrapped around a falsifiable learning experiment
+
+You steer one luminous cycle. The computer steers the other — and
+keeps a field notebook about the choices only *you* could have made.
+Before a meaningful turn, the opponent commits a forecast. After you
+move, worm compares that forecast with both reality and a deliberately
+simple rival based on your own usual moves. Evidence that survives the
+controls becomes an **earned read**. That read can increase commitment
+to an intercept; it never switches off the rules that keep the
+computer alive.
+
+![A forecast earns the right to close an intercept gate: a left-turn forecast is committed before the turn, repeated correct calls fill an evidence dial, and only then does the intercept gate close across the predicted path](docs/media/hero-scene.svg)
+
+**What worm counts, and refuses:**
+
+| Signal | Counts as learning? | Why |
+|---|---|---|
+| A voluntary left turn | Potentially | You had a real alternative |
+| Straight through one open corridor | Not by itself | The board made it easy |
+| Random coin-flip play | Must stay at chance | There is no stable habit to read |
+
+![The honest exchange: the player supplies genuine choices, the opponent commits forecasts, and an evidence gate compares them with the player's own baseline, returning only an earned read](docs/media/big-idea.svg)
+
+> The opponent gets dangerous by surviving an audit of its predictions
+> — not by waiting for level two.
 
 ---
 
@@ -288,10 +320,33 @@ under the exact physics it was played on.
 
 Worm is useful at three altitudes: as a finished game, as a transparent
 adaptive-system study, and as a test harness for claims that are
-usually hand-waved — a rival that remembers *your* tells, with its
-evidence panel open.
+usually hand-waved.
+
+- **Meet a rival that remembers *your* tells** — play several rounds in
+  the terminal or browser; the opponent persists its per-player brain,
+  notices genuine turn habits and rhythm changes, and can explain which
+  evidence it earned.
+- **Try to prove the learning claim false** — run the persona suite: a
+  fixed-direction player is the positive control, a coin-flip player
+  the null, a corner-left player the acceptance case. A harness that
+  cannot say *no* proves nothing.
+  `cargo test --test persona_learning -- --nocapture`
+- **Study an honest adaptive-difficulty loop** — trace how forecast
+  evidence is separated from board knowledge, how aggression spends
+  only round-boundary snapshots, and how schema changes preserve a
+  returning player's learned history.
 
 <br clear="right"/>
+
+**Your first duel takes one command** (with the Rust toolchain
+installed): `cargo run --release`. See the arena — your cycle, the
+computer's, food, trails, score, and the opponent's evidence panel.
+Drive and fight — arrows/WASD, Space fires a held power-up, P pauses.
+Finish a round — the per-player brain saves automatically. Then verify
+the claim: run the persona suite and inspect the positive, null, and
+acceptance personas. For the browser build:
+`wasm-pack build --target web --out-dir web/pkg --features wasm`, then
+`python3 scripts/serve.py 8080`.
 
 **Terminal**
 
@@ -316,6 +371,16 @@ eviction fate. See [ADR-005](docs/adrs/005-durable-player-identity.md) for why
 that mattered.
 
 ## Development
+
+**From your keypress to an earned intercept:** on each game update, the
+world identifies whether you had a real choice, captures your local
+situation, and scores the forecast already committed for this frame.
+The brain updates its predictors and evidence ledgers, then the
+decision layers choose a legal move without dropping the survival
+floor. At round boundaries, the earned read is snapshotted and the
+sectioned brain persisted. The browser exposes the same decisions and
+evidence through versioned state — the canvas and the terminal cannot
+tell two different stories.
 
 ![Architecture: terminal and browser clients share one Rust game core — WormGame owns world rules and update order, CpuBrain owns learning and evidence, web-state serializes browser telemetry, and a sectioned wire format persists the brain](docs/media/architecture.svg)
 
