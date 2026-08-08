@@ -1,6 +1,16 @@
 # ADR-022: The World-Rules Program — Two-Lane Corridor, Timed Decoy, Napalm
 
 ## Status
+v10 (input queue) Implemented and LIVE (BUILD 27) — owner: "if I hit
+the arrow keys rapidly, the 2nd key is often not registered … do a
+better job of collecting keys." Turns and fires are collected (cap 3,
+drop-newest) and consumed one turn per frame against the truly-moved
+heading; a dropped 180 drains to the next entry the same frame;
+turn-then-fire discharges along the NEW heading. Fast corners execute
+as two clean turns. Pre-v10 ghosts keep press-time single-slot
+semantics. Verified SOUND (codex, no blocking findings; the k3
+endpoint was down for this round — noted). Benchmark arms
+bit-identical to v9.
 v9 (napalm) Implemented and LIVE (BUILD 26) — the ADR-022 program is
 COMPLETE: corridor (v6), laser simultaneity (v7/ADR-023), timed decoy
 (v8), napalm (v9). v9 took four consult rounds to unanimity: floor-paced

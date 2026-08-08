@@ -1,15 +1,15 @@
 {
   "version": "3.0",
   "format": "rvf",
-  "exportedAt": "2026-08-05T18:34:47.078Z",
+  "exportedAt": "2026-08-08T11:56:05.547Z",
   "sourceDb": "/opt/worm/.agentic-qe/memory.db",
   "stats": {
-    "patternCount": 164,
-    "embeddingCount": 162,
-    "qValueCount": 10,
-    "dreamInsightCount": 40,
-    "witnessChainLength": 172,
-    "totalRecords": 1422
+    "patternCount": 129,
+    "embeddingCount": 127,
+    "qValueCount": 17,
+    "dreamInsightCount": 1330,
+    "witnessChainLength": 184,
+    "totalRecords": 3461
   },
   "domains": [
     "code-intelligence",
@@ -23,14 +23,14 @@
     "test-execution",
     "test-generation"
   ],
-  "checksum": "8ad2058ed7a8747cf94e1e07cbcc49bc1e03b28af6020f94a3471c0d7e513c02",
+  "checksum": "88bb6a56bf1c9618b07eb6010246a1131477a0d20b9f78363a7a2d8f3ebaeccf",
   "rvfStatus": {
-    "totalVectors": 162,
+    "totalVectors": 127,
     "totalSegments": 6,
-    "fileSizeBytes": 1788784
+    "fileSizeBytes": 2837803
   },
   "lineage": {
-    "fileId": "06647c7e7f2aeded6e4b42168d0ad4f2",
+    "fileId": "06647a7c7c2ef0ee2a18d32089e0d5e2",
     "parentId": "00000000000000000000000000000000",
     "lineageDepth": 0
   }

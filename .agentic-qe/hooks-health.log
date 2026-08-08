@@ -1,0 +1,4 @@
+[2026-08-06T03:50:54.965Z] TIMEOUT hook did not complete (cmd=post-command, signal=SIGTERM, budget=18000ms). Learning for this invocation was NOT captured.
+[2026-08-06T04:21:32.431Z] TIMEOUT hook did not complete (cmd=post-edit, signal=SIGTERM, budget=18000ms). Learning for this invocation was NOT captured.
+[2026-08-06T20:07:02.565Z] TIMEOUT hook did not complete (cmd=post-command, signal=SIGTERM, budget=18000ms). Learning for this invocation was NOT captured.
+[2026-08-08T02:13:48.000Z] TIMEOUT hook did not complete (cmd=post-command, signal=SIGTERM, budget=18000ms). Learning for this invocation was NOT captured.

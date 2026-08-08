@@ -226,7 +226,27 @@ Bolts fly at full speed regardless: light does not slow down. The
 screen drops into a hyperspace field — streaks tearing outward from
 your worm, chromatic warp rings, a focus vignette — and every rule is
 symmetric: if the CPU takes the corridor, the same physics serve you.
-World rules are versioned (v1–v5) and every recorded ghost replays
+### The arsenal
+
+The corridor is **two lanes wide** — turning and overtaking out there
+are real maneuvers. The **laser** ricochets off the arena walls, kills
+what it visibly touches (the beam exists across the frame it fires
+into: anything that steps onto the line during the discharge frame is
+hit — solid beam means hot, the fading afterimage means spent, a low
+clank means you truly whiffed), and its fifth wall strike punches a
+hole. The **bomb** is a fifteen-second decoy: indistinguishable from
+food until its final two seconds, when it flashes — softly, then hard —
+and detonates, punching walls. You dodge it by memory: *I planted
+that.* The **tri-shot** is napalm: three bolts fly four cells and drop
+fire wherever they stop — including under whatever they hit — and a
+worm caught in flame burns down on a wall-clock schedule, up to five
+segments in the first second, three in the next, one in the last,
+shedding embers as it shrinks; burned past the head is dead. One law
+covers all three: **you are immune to your own discharged weapon** —
+your laser, your blast, your fire. The counterplay to everything else
+is attention.
+
+World rules are versioned (v1–v9) and every recorded ghost replays
 under the exact physics it was played on.
 
 ## Playing it

@@ -19,7 +19,11 @@ that learns *when* you turn, a specialist-scored side book that learns
 of "I've read you" must survive an exact statistical test against a
 class-aware baseline under an anytime-valid evidence budget — the
 difficulty you see on screen is earned significance, never vibes — and
-all of it persists per-player, so it remembers you between sessions.
+all of it persists per-player, so it remembers you between sessions. The evidence machinery is honest in both
+directions: a latched read whose spend has decayed to nothing releases
+outright after five idle round boundaries (the "dwell release" — the
+Schmitt pair's dead zone closed), so an abandoned habit is genuinely
+unlearned, not held forever at a trickle.
 
 It also learns about itself, and about the fight. Self-knowledge
 ledgers track which of its hunting tactics have actually killed *you*
