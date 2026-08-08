@@ -274,7 +274,7 @@ fn main() -> std::io::Result<()> {
                         // turn that the next frame would apply anyway.
                         PlayKey::Fire => {
                             if !paused {
-                                let _ = game.fire_powerup(0);
+                                let _ = game.player_fire();
                             }
                         }
                         PlayKey::Pause => {
