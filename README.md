@@ -1,6 +1,15 @@
 # worm
 
+![worm](web/assets/hero.png)
+
 A snake/Tron-lightcycle hybrid whose opponent is trying to learn *you*.
+
+**Play it:** [worm.robertgpt.ai](https://worm.robertgpt.ai) — or
+`cargo run --release` for the terminal build.
+
+*Jump to:* [Playing it](#playing-it) ·
+[The claim, and how to falsify it](#the-claim-and-how-to-falsify-it) ·
+[Development](#development) · [Decisions (21 ADRs)](#decisions)
 
 The game is the easy part. The claim is that the CPU builds a model of the
 specific human it is playing, gets measurably better at predicting them across
@@ -236,12 +245,7 @@ with `WORM_BRAIN`).
 
 ```bash
 wasm-pack build --target web --out-dir web/pkg --features wasm
-# Deployed: https://worm.robertgpt.ai (Apache, DocumentRoot symlinked to
-# web/ — the build above goes live immediately). After a rebuild, bump the
-# cache-bust version in THREE places: index.html's app.js?v=, and app.js's
-# BUILD const + pkg/worm.js?v= import.
-# Local dev without Apache:
-python3 scripts/serve.py 8080   # no-store headers, so rebuilds never serve stale
+python3 scripts/serve.py 8080   # local dev; no-store headers, so rebuilds never serve stale
 ```
 
 The browser build keeps a per-player brain in IndexedDB, keyed by an identity
@@ -270,8 +274,9 @@ numbers go in the commit message — the receipts are the ledger.
 Layout: `src/lib/game.rs` (rules, board, power-ups), `src/lib/cpu_ai.rs`
 (opponent model, decision layers, brain persistence), `src/lib/web_state.rs`
 (browser wire format), `src/main.rs` (terminal client), `web/` (canvas
-client), `examples/` (the eval probes), `scripts/` (gauntlet, dev server,
-page probe).
+client), `tests/` (the falsification suites — the claim lives here),
+`examples/` (the eval probes), `scripts/` (gauntlet, dev server, page probe),
+`benches/` (CPU benchmarks).
 
 The brain is serialized in a sectioned format so that a schema change costs
 only the section it invalidates. What the CPU has learned about *you* — habit
@@ -304,6 +309,8 @@ living documents — if one disagrees with the code, the ADR is the bug.
 - [ADR-017](docs/adrs/017-automatic-round-collection.md) — automatic round collection: every visitor feeds the flywheel
 - [ADR-018](docs/adrs/018-the-beatable-opening.md) — the beatable opening: wits are earned, not given
 - [ADR-019](docs/adrs/019-the-cpus-notebook.md) — the CPU's notebook: LLM depth, on request only
+- [ADR-020](docs/adrs/020-the-turn-book.md) — the turn book: reading the frames that decide games
+- [ADR-021](docs/adrs/021-the-learning-program.md) — the learning program: nine measured surfaces
 
 ### A note on the numbers in this repo
 
@@ -314,11 +321,14 @@ fixes in ADR-004 are exactly that, kept because a test proves them rather than
 because a number moved. Where a claim has been withdrawn, the withdrawal sits
 in the ADR next to the original claim.
 
-Human-derived numbers are a separate class. Since the v9 build every
+Numbers measured against anyone other than the author are a separate
+class. Since the v9 build every
 round played in the browser records a ghost log — the complete input
 streams of both worms plus the round seed
 ([ADR-016](docs/adrs/016-ghost-replay.md)) — captured locally in the
 player's own browser and exported only by their hand (EXPORT MY ROUNDS).
-No such number appears in this repo yet; when one does it will be quoted
-with the export's date and round count, and marked as measured against a
-real player rather than a scripted persona.
+No such exported number appears in this repo yet; when one does it will
+be quoted with the export's date and round count, and marked as measured
+against a real player rather than a scripted persona. (The owner's own
+sessions above are the author's data, collected on his own builds — a
+different class again, quoted as such.)

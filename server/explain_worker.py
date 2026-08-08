@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """The CPU's notebook (ADR-019): on-request deep round explanations.
 
-Localhost-only worker (Apache ProxyPass fronts it at /explain; nothing new
-listens publicly). Runs as the repo owner because `claude -p` needs their
-subscription auth — the CGI user cannot have it, by design.
+Localhost-only worker; the public site reaches it through the existing
+web server's reverse proxy, so nothing new listens publicly. Runs as the
+repo owner because `claude -p` needs their subscription auth — the CGI
+user cannot have it, by design.
 
 Contract with the player, enforced in the prompt: the model may narrate
 ONLY the measurements we hand it. The numbers are computed HERE,
