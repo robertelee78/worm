@@ -165,6 +165,21 @@ struct BookState {
     map_populated: u32,
     map_thin: u32,
     map_unseen: u32,
+    /// THE CUMULATIVE NOTEBOOK (ADR-021): everything durable the CPU
+    /// knows about this player, exported so the explain pipeline can
+    /// ground its narrative in the whole relationship, not one round.
+    rounds_observed: u32,
+    drift_z: f32,
+    rhythm_events: u32,
+    /// P(next voluntary swerve breaks left) from the persisted grammar.
+    rhythm_p_left: Option<f32>,
+    boxer_aversion: f32,
+    /// (tactic name, episodic attempts, kills) — which hunts work on YOU.
+    tactics: Vec<(String, u32, u32)>,
+    /// (weapon name, fires, lethal) — which bait works on YOU.
+    weapons: Vec<(String, u32, u32)>,
+    /// (death cause, total, while-chased) — how YOU kill the CPU.
+    cpu_losses: Vec<(String, u32, u32)>,
 }
 
 #[derive(Serialize)]
@@ -443,6 +458,64 @@ impl GameState {
                             let (_, _, u) = b.map_summary();
                             u
                         },
+                        rounds_observed: game.cpu_brain.ledgers.rounds_seen,
+                        drift_z: game.cpu_brain.ledgers.drift_z,
+                        rhythm_events: game.cpu_brain.voluntary_pattern.events,
+                        rhythm_p_left: if game.cpu_brain.voluntary_pattern.events
+                            >= crate::cpu_ai::VOMM_MIN_EVENTS
+                        {
+                            Some(game.cpu_brain.voluntary_pattern.p_left())
+                        } else {
+                            None
+                        },
+                        boxer_aversion: game.cpu_brain.ledgers.boxer_aversion(),
+                        tactics: game
+                            .cpu_brain
+                            .ledgers
+                            .tactic_attempts
+                            .iter()
+                            .map(|e| {
+                                let name = match e.0 {
+                                    0 => "direct intercept",
+                                    1 => "corner cutoff",
+                                    2 => "food-path ambush",
+                                    _ => "wall-follow press",
+                                };
+                                (name.to_string(), e.3, e.4)
+                            })
+                            .collect(),
+                        weapons: game
+                            .cpu_brain
+                            .ledgers
+                            .weapon_ops
+                            .iter()
+                            .map(|e| {
+                                let name = match e.0 {
+                                    0 => "laser",
+                                    1 => "tri-shot",
+                                    _ => "disguised mine",
+                                };
+                                (name.to_string(), e.3, e.4)
+                            })
+                            .collect(),
+                        cpu_losses: game
+                            .cpu_brain
+                            .ledgers
+                            .loss_causes
+                            .iter()
+                            .map(|e| {
+                                let name = match e.0 {
+                                    0 => "wall",
+                                    1 => "its own trail",
+                                    2 => "your trail",
+                                    3 => "head-on",
+                                    4 => "your mine",
+                                    5 => "your laser",
+                                    _ => "your tri-shot",
+                                };
+                                (name.to_string(), e.1, e.2)
+                            })
+                            .collect(),
                     }
                 },
                 read_rate: ReadRateScopes {

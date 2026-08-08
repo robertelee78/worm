@@ -11,7 +11,7 @@ import { computeBoardLayout, VIEWPORT_BLOCK_GUTTER } from './layout.js';
 let CELL = 14; // recomputed by applyBoardLayout() to fit the measured stage
 // Bump together with the ?v= in index.html whenever the wasm bundle is
 // rebuilt — it keys the cache-busting query on the .wasm fetch.
-const BUILD = 21;
+const BUILD = 22;
 const MATCH_TARGET = 3;
 const STATE_SCHEMA_VERSION = 2;
 const ROUND_SCHEMA_VERSION = 1;
@@ -1036,6 +1036,25 @@ function roundRecord(s) {
     driftDetected: !!(s.brain.book && s.brain.book.driftDetected),
     mapUnseen: s.brain.book?.mapUnseen ?? null,
     mapThin: s.brain.book?.mapThin ?? null,
+    lifetime: s.brain.readRate ? {
+      rate: s.brain.readRate.lifetime?.rate ?? null,
+      baseRate: s.brain.readRate.lifetime?.baseRate ?? null,
+      lift: s.brain.readRate.lifetime?.lift ?? null,
+      significant: !!s.brain.readRate.lifetime?.significant,
+      samples: s.brain.readRate.lifetime?.samples ?? 0,
+    } : null,
+    cumulative: s.brain.book ? {
+      roundsObserved: s.brain.book.roundsObserved ?? 0,
+      driftZ: s.brain.book.driftZ ?? 0,
+      rhythmEvents: s.brain.book.rhythmEvents ?? 0,
+      rhythmPLeft: s.brain.book.rhythmPLeft ?? null,
+      boxerAversion: s.brain.book.boxerAversion ?? 0,
+      tactics: s.brain.book.tactics ?? [],
+      weapons: s.brain.book.weapons ?? [],
+      cpuLosses: s.brain.book.cpuLosses ?? [],
+      mapUnseen: s.brain.book.mapUnseen ?? null,
+      mapThin: s.brain.book.mapThin ?? null,
+    } : null,
     book: s.brain.book ? {
       sideAccuracy: Number.isFinite(s.brain.book.sideAccuracy) ? s.brain.book.sideAccuracy : null,
       sideEvents: s.brain.book.sideEvents ?? 0,

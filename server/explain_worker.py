@@ -76,6 +76,11 @@ def build_prompt(rec):
         "cpuFinalAction": rec.get("decisionReason"),
         "cpuFinalForecastSource": rec.get("decisionSourceName"),
         "playerHabits": habits,
+        # THE CUMULATIVE NOTEBOOK: everything durable the CPU knows about
+        # this player across ALL their rounds — the narrative may draw on
+        # any of it, highlighting this round against the relationship.
+        "lifetimeRead": rec.get("lifetime"),
+        "cumulative": rec.get("cumulative"),
         # ADR-020: the earned-evidence ledger — which family half funds
         # the difficulty, and the turn book's side read of the player.
         "earnedRead": (rec.get("book") or {}).get("earned"),
