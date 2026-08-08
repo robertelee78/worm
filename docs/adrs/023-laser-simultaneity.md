@@ -1,8 +1,16 @@
 # ADR-023: Laser Simultaneity — The Beam Exists Across the Frame It Fires Into
 
 ## Status
-Accepted — UNANIMOUS (codex decisive + k3 confirmed, both Option A).
-Becomes world v7; the ADR-022 decoy and napalm shift to v8 and v9.
+Implemented and LIVE (world v7, merge a6e6c10, BUILD 24) — Option A
+ruled unanimously, implementation verified through two adversarial
+consult rounds (round 1: 4 findings, all resolved; round 2: SOUND with
+two prescribed one-line completions, both landed with a contract test;
+B2 truncation rule ruled Option 1 unanimously and written below). The
+ADR-022 decoy and napalm are v8 and v9.
+
+## Updated
+2026-08-08 — landed live; owner's recorded round passes as the
+regression test (his shot kills at frame 138).
 
 ## Date
 2026-08-08
