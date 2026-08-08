@@ -1,6 +1,18 @@
 # ADR-022: The World-Rules Program — Two-Lane Corridor, Timed Decoy, Napalm
 
 ## Status
+v11 (napalm reach) Implemented and LIVE (BUILD 28) — owner: "the
+tri-shot isn't lethal enough … no damage … maybe they need to go
+further, but if they touch the opponent at all, that's what needs to
+catch them on fire." Full-ray bolts at TWO cells per frame (ordered
+one-cell substeps, complete pipeline each); ANY touch catches directly
+(catch_on_touch — the ground flame is area effect, not the catch
+mechanism); the v9 crossing-swap instant kill is gone. This SUPERSEDES
+the v9 four-cell bolt rule in the matrix below. Receipts: burn engine
+proven correct pre-change; the damagelessness was reach (worm-speed
+4-cell bolts were dodged or outrun by construction); paired arms v10
+71/12/7 (79%) -> v11 76/9/5 (84%) at identical lift 0.59; five-seed
+instrument mean 4.11 / median 3.89.
 v10 (input queue) Implemented and LIVE (BUILD 27) — owner: "if I hit
 the arrow keys rapidly, the 2nd key is often not registered … do a
 better job of collecting keys." Turns and fires are collected (cap 3,
