@@ -1213,11 +1213,11 @@ fn test_bomb_blast_breaks_arena_wall_not_frame() {
     });
     game.tick_bombs();
     assert_eq!(
-        game.grid[5][2],
+        game.grid[5][3],
         worm::CellType::Hole,
-        "ring-2 wall cell in the blast must open"
+        "the arena-wall cell (ring 3 under v6) in the blast must open"
     );
-    assert_eq!(game.grid[2][5], worm::CellType::Hole);
+    assert_eq!(game.grid[3][5], worm::CellType::Hole);
     assert_eq!(
         game.grid[5][0],
         worm::CellType::Wall,
@@ -1669,13 +1669,13 @@ fn test_arena_wall_tracks_sudden_death_shrink() {
     // first shrink: beams stopped dead instead of bouncing or breaching, and
     // bomb blasts stopped breaking walls.
     let mut game = WormGame::with_size(120, 38);
-    assert!(game.is_arena_wall(2, 20), "ring 2 is the wall before any shrink");
-    assert!(!game.is_arena_wall(3, 20));
+    assert!(game.is_arena_wall(3, 20), "ring 3 is the wall before any shrink (v6)");
+    assert!(!game.is_arena_wall(4, 20));
 
     game.shrink_level = 1;
-    assert!(game.is_arena_wall(3, 20), "the wall moves inward with the shrink");
-    assert!(!game.is_arena_wall(2, 20), "the old ring is no longer the wall");
-    assert_eq!(game.arena_wall_offset(), 3);
+    assert!(game.is_arena_wall(4, 20), "the wall moves inward with the shrink");
+    assert!(!game.is_arena_wall(3, 20), "the old ring is no longer the wall");
+    assert_eq!(game.arena_wall_offset(), 4);
 }
 
 /* ------------------------- bomb as a proximity mine ----------------------- */
@@ -1916,31 +1916,32 @@ fn test_escorted_wall_lane_is_refused_before_the_lock_forms() {
             }
         }
     }
-    // CPU in the top lane (row 3, arena wall ring at y=2), heading Left.
-    game.cycles[1].head = (30, 3);
+    // CPU in the top lane (row 4 — the arena wall sits at y=3 under v6),
+    // heading Left.
+    game.cycles[1].head = (30, 4);
     game.cycles[1].direction = worm::Direction::Left;
     game.cycles[1].prev_direction = worm::Direction::Left;
-    game.cycles[1].positions = vec![(30, 3), (31, 3)];
+    game.cycles[1].positions = vec![(30, 4), (31, 4)];
     for &(x, y) in &game.cycles[1].positions {
         game.grid[y as usize][x as usize] = worm::CellType::CPU;
     }
     // Player escorting abeam: one row below, one column behind, same heading.
-    game.cycles[0].head = (31, 4);
+    game.cycles[0].head = (31, 5);
     game.cycles[0].direction = worm::Direction::Left;
     game.cycles[0].prev_direction = worm::Direction::Left;
-    game.cycles[0].positions = vec![(31, 4), (32, 4), (33, 4), (34, 4)];
+    game.cycles[0].positions = vec![(31, 5), (32, 5), (33, 5), (34, 5)];
     for &(x, y) in &game.cycles[0].positions {
         game.grid[y as usize][x as usize] = worm::CellType::Player;
     }
 
     // The geometry itself is recognised…
     assert!(
-        worm::escorted_lane_step(&game, (30, 3), worm::Direction::Left),
+        worm::escorted_lane_step(&game, (30, 4), worm::Direction::Left),
         "continuing straight in an escorted wall lane must read as escorted"
     );
     // …and a perpendicular exit is not tarred with the same brush.
     assert!(
-        !worm::escorted_lane_step(&game, (30, 3), worm::Direction::Down),
+        !worm::escorted_lane_step(&game, (30, 4), worm::Direction::Down),
         "leaving the lane is the escape, not part of the trap"
     );
 
@@ -2210,13 +2211,13 @@ fn test_burst_spares_walls_and_own_trail() {
     let mut game = trishot_board();
     // Opponent trail hugging the top wall lane so the burst quadrant
     // includes an arena-wall cell.
-    let wall_y = 2usize; // arena wall ring
+    let wall_y = 3usize; // arena wall ring (ring 3 since world v6)
     game.cycles[1].head = (30, 10);
     game.cycles[1].direction = worm::Direction::Right;
-    game.cycles[1].positions = vec![(30, 10), (20, 3), (19, 3)];
+    game.cycles[1].positions = vec![(30, 10), (20, 4), (19, 4)];
     game.grid[10][30] = worm::CellType::CPU;
-    game.grid[3][20] = worm::CellType::CPU;
-    game.grid[3][19] = worm::CellType::CPU;
+    game.grid[4][20] = worm::CellType::CPU;
+    game.grid[4][19] = worm::CellType::CPU;
     // Firer aims up the column so the straight ray hits (20,3), whose 2x2
     // (heading Up, biased left) touches the wall row above.
     game.cycles[0].head = (20, 10);
@@ -2537,12 +2538,12 @@ fn a_mid_round_book_latch_waits_for_the_round_boundary() {
 fn the_corridor_turns_the_corners_and_replays_keep_their_arena() {
     use worm::CellType;
     let game = worm::WormGame::with_size_seed(40, 30, 5);
-    // v2: corridor corner cells are walkable...
+    // v6: two corridor lanes are walkable, wall at ring 3...
     assert_eq!(game.grid[1][1], CellType::Empty, "corner corridor cell");
-    assert_eq!(game.grid[2][1], CellType::Empty, "corner turn (x=1,y=2)");
-    assert_eq!(game.grid[1][2], CellType::Empty, "corner turn (x=2,y=1)");
-    // ...while the arena wall's own corner still stands.
-    assert_eq!(game.grid[2][2], CellType::Wall, "arena wall corner");
+    assert_eq!(game.grid[2][2], CellType::Empty, "second lane (v6)");
+    assert_eq!(game.grid[3][2], CellType::Empty, "corner turn inside lane");
+    // ...while the arena wall's own corner still stands at ring 3.
+    assert_eq!(game.grid[3][3], CellType::Wall, "arena wall corner (v6)");
 
     // A v1 replay pins the old geometry: the wall ends cross the corridor.
     let mut old = worm::WormGame::with_size_seed(40, 30, 5);
@@ -2758,13 +2759,14 @@ fn the_cpu_knows_what_the_slipstream_does() {
         path.iter().all(|&p| p == (6, 1)),
         "a slipped player projects (nearly) stationary, got {path:?}"
     );
-    // Entry detection: from the arena the only way in is a punched hole.
-    game.cycles[1].head = (6, 3);
+    // Entry detection: from the arena the only way in is a punched hole
+    // (v6: the wall sits at ring 3).
+    game.cycles[1].head = (6, 4);
     assert!(
         !worm::cpu_ai::step_enters_corridor(&game, 1, worm::Direction::Up),
         "the intact arena wall is not an entry"
     );
-    game.grid[2][6] = worm::CellType::Hole;
+    game.grid[3][6] = worm::CellType::Hole;
     assert!(
         worm::cpu_ai::step_enters_corridor(&game, 1, worm::Direction::Up),
         "a punched hole is"
@@ -2805,5 +2807,70 @@ fn an_enveloped_cpu_blasts_itself_an_exit() {
     assert!(
         worm::cpu_ai::should_fire(&mut game, 1),
         "walls closing + laser in hand = blast an exit"
+    );
+}
+
+/// ADR-022 (both consultants): the doze's hazard contract with mines,
+/// exercised through the REAL held-heading path — a doze frame leaves
+/// `cpu_telemetry.decision` empty; a reflex wake runs `cpu_decide`.
+/// A dozy CPU always knows where its OWN plant is — self-knowledge, not
+/// sharpness — while an ENEMY mine stays invisible: being fooled by the
+/// disguise is what the doze is for. (Receipt: under the v7-spike's long
+/// fuse, warm CPUs wall-following into their own live mines was a
+/// measured death mode; the wake-reflex removed it, cold arm 91%.)
+#[test]
+fn test_doze_wakes_for_own_mine_but_not_the_enemys() {
+    let run = |owner: u8| -> bool {
+        let mut game = worm::WormGame::with_size_seed(60, 30, 7);
+        // A fresh, unread brain keeps the beatable opening's doze cadence.
+        assert!(game.cpu_brain.earned_snapshot == 0.0);
+        // Odd frame: a doze candidate for any open_k >= 2.
+        game.frame_count = 1;
+        let (hx, hy) = game.cycles[1].head;
+        let (dx, dy) = game.cycles[1].direction.as_delta();
+        game.bombs.push(worm::game::Bomb {
+            x: (hx as i16 + dx) as u16,
+            y: (hy as i16 + dy) as u16,
+            fuse: 200,
+            armed_in: 50, // still arming: movement-only probe, no blast
+            disguise: 3,
+            owner,
+            tripped: false,
+        });
+        game.update();
+        game.cpu_telemetry.decision.is_some()
+    };
+    assert!(
+        run(1),
+        "the CPU's own mine one cell ahead must wake the doze (a decision frame)"
+    );
+    assert!(
+        !run(0),
+        "the player's disguised mine must stay invisible to the doze (held heading)"
+    );
+}
+
+/// ADR-022 / k3 Q6: the session doze-exit latch. Once ANY earned read has
+/// ended the casual opening this session, a marginal look-crossing that
+/// releases the evidence latch must NOT re-open the doze — survival
+/// discipline stays sharp for the rest of the session.
+#[test]
+fn test_discipline_never_re_dozes_after_an_earned_read() {
+    let mut game = worm::WormGame::with_size_seed(60, 30, 7);
+    assert!(
+        game.discipline_sharpness() < 1.0 || game.cpu_brain.earned_snapshot > 0.0,
+        "a fresh session starts inside the beatable opening"
+    );
+    // An earned read opens full discipline...
+    game.cpu_brain.earned_snapshot = 0.4;
+    game.cpu_brain.discipline_latched = true; // set where the snapshot is taken
+    assert_eq!(game.discipline_sharpness(), 1.0);
+    // ...and a later marginal release of the evidence latch (snapshot back
+    // to zero) must not hand the vulnerability window back.
+    game.cpu_brain.earned_snapshot = 0.0;
+    assert_eq!(
+        game.discipline_sharpness(),
+        1.0,
+        "the doze must not return after sharpness was earned this session"
     );
 }
