@@ -1,6 +1,6 @@
 # worm
 
-![worm](web/assets/hero.png)
+![worm](web/assets/hero-new.png)
 
 A snake/Tron-lightcycle hybrid whose opponent is trying to learn *you*.
 
