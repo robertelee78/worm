@@ -1568,6 +1568,17 @@ pub struct CpuBrain {
     /// transition regime reborn). Transient.
     #[serde(skip)]
     pub earned_snapshot: f32,
+    /// SESSION DOZE-EXIT LATCH (both v6 consultants, Q6): once an earned
+    /// read has ended the casual opening this session, the doze never
+    /// returns — a latch that re-released on a marginal look-crossing was
+    /// measuring "currently seeing crossing-shaped inputs", not "has
+    /// earned sharpness", and the warm arm surrendered wins to the
+    /// re-opened vulnerability window (games 13-17, read 0.00 mid-arm).
+    /// Deliberately NOT persisted: every new session still starts with
+    /// the ADR-018 beatable opening. AGGRESSION spend still tracks the
+    /// live earned value; only survival basics are latched.
+    #[serde(skip)]
+    pub discipline_latched: bool,
     /// Round-boundary snapshots of the book's spendable evidence and
     /// projection authority (codex round 3): a latch that opens mid-round
     /// must not reshape projections or defensive trust before any
@@ -2451,6 +2462,7 @@ impl Default for CpuBrain {
             frames_since_food: 99,
             prev_pc_dist: 0,
             earned_snapshot: 0.0,
+            discipline_latched: false,
             book_spend_snapshot: 0.0,
             book_authority_snapshot: false,
             tactic_prefer_direct: false,
@@ -4507,10 +4519,20 @@ fn cell_threatened_by_projectile(game: &WormGame, x: u16, y: u16) -> bool {
 fn cell_threatened_by_bomb(game: &WormGame, x: u16, y: u16, frames_ahead: u8) -> bool {
     let trigger = crate::game::MINE_TRIGGER_CELLS as i32;
     for b in &game.bombs {
-        // Our own mines cannot kill us — detonate() excludes the owner — so
-        // dodging them was the AI avoiding blasts that were harmless to it.
+        // Our own mines cannot kill our HEAD — detonate() excludes the
+        // owner — so pre-v6 they were harmless to us and dodging them was
+        // wasted caution. World v6 changed the ledger: an expiring decoy
+        // DETONATES, and the blast severs the owner's TRAIL even though
+        // it spares the head (measured: warm CPUs food-routing beside
+        // their own flashing decoys were blasted down to len-1 stubs and
+        // died as scrap). During the flash window our own mine is a
+        // hazard like any other.
         if b.owner == 1 {
-            continue;
+            let own_dangerous =
+                game.arena_version >= 6 && game.bomb_flash_tier(b) > 0;
+            if !own_dangerous {
+                continue;
+            }
         }
         let cheb = (x as i32 - b.x as i32)
             .abs()
@@ -5706,7 +5728,38 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
     let mut decision_projection = None;
     macro_rules! choose {
         ($direction:expr, $reason:expr) => {{
-            let chosen = $direction;
+            let mut chosen = $direction;
+            // FINAL STEP GUARD: several layers emit COMPUTED directions
+            // (wall-follow's hug, food-route lanes) that never pass the
+            // passable-vetted candidate list — and a computed step into a
+            // mine/trail while legal moves exist is never a decision, it
+            // is a bug. (Measured under v6: the longer decoy fuse let the
+            // CPU's wall-follow lap return to its own plant site while
+            // the mine still lived — BombBlast deaths under ItemPath and
+            // WallFollow reasons.) If the chosen step is lethal and any
+            // legal move exists, take the most open legal one instead.
+            {
+                let (gdx, gdy) = chosen.as_delta();
+                let gx = game.cycles[1].head.0 as i16 + gdx;
+                let gy = game.cycles[1].head.1 as i16 + gdy;
+                let lethal = gx < 0
+                    || gy < 0
+                    || gx >= game.width as i16
+                    || gy >= game.height as i16
+                    || !game.passable(gx as u16, gy as u16);
+                if lethal {
+                    let legal_now = legal_directions(game, &game.cycles[1]);
+                    if let Some(&best) = legal_now.iter().max_by_key(|&&d| {
+                        let (ddx, ddy) = d.as_delta();
+                        let nx = (game.cycles[1].head.0 as i16 + ddx).max(0) as u16;
+                        let ny = (game.cycles[1].head.1 as i16 + ddy).max(0) as u16;
+                        count_open_space(game, nx, ny) as u32
+                    }) {
+                        chosen = best;
+                    }
+                }
+            }
+            let chosen = chosen;
             let trace = CpuDecisionTrace {
                 frame: game.frame_count,
                 heading: chosen,
@@ -7899,17 +7952,17 @@ mod tests {
     fn wall_distance_stops_at_arena_wall() {
         let game = WormGame::with_size(120, 38);
         assert!(game.has_corridor(), "test assumes a corridor arena");
-        let (hx, hy) = (5u16, 10u16);
+        let (hx, hy) = (6u16, 10u16);
         let walls = wall_distance(&game, hx, hy);
-        // Left: free cells x=4,3 then wall at x=2 -> distance 2.
-        assert_eq!(walls[2], 2.0, "left wall distance must stop at ring 2");
-        // Right: free cells x=6..(w-4) then wall at x=w-3.
-        let expect_right = (game.width - 3 - hx - 1) as f32;
+        // Left: free cells x=5,4 then the arena wall at x=3 (v6) -> 2.
+        assert_eq!(walls[2], 2.0, "left wall distance must stop at the arena wall");
+        // Right: free cells to the arena wall at x = w-4 (v6 ring 3).
+        let expect_right = (game.width - 4 - hx - 1) as f32;
         assert_eq!(walls[3], expect_right);
-        // Up: free cells y=9..3 then wall at y=2.
-        assert_eq!(walls[0], (hy - 3) as f32);
-        // Down: free cells y=11..(h-4) then wall at y=h-3.
-        let expect_down = (game.height - 3 - hy - 1) as f32;
+        // Up: free cells to the wall at y=3.
+        assert_eq!(walls[0], (hy - 4) as f32);
+        // Down: free cells to the wall at y = h-4.
+        let expect_down = (game.height - 4 - hy - 1) as f32;
         assert_eq!(walls[1], expect_down);
     }
 

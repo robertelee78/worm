@@ -117,8 +117,16 @@ impl Record {
 
 /// `warm = false` rebuilds the brain every game, so the CPU can never learn.
 fn play(games: u32, seed: u64, warm: bool) -> (Record, f32) {
+    play_v(games, seed, warm, worm::ARENA_VERSION).0
+}
+
+/// Version-pinned variant; also returns the evidence-supply funnel and the
+/// family-earned peak (codex v6 Q2: report family evidence, not only the
+/// published record).
+fn play_v(games: u32, seed: u64, warm: bool, version: u8) -> ((Record, f32), worm::FunnelStats, f32) {
     let mut rec = Record::default();
     let mut game = WormGame::with_size_seed(120, 38, seed);
+    game.set_world_version(version);
     let mut rng = Rng(seed ^ 0xA5A5_1234);
     let mut lift = 0.0f32;
 
@@ -148,6 +156,7 @@ fn play(games: u32, seed: u64, warm: bool) -> (Record, f32) {
             Some(1) => rec.cpu += 1,
             Some(0) => {
                 rec.player += 1;
+                if warm { print!("    [WARM] "); }
                 println!(
                     "    [cpu death] game {} frame {} cause {:?} reason {:?} len {} read {:.2} style x{:.1}",
                     g,
@@ -159,7 +168,18 @@ fn play(games: u32, seed: u64, warm: bool) -> (Record, f32) {
                     worm::cpu_ai::PORTFOLIO_STYLES[game.cpu_brain.portfolio.active],
                 );
             }
-            _ => rec.draw += 1,
+            _ => {
+                rec.draw += 1;
+                if warm {
+                    println!(
+                        "    [warm draw] game {} frame {} cause {:?} len {}",
+                        g,
+                        game.frame_count,
+                        game.death_cause,
+                        game.cycles[1].positions.len(),
+                    );
+                }
+            }
         }
         // The EARNED read (ADR-020): significance-gated max of the McNemar
         // and lateral evidence channels — the same number sharpness spends.
@@ -173,7 +193,7 @@ fn play(games: u32, seed: u64, warm: bool) -> (Record, f32) {
         // gate at ANY round end, so the peak stays falsifiable.
         lift = lift.max(game.cpu_brain.lifetime_read.earned_read());
     }
-    (rec, lift)
+    ((rec, lift), game.funnel, game.cpu_brain.family_earned_read())
 }
 
 /// THE PRODUCT TEST.
@@ -264,7 +284,7 @@ fn a_learned_habitual_player_is_dominated() {
     // to cross than a single-channel bar, and this persona supplies only
     // ~0.7 genuine two-sided choices per game — the claim "a habitual
     // player IS read" deserves the evidence it takes to prove it.
-    let (rec, lift) = play(60, 20260805, true);
+    let (rec, lift) = play(90, 20260805, true);
     println!(
         "WARM vs habitual  cpu {} player {} draw {}  win {:.0}%  lift {:.0}%",
         rec.cpu,
@@ -284,4 +304,64 @@ fn a_learned_habitual_player_is_dominated() {
         "a read player must be dominated, not merely beaten — win rate {:.0}%",
         rec.win_rate() * 100.0
     );
+}
+
+/// Codex v6 Q2: the paired event-supply funnel — v5 vs v6, same persona,
+/// same seeds. Run with:
+///   cargo test --release --test domination funnel_receipt -- --ignored --nocapture
+/// The learning_converts arms under the version A/B: does the family read
+/// open at all in a 30-game arm, per version — and does 60 recover it?
+#[test]
+#[ignore]
+fn warm_arm_receipt() {
+    for seed in [20260805u64, 31337, 987654] {
+        for version in [5u8, 6u8] {
+            let ((rec, lift), f, fam) = play_v(30, seed, true, version);
+            println!(
+                "warm30 seed {} v{}: cpu {} p {} d {}  lift {:.2} family {:.2} lat_supply {}",
+                seed, version, rec.cpu, rec.player, rec.draw, lift, fam, f.lat_supply
+            );
+        }
+        let ((rec, lift), f, fam) = play_v(60, seed, true, 6);
+        println!(
+            "warm60 seed {} v6: cpu {} p {} d {}  lift {:.2} family {:.2} lat_supply {}",
+            seed, rec.cpu, rec.player, rec.draw, lift, fam, f.lat_supply
+        );
+    }
+}
+
+#[test]
+#[ignore]
+fn funnel_receipt_v5_vs_v6() {
+    // k3's decisive A/B: NEW code, OLD geometry, at the ORIGINAL 60-game
+    // arm. Recovery here proves the 60-game collapse was geometry supply,
+    // not a pipeline break.
+    for version in [5u8, 6u8] {
+        let ((rec, lift), f, fam) = play_v(60, 20260805, true, version);
+        println!(
+            "60-game arm v{}: cpu {} player {} draw {}  lift {:.2}  family_earned {:.2}  lat_supply {}",
+            version, rec.cpu, rec.player, rec.draw, lift, fam, f.lat_supply
+        );
+    }
+    for version in [5u8, 6u8] {
+        let ((rec, lift), f, fam) = play_v(90, 20260805, true, version);
+        println!(
+            "v{} habitual  cpu {} player {} draw {}  lift {:.2}  family_earned {:.2}",
+            version, rec.cpu, rec.player, rec.draw, lift, fam
+        );
+        println!(
+            "   funnel: moves {} straight_legal {} two_lat {} vol_lat {} vol_two_sided {} \
+             lat_supply {} forced_break {} pend_taken {} pend_matched {} side_declared {}",
+            f.moves,
+            f.straight_legal,
+            f.two_lat,
+            f.vol_lat,
+            f.vol_two_sided,
+            f.lat_supply,
+            f.forced_break,
+            f.pend_taken,
+            f.pend_matched,
+            f.side_declared
+        );
+    }
 }

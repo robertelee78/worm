@@ -286,9 +286,39 @@ impl LightCycle {
 /// 1 in the third — head burned = dead.
 pub const ARENA_VERSION: u8 = 6;
 
+/// Diagnostic event-supply funnel (codex v6 consult, Q2): cheap counters
+/// over the evidence-eligibility path, cumulative for the life of this
+/// WormGame. Never persisted, never read by play logic — receipts only.
+#[derive(Default, Clone, Copy)]
+pub struct FunnelStats {
+    /// Scored (moving, non-frozen) player frames.
+    pub moves: u32,
+    /// Frames where holding the line was legal.
+    pub straight_legal: u32,
+    /// ...and both laterals were also legal.
+    pub two_lat: u32,
+    /// Voluntary laterals taken (straight legal, turned anyway).
+    pub vol_lat: u32,
+    /// ...with both sides open — the side-evidence supply.
+    pub vol_two_sided: u32,
+    /// Pending book records consumed (matched or stale).
+    pub pend_taken: u32,
+    /// ...that matched their target frame.
+    pub pend_matched: u32,
+    /// Matched records that carried a side call.
+    pub side_declared: u32,
+    /// Lateral taken with BOTH laterals legal, straight legal or not — the
+    /// published lateral channel's exact feed (cpu_ai record()).
+    pub lat_supply: u32,
+    /// Forced breaks (straight illegal, lateral taken).
+    pub forced_break: u32,
+}
+
 pub struct WormGame {
     /// Arena geometry this game builds (replays pin their recorded one).
     pub arena_version: u8,
+    /// Evidence-supply funnel receipts (diagnostic only).
+    pub funnel: FunnelStats,
     /// Whether the current round's ledgers have been finalized (exactly-
     /// once discipline; see finalize_round_ledgers).
     pub ledgers_finalized: bool,
@@ -625,6 +655,7 @@ impl WormGame {
 
         let mut game = Self {
             arena_version: ARENA_VERSION,
+            funnel: FunnelStats::default(),
             ledgers_finalized: false,
             flames: Vec::new(),
             burn_contact: [0; 2],
@@ -739,7 +770,7 @@ impl WormGame {
     /// stage 2.1). Sloppy basics exist for the genuinely-unread phase
     /// ONLY; a CPU holding latched evidence has no business faceplanting.
     pub fn discipline_sharpness(&self) -> f32 {
-        if self.cpu_brain.earned_snapshot > 0.0 {
+        if self.cpu_brain.earned_snapshot > 0.0 || self.cpu_brain.discipline_latched {
             1.0
         } else {
             self.sharpness()
@@ -1221,6 +1252,7 @@ impl WormGame {
             // have held the line, so WHEN and WHICH WAY were genuinely
             // theirs. Forced turns belong to the mask, not the books.
             {
+                self.funnel.moves += 1;
                 let straight_legal = legal_now.contains(&player_heading);
                 let both_laterals_legal = {
                     let mut l = 0;
@@ -1240,11 +1272,43 @@ impl WormGame {
                 );
                 // A stale record (round restart, frame skip) must never
                 // score against the wrong input.
+                let pend_any = self.cpu_brain.pending_book.is_some();
                 let pend_book = self
                     .cpu_brain
                     .pending_book
                     .take()
                     .filter(|p| p.target_frame == self.frame_count);
+                {
+                    let f = &mut self.funnel;
+                    let turned = turned_lateral;
+                    if straight_legal {
+                        f.straight_legal += 1;
+                        if both_laterals_legal {
+                            f.two_lat += 1;
+                        }
+                        if turned {
+                            f.vol_lat += 1;
+                            if both_laterals_legal {
+                                f.vol_two_sided += 1;
+                            }
+                        }
+                    }
+                    if turned && both_laterals_legal {
+                        f.lat_supply += 1;
+                    }
+                    if !straight_legal && turned {
+                        f.forced_break += 1;
+                    }
+                    if pend_any {
+                        f.pend_taken += 1;
+                    }
+                    if let Some(p) = &pend_book {
+                        f.pend_matched += 1;
+                        if p.side.is_some() {
+                            f.side_declared += 1;
+                        }
+                    }
+                }
                 if let Some(p) = pend_book {
                     if straight_legal && player_turn.is_some() {
                         self.cpu_brain.class_books.observe_hazard(p.cell, turned_lateral);
@@ -1808,7 +1872,21 @@ impl WormGame {
                 || nx >= self.width as i16
                 || ny >= self.height as i16
                 || self.grid[ny as usize][nx as usize] == CellType::Wall;
-            !wall_ahead && !crate::cpu_ai::ring_doomed_step(self, cy.head, cy.direction)
+            // OWN mine ahead wakes even a dozy driver — you always know
+            // where your own plant is (self-knowledge, not sharpness).
+            // ENEMY mines stay invisible to the doze: being fooled by a
+            // disguise is exactly what the doze is for. (v6's longer
+            // decoy fuse made own-mine doze deaths a measured warm-arm
+            // failure mode: BombBlast under held headings.)
+            let own_mine_ahead = nx >= 0
+                && ny >= 0
+                && self
+                    .bombs
+                    .iter()
+                    .any(|b| b.owner == 1 && b.x == nx as u16 && b.y == ny as u16);
+            !wall_ahead
+                && !own_mine_ahead
+                && !crate::cpu_ai::ring_doomed_step(self, cy.head, cy.direction)
         };
         let cpu_dir = if cpu_frozen {
             // Slipstream-frozen: no decision, no discharge — held heading.
@@ -2326,6 +2404,9 @@ impl WormGame {
         // hunts before a boundary check has seen it).
         let base = self.cpu_brain.family_earned_read();
         self.cpu_brain.earned_snapshot = base;
+        if base > 0.0 {
+            self.cpu_brain.discipline_latched = true;
+        }
         self.cpu_brain.book_spend_snapshot = self.cpu_brain.class_books.spendable();
         self.cpu_brain.book_authority_snapshot =
             self.cpu_brain.class_books.projection_authority();
@@ -3293,7 +3374,21 @@ impl WormGame {
                 }
                 let (ux, uy) = (xx as u16, yy as u16);
                 match self.grid[uy as usize][ux as usize] {
-                    CellType::Player | CellType::CPU => {
+                    cell @ (CellType::Player | CellType::CPU) => {
+                        // World v6: a blast is fully OWNER-SAFE — every other
+                        // weapon already is (own napalm, own bolts, the head
+                        // exclusion below), and the timed decoy made the old
+                        // owner-trail severing newly fatal: a CPU food-routing
+                        // near its own expiring decoy was blasted to a len-1
+                        // stub by a 10-cell cross it had no reason to fear.
+                        let owner_marker = if owner == 0 {
+                            CellType::Player
+                        } else {
+                            CellType::CPU
+                        };
+                        if self.arena_version >= 6 && cell == owner_marker {
+                            continue;
+                        }
                         // A living head marker survives the sweep — head fates
                         // are decided by the radius check below, and erasing a
                         // survivor's marker would let the opponent drive onto
