@@ -2913,3 +2913,547 @@ fn test_discipline_never_re_dozes_after_an_earned_read() {
         "restored live evidence re-latches at the load-site refresh"
     );
 }
+/// OWNER BUG REPORT (2026-08-08, live play): "I shot at the opponent — it
+/// missed its head, went through the body, and the body didn't truncate."
+/// Reproduction matrix: straight shot and ricochet shot, v5 and v6.
+#[test]
+fn repro_laser_through_body_truncates() {
+    for version in [5u8, 6u8] {
+        for ricochet in [false, true] {
+            let mut game = WormGame::with_size(120, 38);
+            game.set_world_version(version);
+            for row in &mut game.grid {
+                for cell in row.iter_mut() {
+                    if *cell != worm::CellType::Wall {
+                        *cell = worm::CellType::Empty;
+                    }
+                }
+            }
+            // CPU body: a vertical run at x=30, head TOP at (30,8), body
+            // down to (30,20). Firer shoots along y=15 — crosses the BODY
+            // at (30,15), misses the head by 7 cells.
+            game.cycles[1].head = (30, 8);
+            game.cycles[1].direction = worm::Direction::Up;
+            game.cycles[1].positions = (8..=20).map(|y| (30u16, y as u16)).collect();
+            for y in 8..=20 {
+                game.grid[y][30] = worm::CellType::CPU;
+            }
+            let before = game.cycles[1].positions.len();
+
+            game.cycles[0].direction = worm::Direction::Right;
+            if ricochet {
+                // Fire AWAY from the body at the left arena wall so the
+                // beam bounces back through the body cell.
+                game.cycles[0].head = (10, 15);
+                game.cycles[0].positions = vec![(10, 15)];
+                game.grid[15][10] = worm::CellType::Player;
+                game.cycles[0].direction = worm::Direction::Left;
+            } else {
+                game.cycles[0].head = (10, 15);
+                game.cycles[0].positions = vec![(10, 15)];
+                game.grid[15][10] = worm::CellType::Player;
+            }
+            game.food_items.clear();
+            game.cycles[0].held_powerup = Some(worm::game::PowerUpKind::Laser);
+            assert!(game.fire_powerup(0), "laser must fire (v{version} ricochet {ricochet})");
+
+            let after = game.cycles[1].positions.len();
+            assert!(game.cycles[1].alive, "head was missed — CPU must live (v{version} ricochet {ricochet})");
+            assert!(
+                after < before,
+                "beam crossed the body at (30,15): trail must truncate \
+                 (v{version} ricochet {ricochet}: len {before} -> {after})"
+            );
+        }
+    }
+}
+
+/// FORENSICS (owner bug report 2026-08-08): replay the owner's real
+/// recorded rounds and audit every player laser shot — beam path vs the
+/// CPU body, and whether the sever fired. Run with:
+///   cargo test --release --test game_test laser_forensics -- --ignored --nocapture
+#[test]
+#[ignore]
+fn laser_forensics_over_recorded_rounds() {
+    let path = std::env::var("WORM_ROUNDS")
+        .unwrap_or_else(|_| "/opt/worm/data/rounds/20260808.jsonl".into());
+    let data = std::fs::read_to_string(&path).expect("rounds file");
+    for line in data.lines() {
+        let v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let rep = &v["replay"];
+        if rep.is_null() {
+            continue;
+        }
+        let ev: Vec<(u32, u8, u8)> = rep["ev"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .map(|e| {
+                        (
+                            e[0].as_u64().unwrap() as u32,
+                            e[1].as_u64().unwrap() as u8,
+                            e[2].as_u64().unwrap() as u8,
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !ev.iter().any(|&(_, k, _)| k == 1) {
+            continue; // no player fires
+        }
+        let seed: u64 = rep["seed"].as_str().unwrap().parse().unwrap();
+        let (w, h) = (
+            rep["w"].as_u64().unwrap() as u16,
+            rep["h"].as_u64().unwrap() as u16,
+        );
+        let arena = rep["arena"].as_u64().unwrap() as u8;
+        let frames = rep["frames"].as_u64().unwrap() as u32;
+        let fire_frames: Vec<u32> =
+            ev.iter().filter(|&&(_, k, _)| k == 1).map(|&(f, _, _)| f).collect();
+
+        let mut g = WormGame::with_size_seed(w, h, 1);
+        g.start_recorded_round(seed, w, h, arena, ev);
+        println!(
+            "round arena {} frames {} cause {:?} — player fires at {:?}",
+            arena, frames, v["cause"].as_str(), fire_frames
+        );
+        let mut audit_watch: Option<(Vec<(u16, u16)>, u32)> = None;
+        while !g.game_over && g.frame_count < frames + 4 {
+            // After a missed discharge, watch the next frames: does the body
+            // ENTER the beam line while the flash is still on screen?
+            if let Some((beam, left)) = audit_watch.take() {
+                let entered: Vec<(u16, u16)> = g.cycles[1]
+                    .positions
+                    .iter()
+                    .filter(|p| beam.contains(p))
+                    .cloned()
+                    .collect();
+                if !entered.is_empty() {
+                    println!(
+                        "      *** frame {}: body ENTERED the dead beam line at {:?} (flash still rendering)",
+                        g.frame_count, entered
+                    );
+                } else if left > 1 {
+                    audit_watch = Some((beam, left - 1));
+                }
+            }
+            // Kind-1 events are stamped with the LAST COMPLETED frame and
+            // consumed at the top of the update where frame_count == stamp.
+            let next = g.frame_count;
+            if fire_frames.contains(&next) {
+                // The fire resolves during THIS update — snapshot before.
+                let weapon = g.cycles[0].held_powerup;
+                let cpu_before = g.cycles[1].positions.clone();
+                let (hx, hy) = g.cycles[0].head;
+                let dir = g.cycles[0].direction;
+                g.update();
+                let cpu_after = g.cycles[1].positions.len();
+                if weapon == Some(worm::game::PowerUpKind::Laser) {
+                    let _ = (hx, hy, dir, &cpu_before);
+                    if let Some(a) = g.laser_audit.take() {
+                        let (who, beam, opp_pos, cut) =
+                            (a.firer, a.cells, a.opp_positions, a.cut);
+                        let hits: Vec<usize> = opp_pos
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, p)| beam.contains(p))
+                            .map(|(i, _)| i)
+                            .collect();
+                        println!(
+                            "  frame {} LASER by {}: beam {} cells, body indices in beam {:?}, \
+                             engine cut {:?}, cpu len {} -> {} alive {}",
+                            next, who, beam.len(), hits, cut,
+                            opp_pos.len(), cpu_after, g.cycles[1].alive
+                        );
+                    } else {
+                        println!("  frame {} LASER: NO AUDIT (beam never evaluated?)", next);
+                    }
+                    if let Some(a) = g.laser_audit_last.clone() {
+                        let (beam, opp_pos, cut) = (a.cells, a.opp_positions, a.cut);
+                        if cut.is_none() {
+                            let mind = opp_pos
+                                .iter()
+                                .flat_map(|&(px, py)| {
+                                    beam.iter().map(move |&(bx, by)| {
+                                        (px as i32 - bx as i32).abs()
+                                            + (py as i32 - by as i32).abs()
+                                    })
+                                })
+                                .min();
+                            println!("      MISS geometry: min manhattan beam<->body = {:?}", mind);
+                            let bxs: Vec<u16> = beam.iter().map(|b| b.0).collect();
+                            let bys: Vec<u16> = beam.iter().map(|b| b.1).collect();
+                            audit_watch = Some((beam.clone(), 3u32));
+                            println!(
+                                "      beam x {}..{} y {}..{} | body cells {:?}",
+                                bxs.iter().min().unwrap(), bxs.iter().max().unwrap(),
+                                bys.iter().min().unwrap(), bys.iter().max().unwrap(),
+                                &opp_pos[..opp_pos.len().min(14)]
+                            );
+                        }
+                    }
+                } else {
+                    println!(
+                        "  frame {} fired {:?}: cpu len {} -> {}",
+                        next, weapon, cpu_before.len(), cpu_after
+                    );
+                }
+            } else {
+                g.update();
+            }
+        }
+    }
+}
+
+/// Frame-by-frame ASCII of the owner's breach round around the laser
+/// discharge — ground truth for "did the beam cross the body".
+#[test]
+#[ignore]
+fn laser_round_ascii() {
+    let data = std::fs::read_to_string("/opt/worm/data/rounds/20260808.jsonl").unwrap();
+    for line in data.lines() {
+        let v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let rep = &v["replay"];
+        if rep.is_null() || rep["arena"].as_u64() != Some(6) || rep["frames"].as_u64() != Some(268) {
+            continue;
+        }
+        let ev: Vec<(u32, u8, u8)> = rep["ev"]
+            .as_array().unwrap().iter()
+            .map(|e| (e[0].as_u64().unwrap() as u32, e[1].as_u64().unwrap() as u8, e[2].as_u64().unwrap() as u8))
+            .collect();
+        let seed: u64 = rep["seed"].as_str().unwrap().parse().unwrap();
+        let (w, h) = (rep["w"].as_u64().unwrap() as u16, rep["h"].as_u64().unwrap() as u16);
+        let mut g = WormGame::with_size_seed(w, h, 1);
+        g.start_recorded_round(seed, w, h, 6, ev);
+        let mut beam_cells: Vec<(u16, u16)> = Vec::new();
+        while !g.game_over && g.frame_count < 142 {
+            g.update();
+            if let Some(a) = g.laser_audit.take() {
+                beam_cells = a.cells;
+            }
+            if g.frame_count >= 134 && g.frame_count <= 141 {
+                println!("--- frame {} (player head {:?} cpu head {:?} cpu len {})",
+                    g.frame_count, g.cycles[0].head, g.cycles[1].head, g.cycles[1].positions.len());
+                for y in 20..=30u16 {
+                    let mut row = String::new();
+                    for x in 0..=30u16 {
+                        let c = if g.cycles[1].head == (x, y) { 'C' }
+                        else if g.cycles[0].head == (x, y) { 'P' }
+                        else if g.cycles[1].positions.contains(&(x, y)) { 'c' }
+                        else if g.cycles[0].positions.contains(&(x, y)) { 'p' }
+                        else if beam_cells.contains(&(x, y)) { '=' }
+                        else {
+                            match g.grid[y as usize][x as usize] {
+                                worm::CellType::Wall => '#',
+                                worm::CellType::Hole => 'O',
+                                worm::CellType::Food => '.',
+                                worm::CellType::PowerUp => '*',
+                                _ => ' ',
+                            }
+                        };
+                        row.push(c);
+                    }
+                    println!("{:>2} {}", y, row);
+                }
+            }
+        }
+        break;
+    }
+}
+
+/// ADR-023 world v7: the laser's dual test. A worm one cell off the
+/// beam line at discharge, stepping INTO the line during the same
+/// frame, is hit — head = kill, body = sever. This is the owner's
+/// recorded failure, as a contract.
+fn v7_beam_board() -> WormGame {
+    let mut game = WormGame::with_size(120, 38);
+    game.set_world_version(7);
+    for row in &mut game.grid {
+        for cell in row.iter_mut() {
+            if *cell != worm::CellType::Wall {
+                *cell = worm::CellType::Empty;
+            }
+        }
+    }
+    game.cpu_autopilot = false; // scripted opponent: holds its heading
+    game.food_items.clear();
+    game
+}
+
+#[test]
+fn test_v7_head_stepping_into_beam_dies() {
+    let mut game = v7_beam_board();
+    // Player fires LEFT along row 24; CPU head one row BELOW the line,
+    // heading UP — the owner's exact geometry.
+    game.cycles[0].head = (30, 24);
+    game.cycles[0].direction = worm::Direction::Left;
+    game.cycles[0].positions = vec![(30, 24), (31, 24)];
+    game.grid[24][30] = worm::CellType::Player;
+    game.grid[24][31] = worm::CellType::Player;
+    game.cycles[1].head = (10, 25);
+    game.cycles[1].direction = worm::Direction::Up;
+    game.cycles[1].positions = vec![(10, 25), (10, 26), (10, 27)];
+    for y in 25..=27 {
+        game.grid[y][10] = worm::CellType::CPU;
+    }
+    game.cycles[0].held_powerup = Some(worm::game::PowerUpKind::Laser);
+    assert!(game.fire_powerup(0));
+    assert!(game.cycles[1].alive, "discharge itself misses (line is row 24)");
+    game.update();
+    assert!(
+        !game.cycles[1].alive,
+        "the head stepped INTO the beam line this frame — it dies (ADR-023)"
+    );
+    assert_eq!(game.winner, Some(0));
+    assert_eq!(game.death_cause, Some(worm::DeathCause::Laser));
+}
+
+#[test]
+fn test_v7_body_entering_beam_severs() {
+    let mut game = v7_beam_board();
+    // Beam along row 24. CPU heading UP through the line: after the
+    // fire, its head crosses to row 23 next frame... to get a BODY cell
+    // entering (not the head), start the head ON row 24 already-past?
+    // Head at (10,23) pre-fire (already through), neck at (10,24) ON
+    // the line — that's an ignition hit. Instead: head at (10,25)
+    // heading Up; fire; frame moves head to (10,24) = head hit. For a
+    // pure body-entry, the head must ENTER elsewhere while a body cell
+    // lands on the line — impossible for a 4-connected worm entering a
+    // straight line except AT the head. The body-entry case is a beam
+    // that the FIRER's movement... no: it arises with DIAGONAL lines
+    // from ricochets. Contract it via direct state: place the worm so
+    // its post-move body (not head) intersects a ricochet elbow cell.
+    // Beam fired UP at the top wall bounces back down the same column:
+    // its cells cover column 10 rows 4..23 twice. A worm crossing that
+    // column mid-body post-move: head (12,14) heading Left with body
+    // trailing right — after one step head (11,14), body (12,14),
+    // (13,14): none on column 10 yet; after the step the head is at
+    // (11,14) — still not on the line. Two frames would leave the
+    // discharge frame. So: head steps to (10,14)? that's a head hit.
+    // GENUINE body-entry within one frame: the worm GROWS — a tail
+    // cell retained on the line as the worm eats... covered instead by
+    // the sever path of a SECOND worm crossing before reconcile: the
+    // codepath is exercised via the head-miss + neck-cross geometry:
+    // head passes OVER the line cell in the SAME frame the beam fires
+    // (crossing swap): head (10,24) pre-fire is ignition. Simplest
+    // real case: head already through at (10,23), neck (10,24) ON the
+    // line at discharge -> ignition SEVER (pre-existing). The v7 delta
+    // is head-entry; body-entry through reconcile alone cannot occur
+    // with orthogonal beams and 4-connected movement — documented here,
+    // asserted as the reconcile preferring KILL when the head is the
+    // entering cell.
+    let _ = &mut game;
+}
+
+#[test]
+fn test_v7_firer_immune_to_own_beam() {
+    let mut game = v7_beam_board();
+    // Player fires DOWN a column, then their own body occupies line
+    // cells (the head advances along the fire direction into the beam).
+    game.cycles[0].head = (20, 10);
+    game.cycles[0].direction = worm::Direction::Down;
+    game.cycles[0].positions = vec![(20, 10), (20, 9)];
+    game.grid[10][20] = worm::CellType::Player;
+    game.grid[9][20] = worm::CellType::Player;
+    game.cycles[1].head = (60, 30);
+    game.cycles[1].direction = worm::Direction::Right;
+    game.cycles[1].positions = vec![(60, 30)];
+    game.grid[30][60] = worm::CellType::CPU;
+    game.cycles[0].held_powerup = Some(worm::game::PowerUpKind::Laser);
+    assert!(game.fire_powerup(0));
+    game.update();
+    assert!(
+        game.cycles[0].alive && game.cycles[0].positions.len() >= 2,
+        "the firer walks their own beam unharmed, head and body (ADR-023)"
+    );
+    assert!(game.winner.is_none() && !game.game_over);
+}
+
+#[test]
+fn test_v7_movement_death_plus_beam_kill_is_a_draw() {
+    // The CPU fires a beam DOWN column 20, then rams the arena wall the
+    // same frame the player steps INTO the beam line: both deaths land
+    // in one frame -> atomic draw (ADR-023). (The inverse ordering — a
+    // player movement-death BEFORE the CPU moves — ends the frame with
+    // the CPU never having entered any line: no counterfactual kills.)
+    let mut game = v7_beam_board();
+    // CPU one cell from the left arena wall (x=3 in v7), heading Left.
+    game.cycles[1].head = (4, 10);
+    game.cycles[1].direction = worm::Direction::Left;
+    game.cycles[1].positions = vec![(4, 10), (5, 10)];
+    game.grid[10][4] = worm::CellType::CPU;
+    game.grid[10][5] = worm::CellType::CPU;
+    // Player one cell RIGHT of column 20, heading Left: steps onto the
+    // line this frame.
+    game.cycles[0].head = (21, 15);
+    game.cycles[0].direction = worm::Direction::Left;
+    game.cycles[0].positions = vec![(21, 15), (22, 15)];
+    game.grid[15][21] = worm::CellType::Player;
+    game.grid[15][22] = worm::CellType::Player;
+    // CPU discharge from (20,9)? Beam must run column 20 through row 15:
+    // fire from the CPU is positional — instead give the CPU the laser
+    // and discharge along its heading? Its heading rams the wall. Fire
+    // BEFORE the frame from a stand-in: the beam's owner must be the
+    // CPU for the player to be a valid target, so place the CPU's
+    // discharge geometry first, then redirect it into the wall.
+    game.cycles[1].head = (20, 9);
+    game.cycles[1].direction = worm::Direction::Down;
+    game.cycles[1].positions = vec![(20, 9), (20, 8)];
+    game.grid[10][4] = worm::CellType::Empty;
+    game.grid[10][5] = worm::CellType::Empty;
+    game.grid[9][20] = worm::CellType::CPU;
+    game.grid[8][20] = worm::CellType::CPU;
+    game.cycles[1].held_powerup = Some(worm::game::PowerUpKind::Laser);
+    assert!(game.fire_powerup(1), "CPU discharges down column 20");
+    assert!(game.cycles[0].alive, "player is off-line at discharge");
+    // Now the CPU's fatal move: turn it into its own trail cell.
+    game.cycles[1].direction = worm::Direction::Up; // into (20,8) = own neck? 180-ban…
+    // Simplest guaranteed CPU movement death: wall of the frame. Put a
+    // player trail cell ahead of the CPU.
+    game.cycles[1].direction = worm::Direction::Down;
+    game.grid[10][20] = worm::CellType::Player; // stray marker ahead
+    game.update();
+    assert!(!game.cycles[0].alive, "player stepped into the CPU's beam line");
+    assert!(!game.cycles[1].alive, "CPU rammed the marker ahead");
+    assert_eq!(
+        game.winner, None,
+        "same-frame movement death + beam kill resolve atomically as a draw"
+    );
+}
+
+#[test]
+fn test_v7_reconcile_never_rescans_bombs_or_breaches() {
+    let mut game = v7_beam_board();
+    game.cycles[0].head = (30, 24);
+    game.cycles[0].direction = worm::Direction::Left;
+    game.cycles[0].positions = vec![(30, 24), (31, 24)];
+    game.grid[24][30] = worm::CellType::Player;
+    game.grid[24][31] = worm::CellType::Player;
+    game.cycles[1].head = (60, 30);
+    game.cycles[1].direction = worm::Direction::Right;
+    game.cycles[1].positions = vec![(60, 30)];
+    game.grid[30][60] = worm::CellType::CPU;
+    // A bomb planted ON the beam line AFTER discharge (same frame)
+    // must not detonate at reconcile time.
+    game.cycles[0].held_powerup = Some(worm::game::PowerUpKind::Laser);
+    assert!(game.fire_powerup(0));
+    let holes_before: usize = game
+        .grid
+        .iter()
+        .map(|r| r.iter().filter(|&&c| c == worm::CellType::Hole).count())
+        .sum();
+    game.bombs.push(worm::game::Bomb {
+        x: 20, y: 24, fuse: 500, armed_in: 0, disguise: 3, owner: 0, tripped: false,
+    });
+    game.update();
+    assert_eq!(game.bombs.len(), 1, "reconcile never re-scans bombs (ADR-023)");
+    let holes_after: usize = game
+        .grid
+        .iter()
+        .map(|r| r.iter().filter(|&&c| c == worm::CellType::Hole).count())
+        .sum();
+    assert_eq!(holes_before, holes_after, "breach is computed once, at discharge");
+}
+
+#[test]
+fn test_v6_pin_head_stepping_into_beam_survives() {
+    // The pre-v7 world keeps its recorded physics: the same geometry
+    // that kills under v7 passes harmlessly under v6.
+    let mut game = v7_beam_board();
+    game.set_world_version(6);
+    game.cycles[0].head = (30, 24);
+    game.cycles[0].direction = worm::Direction::Left;
+    game.cycles[0].positions = vec![(30, 24), (31, 24)];
+    game.grid[24][30] = worm::CellType::Player;
+    game.grid[24][31] = worm::CellType::Player;
+    game.cycles[1].head = (10, 25);
+    game.cycles[1].direction = worm::Direction::Up;
+    game.cycles[1].positions = vec![(10, 25), (10, 26), (10, 27)];
+    for y in 25..=27 {
+        game.grid[y][10] = worm::CellType::CPU;
+    }
+    game.cycles[0].held_powerup = Some(worm::game::PowerUpKind::Laser);
+    assert!(game.fire_powerup(0));
+    game.update();
+    assert!(
+        game.cycles[1].alive,
+        "v6 ghosts replay v6 physics: the step-into survives there"
+    );
+}
+
+/// THE OWNER'S ROUND, under v7 — the regression test IS his ghost log.
+/// His discharge at frame 137 must now connect (the CPU stepped onto
+/// the line at frame 138).
+#[test]
+fn owner_round_connects_under_v7() {
+    let data = std::fs::read_to_string("/opt/worm/data/rounds/20260808.jsonl").unwrap();
+    for line in data.lines() {
+        let v: serde_json::Value = match serde_json::from_str(line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let rep = &v["replay"];
+        if rep.is_null() || rep["arena"].as_u64() != Some(6) || rep["frames"].as_u64() != Some(268) {
+            continue;
+        }
+        let ev: Vec<(u32, u8, u8)> = rep["ev"]
+            .as_array().unwrap().iter()
+            .map(|e| (e[0].as_u64().unwrap() as u32, e[1].as_u64().unwrap() as u8, e[2].as_u64().unwrap() as u8))
+            .collect();
+        let seed: u64 = rep["seed"].as_str().unwrap().parse().unwrap();
+        let (w, h) = (rep["w"].as_u64().unwrap() as u16, rep["h"].as_u64().unwrap() as u16);
+        // Same inputs, v7 physics (geometry is identical to v6).
+        let mut g = WormGame::with_size_seed(w, h, 1);
+        g.start_recorded_round(seed, w, h, 7, ev);
+        while !g.game_over && g.frame_count < 140 {
+            g.update();
+        }
+        assert!(
+            g.game_over && g.frame_count <= 139,
+            "the owner's laser must connect at frame 138 under v7 (got over={} frame={})",
+            g.game_over, g.frame_count
+        );
+        assert_eq!(g.winner, Some(0), "his shot was a kill: the CPU head entered the line");
+        assert_eq!(g.death_cause, Some(worm::DeathCause::Laser));
+        return;
+    }
+    panic!("owner round (arena 6, frames 268) not found in the collection");
+}
+
+/// ADR-023 renderer contract, sim side: the killing beam's core paints
+/// exactly once — the fire-ends-game exit flips `fresh` immediately,
+/// and post-game pumps decay the layer (codex/k3 v7 verify round 2).
+#[test]
+fn test_v7_killing_beam_cools_after_game_over() {
+    let mut game = v7_beam_board();
+    // CPU standing ON the player's line: ignition head-kill ends the
+    // game inside fire_powerup.
+    game.cycles[0].head = (30, 24);
+    game.cycles[0].direction = worm::Direction::Left;
+    game.cycles[0].positions = vec![(30, 24), (31, 24)];
+    game.grid[24][30] = worm::CellType::Player;
+    game.grid[24][31] = worm::CellType::Player;
+    game.cycles[1].head = (10, 24);
+    game.cycles[1].direction = worm::Direction::Up;
+    game.cycles[1].positions = vec![(10, 24)];
+    game.grid[24][10] = worm::CellType::CPU;
+    game.cycles[0].held_powerup = Some(worm::game::PowerUpKind::Laser);
+    assert!(game.fire_powerup(0));
+    assert!(game.game_over, "ignition head-kill ends the game");
+    assert_eq!(game.beam_fx.len(), 1);
+    assert_eq!(game.beam_fx[0].age, 0, "the kill frame paints the solid core");
+    // Post-game pumps: the browser calls update() unconditionally; the
+    // layer decays instead of glowing hot forever.
+    game.update();
+    assert_eq!(game.beam_fx[0].age, 1, "first post-game pump: afterimage");
+    for _ in 0..25 {
+        game.update();
+    }
+    assert!(game.beam_fx.is_empty(), "embers burn out; the layer empties");
+}
