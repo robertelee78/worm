@@ -80,7 +80,19 @@ def build_prompt(rec):
         # this player across ALL their rounds — the narrative may draw on
         # any of it, highlighting this round against the relationship.
         "lifetimeRead": rec.get("lifetime"),
-        "cumulative": rec.get("cumulative"),
+        # Tuples are ambiguous to the narrator (a [name, 16, 0] laser row
+        # was read as "zero laser kills"); label every field.
+        "cumulative": (lambda c: c and {
+            **{k: v for k, v in c.items()
+               if k not in ("tactics", "weapons", "cpuLosses")},
+            "tactics": [{"tactic": t[0], "attempts": t[1], "kills": t[2]}
+                        for t in (c.get("tactics") or [])],
+            "weapons": [{"weapon": w[0], "timesFired": w[1], "killsScored": w[2]}
+                        for w in (c.get("weapons") or [])],
+            "cpuLosses": [{"cpuDiedTo": l[0], "times": l[1],
+                           "whilePlayerWasHuntingIt": l[2]}
+                          for l in (c.get("cpuLosses") or [])],
+        })(rec.get("cumulative")),
         # ADR-020: the earned-evidence ledger — which family half funds
         # the difficulty, and the turn book's side read of the player.
         "earnedRead": (rec.get("book") or {}).get("earned"),
@@ -100,18 +112,30 @@ def build_prompt(rec):
         "You are the CPU opponent's notebook in a snake/Tron arcade game whose "
         "whole premise is HONEST, measurable learning of one specific human. "
         "Write the deeper post-round explanation the player asked for.\n\n"
+        "You hold its FULL dossier on this player, not just this round: "
+        "lifetimeRead (its statistically-tested read across every round they "
+        "have ever played); cumulative.roundsObserved; their swerve grammar "
+        "(rhythmPLeft/rhythmEvents); which hunting tactics have actually "
+        "killed them (cumulative.tactics: [name, attempts, kills]); which "
+        "weapons bait them (cumulative.weapons: [name, fires, lethal]); how "
+        "THEY kill it and whether they were hunting it at the time "
+        "(cumulative.cpuLosses: [cause, total, while-chased]) plus "
+        "boxerAversion, the extra caution their kills taught it; the "
+        "situations it has never seen them in (mapUnseen/mapThin); and "
+        "driftZ/playStyleDriftDetected.\n\n"
         "HARD RULES: use ONLY the measurements below — never invent a number, "
         "event, or read that is not here. If a field is missing or small, say "
         "less rather than guessing. Speak to the player as 'you'. The CPU is "
-        "'it'. 90-130 words, plain prose, no lists, no headers. Structure: what "
-        "happened, what it learned about you this round (cite 1-3 of the "
-        "numbers — if earnedReadSource is 'book', the thing reading you is "
-        "its turn book calling WHICH WAY you swerve, and turnBookSideAccuracy "
-        "is that read; say so plainly; if playStyleDriftDetected is true, note "
-        "that they have changed how they play recently and it is re-learning "
-        "them), and ONE practical tip for beating it "
-        "next round based only on these measurements. Tone: a rival's notebook — sharp, warm, a "
-        "little unnerving.\n\n"
+        "'it'. 110-170 words, plain prose, no lists, no headers. Structure: "
+        "what happened THIS round; then set it against the relationship — "
+        "cite 2-4 numbers PREFERRING the dossier (a mine kill quotes the mine "
+        "ledger; a boxed-in win quotes their trail-kill record and its "
+        "learned caution; if earnedReadSource is 'book' the read is its turn "
+        "book calling WHICH WAY you swerve at turnBookSideAccuracy; if drift "
+        "is detected say plainly that you changed your game and it is "
+        "re-learning you) over restating this round's accuracy; end with ONE "
+        "practical tip grounded in the weakest number in its dossier on you. "
+        "Tone: a rival's notebook — sharp, warm, a little unnerving.\n\n"
         f"MEASUREMENTS (JSON): {json.dumps(facts, separators=(',', ':'))}"
     )
 
