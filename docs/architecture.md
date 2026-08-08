@@ -16,12 +16,18 @@ by reading one specific human**, under four constraints that shape
 every domain below:
 
 1. **Information parity.** The CPU perceives nothing the player cannot
-   perceive. It reads positions, not intentions; it sees the board the
-   player sees. Disguises that fool the player (a mine dressed as
-   food) fool the CPU's threat model too, by construction.
+   perceive: positions, not intentions; the board the player sees. One
+   standing, deliberate carve-out must be stated: the *awake* CPU's
+   threat-avoidance reads live bomb positions regardless of disguise —
+   a legacy of the pre-disguise threat model. The dozy CPU is
+   disguise-honest (enemy mines are invisible to it by design), and no
+   *learning* surface consumes the privileged bit; full parity for the
+   awake threat model is an open debt, not an achievement.
 2. **Statistical honesty.** Every claim of "I have read you" must
-   survive an exact hypothesis test against a class-aware baseline
-   under an anytime-valid evidence budget. Difficulty on screen is
+   survive a hypothesis test against a class-aware baseline under an
+   anytime-valid evidence budget — exact tails where computed (small-n
+   McNemar), conservative concentration bounds (Hoeffding) at the
+   scheduled looks. Difficulty on screen is
    significance, never vibes. The dual obligation: an abandoned habit
    must be *unlearned* — evidence release is as principled as evidence
    acquisition.
@@ -74,14 +80,17 @@ Design lineage:
   the player always does; the fast horizon chases what they started
   doing five choices ago, and the share step keeps every specialist
   recoverable after a style change.
-- **k-NN episodic memory.** A corpus of (situation vector → move,
-  survival, reward) episodes queried by cosine distance — nearest
-  neighbor prediction in the classical sense of Cover & Hart [1967],
-  with a deliberately small feature vector (≈32 dims) whose blocks are
-  L2-balanced so no block dominates retrieval (a measured fix: raw
-  tail-length counts once carried ~47% of the vector's energy).
-  Episodes record *terminal mistakes too* — the survivor-bias fix:
-  deaths are the most informative frames about how this human loses.
+- **k-NN episodic memories — plural.** Two distinct corpora, queried
+  by cosine distance in the classical nearest-neighbor sense of Cover
+  & Hart [1967]. The *opponent* corpus (≈32-dim context → the
+  player's next move) feeds the deep-memory specialist; the separate
+  *self-survival* corpus (25-dim context → CPU move, survival,
+  reward) feeds the CPU's own episode voting. In the opponent vector
+  only the recent-turn transition block is mass-normalized — the
+  measured fix for a block that once carried ~47% of the vector's L2
+  energy and made retrieval compare tail lengths. Both corpora record
+  *terminal mistakes* — the survivor-bias fix: deaths are the most
+  informative frames about how this human loses.
 - **The rhythm reader (VOMM).** A variable-order Markov model over the
   player's voluntary lateral breaks: per-context Krichevsky–Trofimov
   estimators [Krichevsky & Trofimov 1981] up to a small depth, mixed
@@ -117,6 +126,21 @@ the book holds *projection authority*: its evidence family latched
 AND a maturity floor met. A chance-level side book must never reshape
 defensive paths (a verification-round finding, now an invariant).
 
+### 1.2b Sealing, and the class-aware baseline
+
+Two mechanisms deserve explicit mention. **Forecast sealing**: each
+frame's forecast is hashed into a running seal chain *before* the
+player's input lands, and the chain is exposed — a player can verify
+post-hoc that predictions preceded moves (the commitment discipline
+that makes "it predicted you" checkable rather than assertable).
+**The class-aware modal baseline**: the base-rate rival is not a
+global mode — it predicts the player's modal move *conditioned on the
+legality class of the frame* (which turns were even available), so
+the CPU earns nothing for "predicting" forced moves; and the hazard
+book's publish gate is *derived* (the book's hazard estimate must
+beat the straight-rate baseline with its own Schmitt hysteresis)
+before its timing skill may publish at all.
+
 ### 1.3 The portfolio: which temperament beats this human
 
 Rather than estimating the opponent's full policy, the CPU keeps four
@@ -132,8 +156,10 @@ Counterfactually replaying a round under a different style is invalid
 past the first divergence — the human would have reacted — so the
 slower unbiased signal is the honest one.
 
-Between the two hunt intercepts, arm choice is **Thompson sampling**
-[Thompson 1933] over Beta-approximated kill-rate posteriors, drawn
+Between the two hunt intercepts, arm choice is **Thompson-style sampling**
+[Thompson 1933]: Gaussian (Box–Muller) approximations around the KT
+kill-rate estimates stand in for Beta posteriors — adequate at the
+n≥10 maturity floor and disclosed as an approximation — drawn
 deterministically from a hash of (seal seed, round count) so seeded
 runs and replays stay bit-exact — principled exploration that keeps
 measuring the losing tactic without a schedule.
@@ -174,8 +200,12 @@ group-sequential design: significance is checked only at **geometric
 looks** (sample sizes growing by ratio 1.4 from a base), with a
 per-look budget α_k = (α_family / channels) · 6/(π²k²) — a convergent
 series spend in the spirit of alpha-spending functions [Lan & DeMets
-1983; Pocock 1977], with each look's tail bound computed as an exact
-Hoeffding bound on fair-coin sums [Hoeffding 1963]. The family budget
+1983; Pocock 1977]. Each look's threshold is a **Hoeffding
+inequality** on fair-coin sums [Hoeffding 1963] — a conservative
+concentration bound, not an exact tail; the McNemar tail *is*
+computed exactly for reporting at small discordant counts, switching
+to the normal approximation above ~1,000 discordants, while the
+behavioral latches ride the Hoeffding-bounded looks. The family budget
 (α = 0.005, power analysis documented at the constant) is split
 across channels so racing channels cannot multiply false-positive
 odds — the null-persona invariant is *family-wise*: a coin-flip
@@ -222,16 +252,19 @@ latch outcomes, and fixture re-baselines require paired supply
 receipts (`FunnelStats`: the exact eligibility funnel from moves →
 two-sided choices → declarations → records).
 
-### 2.4 Safe exploitation posture
+### 2.4 Exploitation posture (inspiration, not theorem)
 
-The architecture's exploitation stance mirrors the safe-exploitation
-literature [Johanson, Zinkevich & Bowling 2007; Ganzfried & Sandholm
-2015] translated to counting terms: the CPU deviates from its sound
-baseline policy (survival floors, wall discipline) only in proportion
-to *proven* opponent regularities, and the deviation budget (the
-spend) collapses to zero the moment the evidence does. Survival
-floors are never touched by any style, read, or bandit — exploitation
-rides on top of a policy that remains safe when the model is wrong.
+The stance is *inspired by* the safe-exploitation literature
+[Johanson, Zinkevich & Bowling 2007; Ganzfried & Sandholm 2015]: hunt
+aggression scales with proven regularities and unwinds as evidence
+dilutes. The honest caveats: this is statistical authorization, not a
+game-theoretic exploitability bound; spends unwind at round
+boundaries (snapshot-gated), not instantaneously; the session
+discipline latch deliberately persists survival sharpness past a
+marginal evidence release; and while no *style* multiplier touches
+the floors, the ADR-018 opening thins them for an unread CPU by
+design. What is invariant: escape margins never fall below their
+learned floors, and boxer-aversion floors only rise.
 
 ---
 
@@ -240,13 +273,17 @@ rides on top of a policy that remains safe when the model is wrong.
 ### 3.1 The wire
 
 Everything durable lives in a sectioned binary format (`WRM2`):
-versioned sections for the ensemble weights, the books, the episodic
-corpus, ledgers, drift epochs, turn timing. The discipline, enforced
-by a golden-brain tripwire test (a checked-in serialized brain that
-must keep decoding): **a schema change must never wipe what the CPU
-learned about a human.** New sections dual-decode from their previous
-version; every section sanitizes on load (NaN/range sweeps), because
-a corrupted float in a weight is a silent lobotomy.
+independently decodable sections for the ensemble weights, the
+books, the episodic corpora, ledgers, drift epochs, turn timing. The
+discipline, enforced by a golden-brain tripwire test (a checked-in
+serialized brain that must keep decoding): **a schema change must
+never wipe what the CPU learned about a human.** Precisely: sections
+decode independently, so an incompatible section degrades to partial
+survival rather than total loss; sections that have changed shape
+carry version bytes and dual-decode from their previous form; loads
+sanitize (NaN/range sweeps), because a corrupted float in a weight is
+a silent lobotomy. This is graceful degradation with tripwires, not a
+formal forward-compatibility proof.
 
 Deliberately *not* persisted: the session doze-exit latch (§4.2), the
 dwell counter, all diagnostics. The beatable opening belongs to
@@ -270,19 +307,24 @@ style bandit.
 
 The 96-cell hazard book doubles as a map of ignorance: populated /
 thin / unseen cells are counted and named, surfacing "situations it
-has never seen you in" to the notebook, and feeding a curiosity
-pressure (active preference for thin cells when tactically free). The
+has never seen you in" to the notebook. Active thin-cell steering was
+considered and explicitly deferred (ADR-021) — the map is narration
+and audit today, not a drive; the in-game "Curiosity" behavior is an
+unrelated approach heuristic. The
 unknown is a first-class, countable quantity — the difference
 between *your read is 0.6* and *I have literally never watched you
 near food while chased*.
 
 ### 3.4 The between-round ratchet
 
-Between rounds (never in the frame budget), the hazard cells'
-co-movement graph is partitioned by an **exact Stoer–Wagner minimum
-cut** [Stoer & Wagner 1997] (~50 lines, ~1ms at this scale) to name
-*which region of situation-space moved* when the drift alarm fires —
-"your close-quarters game changed; your open-field game didn't." The
+An **exact Stoer–Wagner minimum cut** [Stoer & Wagner 1997] (~50
+lines, ~1ms at this scale) partitions the hazard cells' co-movement
+graph to name *which region of situation-space moved* when the drift
+alarm fires — "your close-quarters game changed; your open-field game
+didn't." Integration honesty: today this runs as an offline
+diagnostic (an example binary invoked by the weekly learning audit),
+capable of round-boundary execution but not wired into the live loop.
+The
 vendored dynamic-mincut crate was measured unusable at integration
 scale (its own benches predicted it); the boring exact algorithm won.
 The methodological lesson is banked as project memory: run a
@@ -336,7 +378,9 @@ a ground flame at the next hazard tick.
 
 Every physics rule is stamped into `ARENA_VERSION` (v1…v11), recorded
 per round, and **replays pin their recorded version** — a ghost
-replays bit-exact under the physics it was played on, forever. This
+replays bit-exact under the physics it was played on, for as long as
+that version's code paths are kept (they are kept deliberately; the
+suite pins them). This
 is not nostalgia; it is what makes the evidence context auditable:
 the owner's recorded rounds are executable receipts (the v7 laser fix
 shipped with the owner's own ghost as its regression test), and the
@@ -393,11 +437,13 @@ being empirically refuted in the record is normal and kept.
 
 ## 7. The plateau gate: why there is no neural network in the loop
 
-A SONA/kernel-based challenger exists behind an explicit gate: it may
-be *evaluated* only if the counting stack stops improving against a
-**stationary** opponent — and the gate is drift-vetoed, because
-against a human who keeps changing, a plateau is indistinguishable
-from the opponent moving. So far the humans keep moving. This is the
+The gate exists; the challenger does not. A plateau detector
+(drift-vetoed) guards the door: heavier machinery may be *evaluated*
+only if the counting stack stops improving against a **stationary**
+opponent — and against a human who keeps changing, a plateau is
+indistinguishable from the opponent moving. No SONA/kernel challenger
+has been built, because the gate has never opened. So far the humans
+keep moving. This is the
 architecture's thesis in miniature: at 100–400 decisions per round,
 hand-shaped counting estimators with exact tests dominate
 gradient-trained function approximation on sample efficiency,
