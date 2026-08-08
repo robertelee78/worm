@@ -230,6 +230,28 @@ honest form, with executable receipts:
    ADR snippets: RvfOptions.dimension, ingest_batch(&[&[f32]], &[u64],
    meta), SearchResult.id — recorded so the fleet build starts from
    truth). The fleet's infrastructure is real and verified.
+
+   DEEP-DIVE ADDENDUM (2026-08-07, after the owner correctly
+   challenged the "hours of silence" as possible operator error —
+   resolved by reading the crate source and running the VENDOR'S OWN
+   example verbatim): (a) DynamicMinCut::insert_edge/delete_edge each
+   call rebuild_decomposition(), which CLONES the whole graph and
+   rebuilds the hierarchical decomposition from scratch — per-op cost
+   ≈ full build (~1s at worm scale), which mechanically explains the
+   hung trial (~20 ops/frame × ~500 frames ≈ hours). (b) The crate's
+   own examples/subpoly_bench.rs, run unmodified, measures the
+   flagship SubpolynomialMinCut at 270,000–480,000 µs PER UPDATE
+   across 100–5,000 vertices — "subpolynomial" in its output refers
+   to structural RECOURSE (~4 per update), not wall time. (c)
+   partition() comes from the decomposition's heuristic balanced
+   partition (the crate's own ALGORITHMS.md documents it may not
+   align with the true min cut), explaining the odd 1/5 split. The
+   worm frame budget is 35ms with ~20 edge changes/frame; the
+   measured per-update cost is ~4 orders of magnitude beyond it. The
+   verdict stands, now with mechanism and vendor-bench receipts:
+   right math, wrong cost model for a real-time grid game.
+   Methodology lesson banked: run the vendor's own example FIRST —
+   five minutes of their bench would have predicted the hang.
 4. **The plateau gate is now automated**: scripts/weekly-learning-audit.sh
    (cron, Mondays 08:53) runs sona_probe + the learning supplies into
    .harness/learning-audit.log — the heavy-learner gate is checked
