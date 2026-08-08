@@ -3655,8 +3655,11 @@ impl WormGame {
                 if self.arena_version >= 11 {
                     // NAPALM everywhere (codex v11): a swept contact
                     // IGNITES AND CATCHES — the burn schedule does the
-                    // killing, never an instant swap death.
+                    // killing, never an instant swap death. The catch is
+                    // DIRECT: touch is touch, regardless of where the
+                    // victim stands at the next hazard tick.
                     self.ignite(ux, uy, from);
+                    self.catch_on_touch(opp, from);
                     self.projectiles.remove(i);
                     continue 'bolts;
                 }
@@ -3695,8 +3698,13 @@ impl WormGame {
             if contact {
                 if self.arena_version >= 9 {
                     // NAPALM: contact drops fire UNDER the victim — the
-                    // burn schedule does the killing, not a blast.
+                    // burn schedule does the killing, not a blast. v11:
+                    // the touch also catches DIRECTLY (tail-tip contacts
+                    // used to retract out from under the flame).
                     self.ignite(ux, uy, from);
+                    if self.arena_version >= 11 {
+                        self.catch_on_touch(opp, from);
+                    }
                 } else {
                     self.bolt_blast(ux, uy, pdx, pdy, from);
                 }
@@ -3719,6 +3727,21 @@ impl WormGame {
             }
             }
             i += 1;
+        }
+    }
+
+    /// World v11: a bolt TOUCH catches the victim directly — the catch
+    /// must never depend on the victim still overlapping the ground
+    /// flame at the next hazard tick (codex v11 verify: a length-2
+    /// victim vacates the ignition cell before tick_flames and touch
+    /// produced nothing). Ground fire still drops for area effect.
+    fn catch_on_touch(&mut self, victim: usize, by: u8) {
+        if self.burns[victim].contact_ms == 0 {
+            self.burns[victim] = BurnState {
+                contact_ms: 1,
+                taken: 0,
+                burned_by: by,
+            };
         }
     }
 

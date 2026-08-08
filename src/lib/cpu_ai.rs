@@ -7771,6 +7771,8 @@ mod tests {
             !should_fire(&mut game, 1),
             "the aim gate matched the 4-cell reach at v9/v10"
         );
+        game.set_world_version(10);
+        assert!(!should_fire(&mut game, 1), "v10 kept the 4-cell gate");
         // v11 restored the full ray (and pre-v9 always had it).
         game.set_world_version(11);
         assert!(should_fire(&mut game, 1));

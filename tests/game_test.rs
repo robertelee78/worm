@@ -4150,33 +4150,48 @@ fn test_v11_bolt_catches_a_fleeing_worm() {
 /// the v10 pin keeps the old instant kill for recorded ghosts.
 #[test]
 fn test_v11_crossing_swap_ignites_not_kills() {
-    let run = |version: u8| -> (bool, bool) {
+    // A TRUE swap (codex v11 verify: the first version hit the head as
+    // plain contact and never exercised this branch): the victim stands
+    // ON the bolt's cell with its neck on the bolt's next cell —
+    // constructed directly as the post-movement state.
+    let run = |version: u8| -> (bool, bool, u32) {
         let mut game = WormGame::with_size(120, 38);
         game.set_world_version(version);
         game.cpu_autopilot = false;
         game.food_items.clear();
-        game.cycles[0].head = (20, 20);
-        game.cycles[0].direction = worm::Direction::Right;
-        game.cycles[0].positions = vec![(20, 20), (19, 20)];
-        game.grid[20][20] = worm::CellType::Player;
-        game.grid[20][19] = worm::CellType::Player;
-        // Head-on CPU one cell past the bolt spawn: the classic swap.
+        game.cycles[0].head = (10, 10);
+        game.cycles[0].positions = vec![(10, 10)];
+        game.grid[10][10] = worm::CellType::Player;
+        // LENGTH-2 victim — the class that vacates the ignition cell
+        // before the hazard tick (the codex counterexample).
         game.cycles[1].head = (22, 20);
         game.cycles[1].direction = worm::Direction::Left;
-        game.cycles[1].positions = vec![(22, 20), (23, 20), (24, 20)];
-        for x in 22..=24 {
-            game.grid[20][x] = worm::CellType::CPU;
-        }
-        game.cycles[0].held_powerup = Some(worm::game::PowerUpKind::TriShot);
-        assert!(game.fire_powerup(0));
-        game.change_direction(worm::Direction::Down); // shooter clears the row
-        game.update();
-        game.update();
-        (game.cycles[1].alive, !game.flames.is_empty())
+        game.cycles[1].positions = vec![(22, 20), (23, 20)];
+        game.grid[20][22] = worm::CellType::CPU;
+        game.grid[20][23] = worm::CellType::CPU;
+        game.projectiles.push(worm::Projectile {
+            x: 22,
+            y: 20,
+            dx: 1,
+            dy: 0,
+            steps_left: 200,
+            from: 0,
+        });
+        game.advance_projectiles();
+        (
+            game.cycles[1].alive,
+            !game.flames.is_empty(),
+            game.burns[1].contact_ms,
+        )
     };
-    let (alive11, fire11) = run(11);
+    let (alive11, fire11, caught11) = run(11);
     assert!(fire11, "v11: the swept contact ignites");
     assert!(alive11, "v11: no instant swap death — the burn does the work");
-    let (alive10, _) = run(10);
+    assert!(
+        caught11 > 0,
+        "v11: the touch catches DIRECTLY — a length-2 victim cannot \
+         retract out of it (codex v11 verify)"
+    );
+    let (alive10, _, _) = run(10);
     assert!(!alive10, "v10 ghosts keep the recorded instant swap kill");
 }

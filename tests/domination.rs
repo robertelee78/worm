@@ -411,3 +411,18 @@ fn five_seed_paired_receipt() {
         mean, sd, ci_hi
     );
 }
+
+/// codex v11 verify V4: the paired v10<->v11 weapon-impact receipt —
+/// same seed, 90-game warm arms, outcomes side by side.
+#[test]
+#[ignore]
+fn v10_v11_weapon_receipt() {
+    for version in [10u8, 11] {
+        let ((rec, lift), _, _, _) = play_vz(90, 20260805, true, version);
+        println!(
+            "v{}: cpu {} player {} draw {}  win {:.0}%  lift {:.2}",
+            version, rec.cpu, rec.player, rec.draw,
+            rec.win_rate() * 100.0, lift
+        );
+    }
+}
