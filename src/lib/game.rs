@@ -255,7 +255,12 @@ impl LightCycle {
 /// in the ring-1 corridor steps only 1 frame in 16 while the world clock
 /// runs 4× — corridor worm ≈ 25% of original speed, arena worm ≈ 4×.
 /// Projectiles ride the fast clock (light does not slow down).
-pub const ARENA_VERSION: u8 = 4;
+/// v5: a FROZEN worm's prev_direction stays its last EXECUTED heading.
+/// v4 snapshotted every frame, so a latched-but-unexecuted press became
+/// the 180-ban's anchor within one held frame: changing your mind got
+/// keypresses eaten ("impossible to turn"), and a two-press sequence
+/// could sneak a true reversal past the ban into your own neck.
+pub const ARENA_VERSION: u8 = 5;
 
 pub struct WormGame {
     /// Arena geometry this game builds (replays pin their recorded one).
@@ -2000,10 +2005,16 @@ impl WormGame {
             );
         }
 
-        // Track each cycle's last-executed direction (documented per-frame
-        // snapshot; corner/transition features read prev_direction).
-        self.cycles[0].snapshot_direction();
-        self.cycles[1].snapshot_direction();
+        // Track each cycle's last-EXECUTED direction (corner/transition
+        // features and the 180 latch read prev_direction). World v5: a
+        // frozen worm executed nothing — snapshotting its latched press
+        // would corrupt the reversal ban's anchor (see ARENA_VERSION).
+        if self.arena_version < 5 || !player_frozen {
+            self.cycles[0].snapshot_direction();
+        }
+        if self.arena_version < 5 || !cpu_frozen {
+            self.cycles[1].snapshot_direction();
+        }
 
 
         // Live projectiles and planted bombs (can end the game). Under

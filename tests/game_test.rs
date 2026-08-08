@@ -2683,3 +2683,58 @@ fn the_fast_worm_pays_the_reaction_tax() {
     );
     assert!(decisions >= 3, "reflex wakes aside, decisions still happen ({decisions})");
 }
+
+/// World v5: corridor steering feels like steering. During a slip hold,
+/// prev_direction stays the last EXECUTED heading, so (a) changing your
+/// mind between steps re-validates against your true travel instead of
+/// your previous keypress, and (b) a two-press sequence can never sneak
+/// a 180 into your own neck.
+#[test]
+fn corridor_keypresses_are_not_eaten_and_reversals_stay_banned() {
+    let mut game = worm::WormGame::with_size_seed(40, 30, 5);
+    // Player descending the left corridor column with a real neck above,
+    // and a punched hole beside them to legally turn into.
+    game.cycles[0].head = (1, 4);
+    game.cycles[0].positions = vec![(1, 4), (1, 3)].into();
+    game.grid[4][1] = worm::CellType::Player;
+    game.grid[3][1] = worm::CellType::Player;
+    game.cycles[0].direction = worm::Direction::Down;
+    game.cycles[0].prev_direction = worm::Direction::Down;
+    game.grid[4][2] = worm::CellType::Hole;
+    game.cycles[1].head = (20, 15);
+    game.cycles[1].positions = vec![(20, 15)].into();
+    game.grid[15][20] = worm::CellType::CPU;
+    game.cycles[1].direction = worm::Direction::Right;
+    game.cpu_autopilot = false;
+
+    // A held frame passes; the player latches Left (frame-ward — latch
+    // does not judge walls), then changes their mind to Right.
+    game.update();
+    game.change_direction(worm::Direction::Left);
+    game.update();
+    // v4 bug: prev became Left after the held frame, so Right would be
+    // rejected as a "reversal". v5: validated against true travel (Down).
+    game.change_direction(worm::Direction::Right);
+    assert_eq!(
+        game.cycles[0].direction,
+        worm::Direction::Right,
+        "changing your mind between slow steps must not eat the keypress"
+    );
+    // The true 180 stays impossible even via two presses: Right then Up
+    // while traveling Down must NOT latch Up (reversal vs travel).
+    game.change_direction(worm::Direction::Up);
+    assert_eq!(
+        game.cycles[0].direction,
+        worm::Direction::Right,
+        "a two-press 180 into the neck must stay banned"
+    );
+    // Run to the movement frame: the worm turns Right into the hole.
+    for _ in 0..20 {
+        if game.cycles[0].head != (1, 4) {
+            break;
+        }
+        game.update();
+    }
+    assert!(game.cycles[0].alive, "the executed turn is safe");
+    assert_eq!(game.cycles[0].head, (2, 4), "turned through the hole");
+}
