@@ -435,20 +435,51 @@ being empirically refuted in the record is normal and kept.
 
 ---
 
-## 7. The plateau gate: why there is no neural network in the loop
+## 7. Heavier machinery: the spike ladder, not a plateau gate
 
-The gate exists; the challenger does not. A plateau detector
-(drift-vetoed) guards the door: heavier machinery may be *evaluated*
-only if the counting stack stops improving against a **stationary**
-opponent — and against a human who keeps changing, a plateau is
-indistinguishable from the opponent moving. No SONA/kernel challenger
-has been built, because the gate has never opened. So far the humans
-keep moving. This is the
-architecture's thesis in miniature: at 100–400 decisions per round,
-hand-shaped counting estimators with exact tests dominate
-gradient-trained function approximation on sample efficiency,
-auditability, and wasm frame-budget cost — and the burden of proof
-sits, permanently, on the heavier machinery.
+An earlier version of this section defended a drift-vetoed plateau
+gate: neural/kernel challengers could be *evaluated* only once the
+counting stack stopped improving against a stationary opponent. The
+owner rejected that doctrine, and the repository's own history agrees
+with him, twice over. First, the gate is unopenable by construction
+against a live human — the first player keeps adapting (the product
+working), so the plateau precondition never holds; a gate that cannot
+open is a wall. Second, the claim it protected ("counting estimators
+dominate function approximation at this scale") was never measured —
+an unearned assertion in a repository whose entire ethos is receipts.
+
+The precedent that replaced it is the **mincut arc**. The
+between-round ratchet (§3.4) — graph machinery well outside the
+counting stack — entered through a ladder, not a gate: run the
+vendor's own examples and benches verbatim; spike on toy inputs known
+to work; escalate to corpus-shaped trials with per-operation
+measurement; land only what earns receipts. The same arc also
+demonstrated the failure mode the ladder prevents: an
+integration-scale first trial nearly produced a wrong "the crate is
+too slow" conclusion that five minutes of the vendor's own bench
+would have settled.
+
+The standing policy, then:
+
+- **Measurement is open to any challenger at any time.** The frozen
+  ghost corpus (150+ recorded real rounds) is a drift-proof
+  instrument: any model — logistic head, shallow net, kernel hazard,
+  SONA — may be scored prequentially against the counting ensemble on
+  identical frames, under the same honest machinery (class-aware
+  baselines, voluntary-turn frames only, McNemar on disagreements).
+  No plateau required; the plateau detector is demoted to one
+  diagnostic among several.
+- **Production entry has real gates, and they are not plateaus**: beat
+  the incumbent on the corpus with receipts; fit the ~35ms wasm frame
+  budget; keep the explainability contract (every read a sentence);
+  and survive the persistence story (a returning player's learned
+  history must not be hostage to a model format).
+- **The incumbent holds the seat on merit, not doctrine.** At 100–400
+  decisions per round, counting estimators with exact tests are the
+  *prior* — sample-efficient, auditable, cheap — and stay the
+  incumbent until a challenger takes the corpus from them. The burden
+  of proof sits on the challenger the way it sits on any candidate in
+  the gauntlet: per change, with numbers — never permanently.
 
 ---
 

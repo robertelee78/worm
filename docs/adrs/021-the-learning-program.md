@@ -8,7 +8,14 @@ unversioned/unsanitized wires, plateau-gate false positive, kata-2
 context shortfall) — all six fixed with tests in the v1.1 commit, plus
 episodic attempt semantics and discharge-site laser accounting. 8 is
 design-complete and build-deferred (docs/fleet-warm-start-policy.md,
-N≥2 humans); 9 unscheduled behind the drift-vetoed plateau gate
+N≥2 humans); 9 re-policied 2026-08-08 (owner ruling, grounded in the
+mincut arc): the drift-vetoed plateau gate is RETIRED as an evaluation
+gate — unopenable by construction against an adapting human, and the
+claim it protected was never measured. Challenger evaluation is open
+at any time via the spike ladder + frozen-ghost-corpus prequential
+shootout (docs/architecture.md §7); production entry gates on corpus
+receipts + frame budget + explainability + persistence, never on a
+plateau. The plateau detector remains as a weekly diagnostic
 
 ## Date
 2026-08-06
