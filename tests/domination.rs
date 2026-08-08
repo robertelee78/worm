@@ -280,10 +280,13 @@ fn a_learned_habitual_player_is_dominated() {
     // this persona spends the whole arc in corridors (single-exit turns
     // only — board knowledge, zero evidence). 20260805 supplies real
     // choices; the read must be earned there.
-    // 60 games: the family-wise anytime boundary is deliberately harder
-    // to cross than a single-channel bar, and this persona supplies only
-    // ~0.7 genuine two-sided choices per game — the claim "a habitual
-    // player IS read" deserves the evidence it takes to prove it.
+    // 90 games (ADR-022 re-baseline, receipted): the family-wise anytime
+    // boundary is deliberately harder to cross than a single-channel bar,
+    // and under the v6 corridor the discrete geometric looks land such
+    // that 60 games can miss the latch at full channel strength (paired
+    // A/B: v5-geom 0.54 vs v6-geom 0.00 at equal supply and equal z).
+    // The claim "a habitual player IS read" deserves the evidence it
+    // takes to prove it.
     let (rec, lift) = play(90, 20260805, true);
     println!(
         "WARM vs habitual  cpu {} player {} draw {}  win {:.0}%  lift {:.0}%",
@@ -351,7 +354,7 @@ fn funnel_receipt_v5_vs_v6() {
         );
         println!(
             "   funnel: moves {} straight_legal {} two_lat {} vol_lat {} vol_two_sided {} \
-             lat_supply {} forced_break {} pend_taken {} pend_matched {} side_declared {}",
+             lat_supply {} forced_break {} pend_taken {} pend_matched {} side_declared {} pend_dropped {}",
             f.moves,
             f.straight_legal,
             f.two_lat,
@@ -361,7 +364,8 @@ fn funnel_receipt_v5_vs_v6() {
             f.forced_break,
             f.pend_taken,
             f.pend_matched,
-            f.side_declared
+            f.side_declared,
+            f.pend_dropped
         );
     }
 }

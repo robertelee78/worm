@@ -104,9 +104,16 @@ evidence-eligibility path (`game.rs`) and version-pinned arms
    has ended the casual opening this session, the doze never returns.
    A latch that re-released on a marginal look-crossing was measuring
    "currently seeing crossing-shaped inputs", not "has earned
-   sharpness". Not persisted: each new session keeps its ADR-018
-   beatable opening. Aggression spend still tracks live evidence; only
-   survival basics latch.
+   sharpness". The latch never serializes — but it is not purely
+   session-scoped either (codex verify round): every load path calls
+   `refresh_read_rate()`, so a brain restored WITH live earned evidence
+   re-latches immediately. That is the intended semantic: the ADR-018
+   beatable opening belongs to UNREAD sessions — fresh brains, and
+   returning humans whose read has genuinely lapsed to zero. Wits
+   earned against this human do not lapse with the calendar.
+   Aggression spend still tracks live evidence; only survival basics
+   latch. Contract test exercises the real snapshot site, the release,
+   and the wire boundary.
 5. **Fixture limit, pre-existing:** the habitual persona supplies ZERO
    voluntary two-sided turns in either version (`vol_two_sided = 0`) —
    the class-book side gate never fires for it; its evidence rides the
@@ -148,4 +155,15 @@ consultants' recommendations; items marked OPEN are owner calls.
   as honest outcomes for now; OPEN whether corridor spawn headings
   should be co-directional if the draw rate annoys in play.
 - The spike branch `feat/world-v6` (2717907) is kept as reference and
-  never re-landed whole.
+  never re-landed whole. Its "final step guard" in `choose!` was caught
+  riding along by the verification round (k3 B1) and removed: it was
+  v7-motivated (decoy-fuse deaths), untested, measured to change
+  nothing on the arms it claimed to fix, and it misattributed tactic
+  credit. If a computed-direction survival veto is ever wanted, it
+  arrives as its own change with its own A/B receipt.
+- The funnel gained `pend_dropped` (verify round, both consultants):
+  pending book records produced on frozen-player frames are overwritten
+  before any take, and restart() discards one — losses the take-side
+  counters cannot see. `lat_supply` is documented as an upper bound of
+  the published channel's feed (silent-model frames count toward it
+  without feeding `lat_samples`).

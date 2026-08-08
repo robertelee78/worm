@@ -1574,9 +1574,15 @@ pub struct CpuBrain {
     /// measuring "currently seeing crossing-shaped inputs", not "has
     /// earned sharpness", and the warm arm surrendered wins to the
     /// re-opened vulnerability window (games 13-17, read 0.00 mid-arm).
-    /// Deliberately NOT persisted: every new session still starts with
-    /// the ADR-018 beatable opening. AGGRESSION spend still tracks the
-    /// live earned value; only survival basics are latched.
+    /// Not serialized — but NOT purely session-scoped either: every
+    /// load path calls refresh_read_rate(), so a brain restored WITH
+    /// live earned evidence re-latches immediately (the wits were
+    /// earned against this same human; basics do not get sloppy again
+    /// just because the calendar turned). The ADR-018 beatable opening
+    /// belongs to UNREAD sessions: fresh brains, and returning humans
+    /// whose read has genuinely lapsed to zero, still get it — see
+    /// ADR-022. AGGRESSION spend still tracks the live earned value;
+    /// only survival basics are latched.
     #[serde(skip)]
     pub discipline_latched: bool,
     /// Round-boundary snapshots of the book's spendable evidence and
@@ -5720,38 +5726,7 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
     let mut decision_projection = None;
     macro_rules! choose {
         ($direction:expr, $reason:expr) => {{
-            let mut chosen = $direction;
-            // FINAL STEP GUARD: several layers emit COMPUTED directions
-            // (wall-follow's hug, food-route lanes) that never pass the
-            // passable-vetted candidate list — and a computed step into a
-            // mine/trail while legal moves exist is never a decision, it
-            // is a bug. (Measured under v6: the longer decoy fuse let the
-            // CPU's wall-follow lap return to its own plant site while
-            // the mine still lived — BombBlast deaths under ItemPath and
-            // WallFollow reasons.) If the chosen step is lethal and any
-            // legal move exists, take the most open legal one instead.
-            {
-                let (gdx, gdy) = chosen.as_delta();
-                let gx = game.cycles[1].head.0 as i16 + gdx;
-                let gy = game.cycles[1].head.1 as i16 + gdy;
-                let lethal = gx < 0
-                    || gy < 0
-                    || gx >= game.width as i16
-                    || gy >= game.height as i16
-                    || !game.passable(gx as u16, gy as u16);
-                if lethal {
-                    let legal_now = legal_directions(game, &game.cycles[1]);
-                    if let Some(&best) = legal_now.iter().max_by_key(|&&d| {
-                        let (ddx, ddy) = d.as_delta();
-                        let nx = (game.cycles[1].head.0 as i16 + ddx).max(0) as u16;
-                        let ny = (game.cycles[1].head.1 as i16 + ddy).max(0) as u16;
-                        count_open_space(game, nx, ny) as u32
-                    }) {
-                        chosen = best;
-                    }
-                }
-            }
-            let chosen = chosen;
+            let chosen = $direction;
             let trace = CpuDecisionTrace {
                 frame: game.frame_count,
                 heading: chosen,

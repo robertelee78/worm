@@ -289,8 +289,15 @@ pub struct FunnelStats {
     pub pend_matched: u32,
     /// Matched records that carried a side call.
     pub side_declared: u32,
-    /// Lateral taken with BOTH laterals legal, straight legal or not — the
-    /// published lateral channel's exact feed (cpu_ai record()).
+    /// Pending records DROPPED unconsumed — overwritten by a later
+    /// producer frame (frozen-player frames produce but never consume)
+    /// or discarded by restart(). The take-side counters cannot see
+    /// these; without this the funnel overstates its own completeness.
+    pub pend_dropped: u32,
+    /// Lateral taken with BOTH laterals legal, straight legal or not — an
+    /// UPPER BOUND on the published lateral channel's feed: record() has
+    /// the same gate but only runs on frames that carried a forecast, so
+    /// silent-model frames count here without feeding lat_samples.
     pub lat_supply: u32,
     /// Forced breaks (straight illegal, lateral taken).
     pub forced_break: u32,
@@ -1715,6 +1722,11 @@ impl WormGame {
                     cpu_close,
                 );
                 let side = self.cpu_brain.class_books.side_pick(&masked, heading);
+                if self.cpu_brain.pending_book.is_some() {
+                    // A record the take-side never saw (frozen-player frames
+                    // produce without consuming) — receipt the loss.
+                    self.funnel.pend_dropped += 1;
+                }
                 self.cpu_brain.pending_book = Some(crate::cpu_ai::PendingBook {
                     target_frame: self.frame_count + 1,
                     cell,
@@ -2513,6 +2525,9 @@ impl WormGame {
         self.cpu_brain.gap_since_voluntary = 0;
         self.cpu_brain.frames_since_food = 99;
         self.cpu_brain.prev_pc_dist = 0;
+        if self.cpu_brain.pending_book.is_some() {
+            self.funnel.pend_dropped += 1;
+        }
         self.cpu_brain.pending_book = None;
         self.cpu_brain.region_ring.clear();
         self.cpu_brain.last_opp_prediction = None;
@@ -2774,14 +2789,14 @@ impl WormGame {
             PowerUpKind::TriShot => {
                 // Straight ahead plus the two forward diagonals.
                 let dirs = [(dx, dy), (dx + dy, dy + dx), (dx - dy, dy - dx)];
-                let steps = TRI_SHOT_MAX_STEPS;
+
                 for (ddx, ddy) in dirs {
                     self.projectiles.push(Projectile {
                         x: hx,
                         y: hy,
                         dx: ddx,
                         dy: ddy,
-                        steps_left: steps,
+                        steps_left: TRI_SHOT_MAX_STEPS,
                         from: who as u8,
                     });
                 }
@@ -2794,11 +2809,11 @@ impl WormGame {
                 // under a seed. NOTE: this consumes a draw at plant time, so
                 // seeded streams diverge from pre-mine builds — deliberate.
                 let disguise = self.rng_range(1..10) as u8;
-                let fuse = BOMB_FUSE_FRAMES;
+
                 self.bombs.push(Bomb {
                     x: hx,
                     y: hy,
-                    fuse,
+                    fuse: BOMB_FUSE_FRAMES,
                     armed_in: MINE_ARM_FRAMES,
                     disguise,
                     owner: who as u8,
@@ -3077,12 +3092,16 @@ impl WormGame {
         }
     }
 
-    /// Tick bomb fuses and detonate any at zero (chain reactions included).
     pub fn tick_bombs(&mut self) {
         for b in &mut self.bombs {
             b.armed_in = b.armed_in.saturating_sub(1);
             b.fuse = b.fuse.saturating_sub(1);
         }
+        // A fuse that runs out FIZZLES. The fuse's only job is to stop stale
+        // mines accumulating over a long round (see the field doc) — it must
+        // never be a weapon: an attentive player can track every plant they
+        // saw, but nobody can track an invisible timer. A tripped mine keeps
+        // its fuse==0 for the drain below and is exempt here.
         let mut fizzled: Vec<(u16, u16)> = Vec::new();
         self.bombs.retain(|b| {
             let expired = b.fuse == 0 && !b.tripped;

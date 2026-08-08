@@ -2824,8 +2824,10 @@ fn test_doze_wakes_for_own_mine_but_not_the_enemys() {
         let mut game = worm::WormGame::with_size_seed(60, 30, 7);
         // A fresh, unread brain keeps the beatable opening's doze cadence.
         assert!(game.cpu_brain.earned_snapshot == 0.0);
-        // Odd frame: a doze candidate for any open_k >= 2.
-        game.frame_count = 1;
+        // update() pre-increments frame_count, so starting at 0 the doze
+        // check observes frame 1 — a doze candidate for ANY open_k >= 2
+        // (k3 verify round: starting at 1 observed frame 2 and passed
+        // only because the default open_latency is 6).
         let (hx, hy) = game.cycles[1].head;
         let (dx, dy) = game.cycles[1].direction.as_delta();
         game.bombs.push(worm::game::Bomb {
@@ -2850,27 +2852,64 @@ fn test_doze_wakes_for_own_mine_but_not_the_enemys() {
     );
 }
 
-/// ADR-022 / k3 Q6: the session doze-exit latch. Once ANY earned read has
-/// ended the casual opening this session, a marginal look-crossing that
-/// releases the evidence latch must NOT re-open the doze — survival
-/// discipline stays sharp for the rest of the session.
+/// ADR-022 / k3 Q6: the session doze-exit latch, exercised through the
+/// REAL production sites (codex verify round: the first version wrote the
+/// latch by hand and could not fail). The latch is set only inside
+/// refresh_read_rate()'s snapshot when family evidence is live; it must
+/// survive a later evidence release, must NOT serialize, and a restored
+/// brain with live evidence re-latches through the same path (wits
+/// earned against this human do not lapse with the calendar — ADR-022).
 #[test]
 fn test_discipline_never_re_dozes_after_an_earned_read() {
     let mut game = worm::WormGame::with_size_seed(60, 30, 7);
+    assert!(!game.cpu_brain.discipline_latched);
+    // Live, latched lateral evidence (the shape record() builds: 90/100
+    // against a fair-coin null, z ~ 8) — then the REAL round-boundary
+    // refresh takes the snapshot and sets the latch.
+    game.cpu_brain.lifetime_read.lat_samples = 100;
+    game.cpu_brain.lifetime_read.lat_hits = 90;
+    game.cpu_brain.lifetime_read.lat_chance = 50.0;
+    game.cpu_brain.lifetime_read.lat_var = 25.0;
+    game.cpu_brain.lifetime_read.lat_latched = true;
+    game.refresh_read_rate();
     assert!(
-        game.discipline_sharpness() < 1.0 || game.cpu_brain.earned_snapshot > 0.0,
-        "a fresh session starts inside the beatable opening"
+        game.cpu_brain.earned_snapshot > 0.0,
+        "fixture must produce live earned evidence"
     );
-    // An earned read opens full discipline...
-    game.cpu_brain.earned_snapshot = 0.4;
-    game.cpu_brain.discipline_latched = true; // set where the snapshot is taken
+    assert!(
+        game.cpu_brain.discipline_latched,
+        "the round-boundary snapshot must set the latch when evidence is live"
+    );
     assert_eq!(game.discipline_sharpness(), 1.0);
-    // ...and a later marginal release of the evidence latch (snapshot back
-    // to zero) must not hand the vulnerability window back.
-    game.cpu_brain.earned_snapshot = 0.0;
+
+    // The Schmitt release drops the evidence — the snapshot goes to zero
+    // through the same real path — and discipline must NOT re-doze.
+    game.cpu_brain.lifetime_read.lat_latched = false;
+    game.refresh_read_rate();
+    assert_eq!(game.cpu_brain.earned_snapshot, 0.0);
     assert_eq!(
         game.discipline_sharpness(),
         1.0,
         "the doze must not return after sharpness was earned this session"
+    );
+
+    // Serialize boundary: the latch itself never persists...
+    let restored = worm::CpuBrain::from_bytes(&game.cpu_brain.to_bytes())
+        .expect("brain must decode");
+    assert!(
+        !restored.discipline_latched,
+        "the latch must not survive the wire"
+    );
+    // ...but a restored brain whose evidence is LIVE re-latches through
+    // the same refresh path every load site calls.
+    game.cpu_brain.lifetime_read.lat_latched = true;
+    let mut game2 = worm::WormGame::with_size_seed(60, 30, 7);
+    game2.cpu_brain = worm::CpuBrain::from_bytes(&game.cpu_brain.to_bytes())
+        .expect("brain must decode");
+    assert!(!game2.cpu_brain.discipline_latched);
+    game2.refresh_read_rate();
+    assert!(
+        game2.cpu_brain.discipline_latched,
+        "restored live evidence re-latches at the load-site refresh"
     );
 }
