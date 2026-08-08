@@ -1,6 +1,14 @@
 # ADR-022: The World-Rules Program — Two-Lane Corridor, Timed Decoy, Napalm
 
 ## Status
+v9 (napalm) Implemented and LIVE (BUILD 26) — the ADR-022 program is
+COMPLETE: corridor (v6), laser simultaneity (v7/ADR-023), timed decoy
+(v8), napalm (v9). v9 took four consult rounds to unanimity: floor-paced
+sticky burn, owner-immune fire (the ADR-023 rule now uniform across all
+weapons), dwell release closing the Schmitt dead zone, the pocket doze
+wake, and the F1 five-seed paired expected-score instrument for memory
+non-inferiority (mean 5.00 zero-slack / median 2.78, seed 31337's
+pathological spawn-lap documented on the record).
 v8 (timed decoy) Implemented and LIVE (merge 9b6bda8, BUILD 25) —
 verified with two consult findings fixed (chain-through-owner-trail,
 ring-4 closure proofs) and the UNANIMOUS R1 ruling: warm-vs-cold
