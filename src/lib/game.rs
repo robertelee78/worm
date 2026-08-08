@@ -1693,7 +1693,23 @@ impl WormGame {
         // mid-chase, and an unsharp CPU dying into the trail YOU laid is the
         // classic earned Tron kill — beatable through play, never through
         // watching it faceplant scenery.
-        let cpu_dozing = self.cpu_autopilot && open_k > 1 && self.frame_count % open_k != 0 && {
+        // SLIPSTREAM REACTION TAX (owner spec): at 4× world clock a human's
+        // turning accuracy degrades — the CPU's must too, or slip time
+        // hands it superhuman play for free. While the fast clock runs,
+        // the arena-side CPU re-decides only every 4th frame — the SAME
+        // decisions-per-second it had at normal time, in a body moving 4×
+        // — holding heading between decisions under the standard doze
+        // semantics: wall and ring reflexes stay on, trails stay UNSEEN.
+        // Ramming a trail at speed is precisely the turning-accuracy
+        // failure a human suffers, symmetrically priced.
+        let slip_clock = self.arena_version >= 4
+            && ((self.cycles[0].alive && self.cycle_in_corridor(0))
+                || (self.cycles[1].alive && self.cycle_in_corridor(1)));
+        let slip_lag =
+            slip_clock && !cpu_frozen && self.frame_count % 4 != 0;
+        let cpu_dozing = self.cpu_autopilot
+            && ((open_k > 1 && self.frame_count % open_k != 0) || slip_lag)
+            && {
             let cy = &self.cycles[1];
             let (dx, dy) = cy.direction.as_delta();
             let nx = cy.head.0 as i16 + dx;

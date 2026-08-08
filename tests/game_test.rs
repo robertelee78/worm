@@ -2649,3 +2649,37 @@ fn the_corridor_worm_slips_while_the_arena_worm_flies() {
     assert_eq!(c_moved, 16, "the arena worm moves every frame");
     assert_eq!(p_moved, 1, "the corridor worm moves once per 16");
 }
+
+/// SLIPSTREAM REACTION TAX: at the 4x clock, the arena CPU re-decides
+/// only every 4th frame — the same decisions-per-second as normal time,
+/// in a body moving 4x. Turning accuracy at speed is priced for the CPU
+/// exactly as physiology prices it for the human.
+#[test]
+fn the_fast_worm_pays_the_reaction_tax() {
+    let mut game = worm::WormGame::with_size_seed(40, 30, 5);
+    game.read_rate = 1.0; // fully sharp: no opening doze in the way
+    game.cycles[0].head = (5, 1); // player out in the corridor
+    game.cycles[0].positions = vec![(5, 1)].into();
+    game.grid[1][5] = worm::CellType::Player;
+    game.cycles[0].direction = worm::Direction::Right;
+    game.cycles[1].head = (20, 15);
+    game.cycles[1].positions = vec![(20, 15)].into();
+    game.grid[15][20] = worm::CellType::CPU;
+    game.cycles[1].direction = worm::Direction::Right;
+
+    let mut decisions = 0;
+    for _ in 0..16 {
+        game.update();
+        if game.game_over {
+            break;
+        }
+        if game.cpu_telemetry.decision.is_some() {
+            decisions += 1;
+        }
+    }
+    assert!(
+        decisions <= 5,
+        "at 4x clock the CPU may decide only ~1 frame in 4 (got {decisions}/16)"
+    );
+    assert!(decisions >= 3, "reflex wakes aside, decisions still happen ({decisions})");
+}
