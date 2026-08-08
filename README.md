@@ -15,13 +15,7 @@ claim form — or fail — in public.
 
 *Jump to:* [Playing it](#playing-it) ·
 [The claim, and how to falsify it](#the-claim-and-how-to-falsify-it) ·
-[Development](#development) · [Decisions (21 ADRs)](#decisions)
-
-The game is the easy part. The claim is that the CPU builds a model of the
-specific human it is playing, gets measurably better at predicting them across
-matches, and can show you the evidence. That claim is easy to make and easy to
-fool yourself about, so much of this repository is the machinery for testing
-whether it is true — including the parts that currently say **no**.
+[Development](#development) · [Decisions (23 ADRs)](#decisions)
 
 ---
 
@@ -116,47 +110,24 @@ suite is not leaking the answer into the forecast.
 
 ## Learning, and then winning
 
-The claim is not that the CPU predicts you — it is that predicting you makes it
-**beat** you. `cargo test --test domination` holds board, seeds and opponent
-fixed and varies only whether the CPU may remember:
-
-```
-COLD (cannot learn)   cpu 86 player 1 draw 3   win  96%
-WARM (remembers you)  cpu 84 player 2 draw 4   win  93%   earned read 0.75
-```
-
-These numbers are HONEST in a way their predecessors were not, and they
-tell a subtler story. [ADR-020](docs/adrs/020-the-turn-book.md) rebuilt
-the evidence system: the baseline the CPU must beat now receives
-everything public the CPU had (the legal move set, the forecast's own
-class), every evidence channel is held to an anytime-valid significance
-boundary with null-player controls asserted at every frame, and the
-difficulty spends only what survives all of that. Under the old
-class-blind accounting this same suite printed "lift 81%" — fabricated
-almost entirely from board knowledge at forced turns. The honest ledger
-shows something different: this survival-competent persona is beaten
-96% by DEFAULT play, so there is almost no headroom for memory to
-convert into wins here (the ceiling problem
-[ADR-009](docs/adrs/009-learning-must-convert-into-winning.md)
-documents), and the warm row's few give-backs are the beatable opening
-running while evidence accrues. The suite therefore asserts
-non-inferiority plus a genuinely EARNED read — and the conversion claim
-is carried by the acceptance tests instead: a strict alternator (a
-habit no modal baseline can ever call) is read far above chance
-end-to-end, and the metronome probe's published swerve forecasts hit
-100% once the turn book's gate opens. The cold row is HIGH here and the
-novice fixture still wins its share, because since
-[ADR-018](docs/adrs/018-the-beatable-opening.md) an unread CPU opens
-slow-witted and genuinely beatable — and since ADR-020, any PROVEN
-read ends that opening's sloppiness outright.
-[ADR-012](docs/adrs/012-two-swarm-findings-implemented.md) and
-[ADR-014](docs/adrs/014-the-codex-corrections.md) record earlier trades
-and reverts, including changes that measured worse and were rolled
-back.
-
-That test was failing until recently, with the *warm* CPU winning less — see
-[ADR-009](docs/adrs/009-learning-must-convert-into-winning.md) for the two
-defects that caused it and the two flaws in the experiment itself.
+The claim is not that the CPU predicts you — it is that predicting you
+makes it **beat** you. `cargo test --test domination` holds board,
+seeds, and opponent fixed and varies only whether the CPU may remember.
+Since [ADR-022](docs/adrs/022-world-rules-program.md) the memory
+invariant runs as **five paired 90-game arms scored by expected points**
+(a draw counts half in both arms), asserting mean *and* median paired
+gap ≤ 5 points with every per-seed gap published — one pathological
+seed stays visible on the record instead of vetoing the doctrine or
+being re-baselined away. A survival-competent persona is beaten ~80-90%
+by *default* play, so memory's job here is non-inferiority plus a
+genuinely earned read; the conversion claim is carried by the
+acceptance tests (a strict alternator — a habit no modal baseline can
+call — read far above chance end-to-end). The evidence rebuild that
+made these numbers honest, and the fabricated 81% they replaced, are
+[ADR-020](docs/adrs/020-the-turn-book.md); the earlier failures and
+reverts are [ADR-009](docs/adrs/009-learning-must-convert-into-winning.md),
+[ADR-012](docs/adrs/012-two-swarm-findings-implemented.md), and
+[ADR-014](docs/adrs/014-the-codex-corrections.md).
 
 
 A read is only worth something if it reaches the wheel. `read_rate` is
@@ -259,10 +230,6 @@ events.
 
 ![Runtime flow: a genuine turn is identified, the precommitted forecast is scored against reality and the base-rate rival, evidence accumulates through scheduled looks, and only a proven read closes the intercept gate](docs/media/flow.svg)
 
-The number a project like this wants to show is "prediction accuracy". Here
-that number is worthless: ~95% of frames the player is continuing straight down
-an open corridor, so accuracy sits at 84–99% forever and cannot move.
-
 The obvious fix — compare against uniform chance, as
 [rps.shaal.dev](https://rps.shaal.dev/) does with its stated 33% baseline —
 fails for a subtler reason. An RPS player really *is* near-uniform; they are
@@ -290,6 +257,7 @@ Bolts fly at full speed regardless: light does not slow down. The
 screen drops into a hyperspace field — streaks tearing outward from
 your worm, chromatic warp rings, a focus vignette — and every rule is
 symmetric: if the CPU takes the corridor, the same physics serve you.
+
 ### The arsenal
 
 The corridor is **two lanes wide** — turning and overtaking out there
@@ -311,7 +279,7 @@ covers all three: **you are immune to your own discharged weapon** —
 your laser, your blast, your fire. The counterplay to everything else
 is attention.
 
-World rules are versioned (v1–v9) and every recorded ghost replays
+World rules are versioned (v1–v11) and every recorded ghost replays
 under the exact physics it was played on.
 
 ## Playing it
@@ -337,16 +305,6 @@ usually hand-waved.
   returning player's learned history.
 
 <br clear="right"/>
-
-**Your first duel takes one command** (with the Rust toolchain
-installed): `cargo run --release`. See the arena — your cycle, the
-computer's, food, trails, score, and the opponent's evidence panel.
-Drive and fight — arrows/WASD, Space fires a held power-up, P pauses.
-Finish a round — the per-player brain saves automatically. Then verify
-the claim: run the persona suite and inspect the positive, null, and
-acceptance personas. For the browser build:
-`wasm-pack build --target web --out-dir web/pkg --features wasm`, then
-`python3 scripts/serve.py 8080`.
 
 **Terminal**
 
@@ -444,6 +402,8 @@ living documents — if one disagrees with the code, the ADR is the bug.
 - [ADR-019](docs/adrs/019-the-cpus-notebook.md) — the CPU's notebook: LLM depth, on request only
 - [ADR-020](docs/adrs/020-the-turn-book.md) — the turn book: reading the frames that decide games
 - [ADR-021](docs/adrs/021-the-learning-program.md) — the learning program: nine measured surfaces
+- [ADR-022](docs/adrs/022-world-rules-program.md) — the world-rules program: corridor, decoy, napalm, input queue, reach
+- [ADR-023](docs/adrs/023-laser-simultaneity.md) — laser simultaneity: the beam exists across its frame
 
 ### A note on the numbers in this repo
 
