@@ -3053,7 +3053,9 @@ fn laser_forensics_over_recorded_rounds() {
                 let cpu_after = g.cycles[1].positions.len();
                 if weapon == Some(worm::game::PowerUpKind::Laser) {
                     let _ = (hx, hy, dir, &cpu_before);
-                    if let Some((who, beam, opp_pos, cut)) = g.laser_audit.take() {
+                    if let Some(a) = g.laser_audit.take() {
+                        let (who, beam, opp_pos, cut) =
+                            (a.firer, a.cells, a.opp_positions, a.cut);
                         let hits: Vec<usize> = opp_pos
                             .iter()
                             .enumerate()
@@ -3069,7 +3071,8 @@ fn laser_forensics_over_recorded_rounds() {
                     } else {
                         println!("  frame {} LASER: NO AUDIT (beam never evaluated?)", next);
                     }
-                    if let Some((_, beam, opp_pos, cut)) = g.laser_audit_last.clone() {
+                    if let Some(a) = g.laser_audit_last.clone() {
+                        let (beam, opp_pos, cut) = (a.cells, a.opp_positions, a.cut);
                         if cut.is_none() {
                             let mind = opp_pos
                                 .iter()
@@ -3131,8 +3134,8 @@ fn laser_round_ascii() {
         let mut beam_cells: Vec<(u16, u16)> = Vec::new();
         while !g.game_over && g.frame_count < 142 {
             g.update();
-            if let Some((_, beam, _, _)) = g.laser_audit.take() {
-                beam_cells = beam;
+            if let Some(a) = g.laser_audit.take() {
+                beam_cells = a.cells;
             }
             if g.frame_count >= 134 && g.frame_count <= 141 {
                 println!("--- frame {} (player head {:?} cpu head {:?} cpu len {})",

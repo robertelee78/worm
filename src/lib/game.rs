@@ -157,6 +157,10 @@ pub struct BeamPath {
     pub cells: Vec<(u16, u16)>,
     /// The arena-wall cell to convert to a `Hole`, on the fifth strike.
     pub breach: Option<(u16, u16)>,
+    /// The wall/hole cell the beam DIED on (breach or not) — where a
+    /// whiff's spark belongs (codex v7 verify: `cells.last()` put it on
+    /// the preceding traversable cell).
+    pub stop: Option<(u16, u16)>,
 }
 
 impl BeamPath {
@@ -283,6 +287,41 @@ impl LightCycle {
 /// enters nothing but remains hittable at discharge.
 pub const ARENA_VERSION: u8 = 7;
 
+/// A beam discharged this frame, awaiting its post-move occupancy test
+/// (ADR-023 world v7). The cells are IMMUTABLE — snapshotted once at
+/// discharge; the reconciliation never retraces.
+#[derive(Clone, Debug)]
+pub struct PendingBeam {
+    pub firer: u8,
+    pub cells: Vec<(u16, u16)>,
+    /// Ignition already connected (kill/sever/bomb) — suppresses the
+    /// whiff clank.
+    pub ignition_hit: bool,
+    /// Terminal wall/hole cell — where a whiff's spark belongs.
+    pub stop: Option<(u16, u16)>,
+    pub breached: bool,
+}
+
+/// One beam's render state (ADR-023 contract): age 0 = lethal core,
+/// 1-5 dimming afterimage, 6-20 embers. `fresh` marks a beam discharged
+/// this frame so its solid core renders exactly once on every exit path.
+#[derive(Clone, Debug)]
+pub struct BeamFx {
+    pub cells: Vec<(u16, u16)>,
+    pub age: u32,
+    fresh: bool,
+}
+
+/// Forensic snapshot of a laser discharge (diagnostic only).
+#[derive(Clone, Debug)]
+#[doc(hidden)]
+pub struct LaserAudit {
+    pub firer: usize,
+    pub cells: Vec<(u16, u16)>,
+    pub opp_positions: Vec<(u16, u16)>,
+    pub cut: Option<usize>,
+}
+
 /// Diagnostic event-supply funnel (codex v6 consult, Q2): cheap counters
 /// over the evidence-eligibility path, cumulative for the life of this
 /// WormGame. Never persisted, never read by play logic — receipts only.
@@ -324,19 +363,16 @@ pub struct WormGame {
     /// Evidence-supply funnel receipts (diagnostic only).
     pub funnel: FunnelStats,
     /// World v7 (ADR-023): beams discharged this frame, awaiting their
-    /// post-move occupancy test. (firer, immutable snapshotted cells,
-    /// whether ignition already connected — kill/sever/bomb).
-    pub pending_beams: Vec<(u8, Vec<(u16, u16)>, bool)>,
-    /// Beam render state (ADR-023 contract): (cells, age in frames).
-    /// Age 0 = lethal core; 1-5 dimming afterimage; 6-20 embers.
-    pub beam_fx: Vec<(Vec<(u16, u16)>, u32)>,
-    /// Forensic record of the LAST laser discharge (diagnostic only):
-    /// (firer, beam cells, opponent positions at test time, chosen cut).
+    /// post-move occupancy test.
+    pub pending_beams: Vec<PendingBeam>,
+    /// Beam render layer (ADR-023 contract).
+    pub beam_fx: Vec<BeamFx>,
+    /// Forensic record of the LAST laser discharge (diagnostic only).
     #[doc(hidden)]
-    pub laser_audit: Option<(usize, Vec<(u16, u16)>, Vec<(u16, u16)>, Option<usize>)>,
+    pub laser_audit: Option<LaserAudit>,
     /// Same, but never consumed (diagnostic only).
     #[doc(hidden)]
-    pub laser_audit_last: Option<(usize, Vec<(u16, u16)>, Vec<(u16, u16)>, Option<usize>)>,
+    pub laser_audit_last: Option<LaserAudit>,
     /// Whether the current round's ledgers have been finalized (exactly-
     /// once discipline; see finalize_round_ledgers).
     pub ledgers_finalized: bool,
@@ -1005,6 +1041,11 @@ impl WormGame {
 
     pub fn update(&mut self) -> bool {
         if self.game_over {
+            // The sim is done but the browser keeps painting the final
+            // board: the beam layer still decays, so the killing shot cools
+            // from core to afterimage to embers instead of glowing "hot"
+            // forever (codex v7 verify).
+            self.age_beam_fx();
             return false;
         }
 
@@ -1578,6 +1619,7 @@ impl WormGame {
             // (A crashing head never occupied the line, and the un-moved CPU
             // entered nothing — this is the uniformity call, not a kill site.)
             self.reconcile_beams();
+            self.age_beam_fx();
             // In-flight bolts and a bomb at fuse 0 still get their frame-end
             // step; either may kill the surviving CPU and turn the loss into
             // a draw (bombs alone used to tick while bolts froze mid-air).
@@ -2110,6 +2152,7 @@ impl WormGame {
             // the player may have stepped into a live beam this same frame,
             // turning this into a draw.
             self.reconcile_beams();
+            self.age_beam_fx();
             // In-flight bolts and a bomb at fuse 0 still get their frame-end
             // step; either may kill the surviving player and turn the CPU win
             // into a draw (bombs alone used to tick while bolts froze).
@@ -2204,16 +2247,13 @@ impl WormGame {
         // one common hazard phase; every movement-resolving exit path calls
         // the same method (codex: no early return may skip it).
         if self.reconcile_beams() {
+            self.age_beam_fx();
             // Bombs at fuse 0 still get their frame-end tick — a blast can
             // turn this into a (deeper) draw, same as every death site.
             self.tick_bombs();
             return false;
         }
-        // Age the beam render layer: 0 = hot, 1-5 afterimage, 6-20 embers.
-        for fx in &mut self.beam_fx {
-            fx.1 += 1;
-        }
-        self.beam_fx.retain(|fx| fx.1 <= 20);
+        self.age_beam_fx();
 
         // Live projectiles and planted bombs (can end the game). Under
         // world v3 the projectile step already happened at frame START;
@@ -2817,12 +2857,12 @@ impl WormGame {
                         .skip(1)
                         .find(|(_, p)| beam.contains(p))
                         .map(|(i, _)| i);
-                    self.laser_audit = Some((
-                        who,
-                        beam.cells.clone(),
-                        self.cycles[opp].positions.clone(),
+                    self.laser_audit = Some(LaserAudit {
+                        firer: who,
+                        cells: beam.cells.clone(),
+                        opp_positions: self.cycles[opp].positions.clone(),
                         cut,
-                    ));
+                    });
                     self.laser_audit_last = self.laser_audit.clone();
                     if let Some(cut) = cut {
                         ignition_hit = true;
@@ -2845,8 +2885,18 @@ impl WormGame {
                     // transition — snapshot once, re-test occupancy after
                     // the frame moves (reconcile_beams). The render layer
                     // consumes the SAME cells (beam_fx), never a recompute.
-                    self.pending_beams.push((who as u8, beam.cells.clone(), ignition_hit));
-                    self.beam_fx.push((beam.cells.clone(), 0));
+                    self.pending_beams.push(PendingBeam {
+                        firer: who as u8,
+                        cells: beam.cells.clone(),
+                        ignition_hit,
+                        stop: beam.stop,
+                        breached: beam.breach.is_some(),
+                    });
+                    self.beam_fx.push(BeamFx {
+                        cells: beam.cells.clone(),
+                        age: 0,
+                        fresh: true,
+                    });
                 } else {
                     let _ = ignition_hit;
                     // Pre-v7 flash: a particle line. Lifetime in the same
@@ -2905,10 +2955,15 @@ impl WormGame {
         }
         if self.game_over {
             // The shot ended the game mid-frame (laser kill or a triggered
-            // blast). In-flight bolts and armed bombs still get their
-            // frame-end step — a survivor killed here turns the win into a
-            // draw. The player-fired path runs OUTSIDE update() (which stops
-            // once game_over is set), so this is its only chance to run.
+            // blast). Discharged beams still get their occupancy test — a
+            // pending opposing beam with this firer standing on its line
+            // turns the win into a draw (k3 v7 verify B1: mutual beams
+            // must be able to draw even when one discharge ends the game).
+            // Then in-flight bolts and armed bombs get their frame-end
+            // step — a survivor killed here also turns the win into a
+            // draw. The player-fired path runs OUTSIDE update() (which
+            // stops once game_over is set), so this is its only chance.
+            self.reconcile_beams();
             self.advance_projectiles();
             self.tick_bombs();
         }
@@ -2941,6 +2996,7 @@ impl WormGame {
     pub(crate) fn beam_cells(&self, hx: u16, hy: u16, dx: i16, dy: i16) -> BeamPath {
         let mut cells = Vec::new();
         let mut breach = None;
+        let mut stop = None;
         let mut x = hx as i16;
         let mut y = hy as i16;
         let mut rdx = dx;
@@ -2969,14 +3025,31 @@ impl WormGame {
                         }
                         breach = Some((ux, uy));
                     }
+                    stop = Some((ux, uy));
                     break;
                 }
                 // A hole is where the arena ends for a beam — see above.
-                CellType::Hole => break,
+                CellType::Hole => {
+                    stop = Some((ux, uy));
+                    break;
+                }
                 _ => cells.push((ux, uy)),
             }
         }
-        BeamPath { cells, breach }
+        BeamPath { cells, breach, stop }
+    }
+
+    /// ADR-023: one beam-render tick — fresh beams keep their solid
+    /// core for the frame that first paints them; everything else decays.
+    fn age_beam_fx(&mut self) {
+        for fx in &mut self.beam_fx {
+            if fx.fresh {
+                fx.fresh = false;
+            } else {
+                fx.age += 1;
+            }
+        }
+        self.beam_fx.retain(|fx| fx.age <= 20);
     }
 
     /// ADR-023 (world v7): the post-move half of the laser's dual test.
@@ -2992,15 +3065,16 @@ impl WormGame {
         }
         let beams = std::mem::take(&mut self.pending_beams);
         let mut killed = [false; 2];
-        for (firer, cells, ignition_hit) in &beams {
-            let mut beam_connected = *ignition_hit;
-            for opp in 0..2 {
+        for beam in &beams {
+            let cells = &beam.cells;
+            let mut beam_connected = beam.ignition_hit;
+            for (opp, killed_slot) in killed.iter_mut().enumerate() {
                 // The firer is immune to their own beam, head and body.
-                if opp as u8 == *firer || !self.cycles[opp].alive {
+                if opp as u8 == beam.firer || !self.cycles[opp].alive {
                     continue;
                 }
                 if cells.contains(&self.cycles[opp].head) {
-                    killed[opp] = true;
+                    *killed_slot = true;
                     beam_connected = true;
                     let (hx, hy) = self.cycles[opp].head;
                     // Hit marker anchors at the HIT CELL (ADR-023).
@@ -3024,18 +3098,22 @@ impl WormGame {
             }
             if !beam_connected {
                 // A TRUE whiff: no worm, no bomb, either phase. The beam
-                // dies on a wall with a distinct low clank and a spark at
-                // its terminal cell (ADR-023) — never a hit sound, never a
-                // spark on an adjacent worm cell.
-                if let Some(&(lx, ly)) = cells.last() {
-                    self.particles.push(Particle {
-                        x: lx as f32,
-                        y: ly as f32,
-                        vx: 0.0,
-                        vy: 0.0,
-                        lifetime: 12,
-                        color: (180, 180, 180),
-                    });
+                // dies on its terminal WALL cell with a distinct low clank
+                // and a spark THERE (codex v7 verify: cells.last() was the
+                // preceding lane cell). A breach already sparked its own
+                // cell — clank only, no duplicate spark (breach is not a
+                // connect, but it is not silent either).
+                if !beam.breached {
+                    if let Some((lx, ly)) = beam.stop {
+                        self.particles.push(Particle {
+                            x: lx as f32,
+                            y: ly as f32,
+                            vx: 0.0,
+                            vy: 0.0,
+                            lifetime: 12,
+                            color: (180, 180, 180),
+                        });
+                    }
                 }
                 play_beep(SfxKind::Laser, 300, 70);
             }

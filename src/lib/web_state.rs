@@ -410,7 +410,11 @@ impl GameState {
             // overlay would paint a target on every one of them. The field is
             // kept rather than removed so the wire shape stays stable.
             bombs: Vec::new(),
-            beams: game.beam_fx.clone(),
+            beams: game
+                .beam_fx
+                .iter()
+                .map(|fx| (fx.cells.clone(), fx.age))
+                .collect(),
             particles: game
                 .particles
                 .iter()
