@@ -192,7 +192,7 @@ document.getElementById('tell-more-btn')?.addEventListener('click', async () => 
   if (!lastRoundRecord || !btn || !notebook) return;
   btn.disabled = true;
   notebook.hidden = false;
-  notebook.textContent = 'the CPU is opening its notebook… (about 15 seconds — it writes from this round\u2019s real measurements)';
+  notebook.textContent = 'the CPU is opening its notebook… (about 15 seconds — it writes from its full record of you, every round you\u2019ve ever played)';
   try {
     const res = await fetch('/explain', { method: 'POST', body: JSON.stringify(lastRoundRecord) });
     notebook.textContent = res.ok
