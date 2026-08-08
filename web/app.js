@@ -4,14 +4,14 @@
 // The ?v= must match BUILD below (and index.html's) — an unversioned glue
 // import could pair a cached old worm.js with a fresh wasm on the next
 // rebuild that changes the bindings.
-import init, { WasmGame } from './pkg/worm.js?v=23';
+import init, { WasmGame } from './pkg/worm.js?v=24';
 import { Sfx } from './audio.js';
 import { computeBoardLayout, VIEWPORT_BLOCK_GUTTER } from './layout.js';
 
 let CELL = 14; // recomputed by applyBoardLayout() to fit the measured stage
 // Bump together with the ?v= in index.html whenever the wasm bundle is
 // rebuilt — it keys the cache-busting query on the .wasm fetch.
-const BUILD = 23;
+const BUILD = 24;
 const MATCH_TARGET = 3;
 const STATE_SCHEMA_VERSION = 2;
 const ROUND_SCHEMA_VERSION = 1;
@@ -1378,6 +1378,37 @@ function render(s) {
     offCtx.fillRect(x * CELL + CELL * 0.28, y * CELL + CELL * 0.28, CELL * 0.44, CELL * 0.44);
   }
 
+  // LASER BEAMS (ADR-023 contract): the sim's own cells, full-cell
+  // quads, drawn UNDER the worms. Age 0 = solid lethal core; 1-5 =
+  // rapidly dimming afterimage; 6-20 = sparse embers, visibly residue.
+  // Solid == hot, faded == inert — the visual says when lethality ended.
+  if (s.beams) {
+    for (const [cells, age] of s.beams) {
+      if (age === 0) {
+        offCtx.fillStyle = 'rgba(255, 255, 160, 0.92)';
+        for (const [bx, by] of cells) {
+          offCtx.fillRect(bx * CELL, by * CELL, CELL, CELL);
+        }
+      } else if (age <= 5) {
+        const a5 = 0.55 * (1 - age / 6);
+        offCtx.fillStyle = `rgba(255, 240, 120, ${a5.toFixed(3)})`;
+        const inset = 1 + age;
+        for (const [bx, by] of cells) {
+          offCtx.fillRect(
+            bx * CELL + inset, by * CELL + inset,
+            Math.max(CELL - 2 * inset, 2), Math.max(CELL - 2 * inset, 2)
+          );
+        }
+      } else {
+        offCtx.fillStyle = 'rgba(200, 170, 80, 0.25)';
+        for (let i = 0; i < cells.length; i += 3) {
+          const [bx, by] = cells[i];
+          offCtx.fillRect(bx * CELL + CELL / 2 - 1, by * CELL + CELL / 2 - 1, 2, 2);
+        }
+      }
+    }
+  }
+
   // trails with head→tail gradient
   for (let ci = 0; ci < 2; ci++) {
     const c = s.cycles[ci];
@@ -1440,7 +1471,7 @@ function render(s) {
   for (const [px, py, pr, pg, pb, life] of s.particles) {
     const alpha = Math.min(life / 40, 1);
     offCtx.fillStyle = `rgba(${pr}, ${pg}, ${pb}, ${alpha})`;
-    offCtx.fillRect(px * CELL - 1, py * CELL - 1, 3, 3);
+    offCtx.fillRect(px * CELL + CELL / 2 - 1.5, py * CELL + CELL / 2 - 1.5, 3, 3);
   }
   offCtx.globalCompositeOperation = 'source-over';
 

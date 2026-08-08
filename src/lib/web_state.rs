@@ -54,6 +54,10 @@ struct GameState {
     bolts: Vec<(u16, u16, i16, i16)>,
     bombs: Vec<(u16, u16, u32)>,
     particles: Vec<(f32, f32, u8, u8, u8, u32)>,
+    /// ADR-023 beam render layer: (cells, age). Age 0 = lethal core,
+    /// 1-5 dimming afterimage, 6-20 embers. The cells are the SIM's own
+    /// beam cells — the renderer never recomputes geometry.
+    beams: Vec<(Vec<(u16, u16)>, u32)>,
     cause: Option<String>,
     brain: BrainState,
 }
@@ -406,6 +410,7 @@ impl GameState {
             // overlay would paint a target on every one of them. The field is
             // kept rather than removed so the wire shape stays stable.
             bombs: Vec::new(),
+            beams: game.beam_fx.clone(),
             particles: game
                 .particles
                 .iter()
