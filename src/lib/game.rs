@@ -270,6 +270,19 @@ impl LightCycle {
 /// interior shrinks a cell per side. The owner's decoy-bomb and napalm
 /// specs are later versions: one physics change per version, each with
 /// its own replay pinning and benchmark receipts.
+/// v11 (owner: "the tri-shot isn't lethal enough … it seems to have no
+/// damage … maybe they need to go further, but if they touch the
+/// opponent at all, that's what needs to catch them on fire"): NAPALM
+/// REACH. Bolts fly a FULL RAY again at TWO cells per frame — a fired
+/// bolt cannot be outrun — as two ordered one-cell substeps, each
+/// running the complete collision pipeline (never a teleport over a
+/// cell). Any swept contact IGNITES AND CATCHES — the v9 crossing-swap
+/// branch's instant TriShotBolt death was inconsistent with
+/// napalm-on-touch and is gone at v11: touch = fire, the burn schedule
+/// does the killing. Receipt for the change: the burn engine was
+/// proven correct (catch at frame 3, len 10 -> 6) — the live
+/// damagelessness was REACH: 4-cell worm-speed bolts were dodged or
+/// outrun by construction, so a touch almost never happened.
 /// v10 (owner bug report: "if I hit the arrow keys rapidly, the 2nd
 /// key is often not registered … we need to do a better job of
 /// collecting keys"): THE INPUT QUEUE. Player inputs — turns AND fires
@@ -328,7 +341,7 @@ impl LightCycle {
 /// of the v3 bolt-ordering fix. Same-frame deaths are atomic (both
 /// dead = draw); the firer is immune to their own beam; a frozen worm
 /// enters nothing but remains hittable at discharge.
-pub const ARENA_VERSION: u8 = 10;
+pub const ARENA_VERSION: u8 = 11;
 
 /// A collected player input (world v10): consumed in order at the
 /// frame's player phase.
@@ -3219,8 +3232,10 @@ impl WormGame {
             PowerUpKind::TriShot => {
                 // Straight ahead plus the two forward diagonals.
                 let dirs = [(dx, dy), (dx + dy, dy + dx), (dx - dy, dy - dx)];
-                // World v9 NAPALM: bolts fly only 4 cells, then ignite.
-                let steps = if self.arena_version >= 9 {
+                // World v9 NAPALM flew 4 cells; v11 restores the full
+                // ray (owner: "maybe they need to go further") — the
+                // napalm-on-touch stays, the reach returns.
+                let steps = if self.arena_version == 9 || self.arena_version == 10 {
                     4
                 } else {
                     TRI_SHOT_MAX_STEPS
@@ -3593,8 +3608,14 @@ impl WormGame {
     /// Advance live tri-shot bolts one cell; bolts die on walls or at max range,
     /// and kill any head they enter.
     pub fn advance_projectiles(&mut self) {
+        // World v11: bolts move TWO cells per frame — a fired bolt cannot
+        // be outrun — as two ordered one-cell substeps, each running this
+        // complete pipeline (codex v11 consult: never teleport over a
+        // cell; stop at the first contact).
+        let substeps = if self.arena_version >= 11 { 2 } else { 1 };
         let mut i = 0;
-        while i < self.projectiles.len() {
+        'bolts: while i < self.projectiles.len() {
+            for _substep in 0..substeps {
             let (x, y, from) = {
                 let p = &self.projectiles[i];
                 (p.x as i16 + p.dx, p.y as i16 + p.dy, p.from)
@@ -3613,7 +3634,7 @@ impl WormGame {
                     self.ignite(lx, ly, from9);
                 }
                 self.projectiles.remove(i);
-                continue;
+                continue 'bolts;
             }
             let (ux, uy) = (x as u16, y as u16);
             let (ox, oy) = (self.projectiles[i].x, self.projectiles[i].y);
@@ -3631,6 +3652,14 @@ impl WormGame {
                 && self.cycles[opp].positions.len() > 1
                 && self.cycles[opp].positions[1] == (ux, uy);
             if swapped {
+                if self.arena_version >= 11 {
+                    // NAPALM everywhere (codex v11): a swept contact
+                    // IGNITES AND CATCHES — the burn schedule does the
+                    // killing, never an instant swap death.
+                    self.ignite(ux, uy, from);
+                    self.projectiles.remove(i);
+                    continue 'bolts;
+                }
                 self.add_impact_particles(ux, uy, self.cycles[opp].color);
                 self.cycles[opp].alive = false;
                 if self.death_cause.is_none() {
@@ -3647,7 +3676,7 @@ impl WormGame {
                     play_death_riff(80);
                 }
                 self.projectiles.remove(i);
-                continue;
+                continue 'bolts;
             }
 
             // A bolt is a small thrown grenade: contact with ANY part of the
@@ -3672,7 +3701,7 @@ impl WormGame {
                     self.bolt_blast(ux, uy, pdx, pdy, from);
                 }
                 self.projectiles.remove(i);
-                continue;
+                continue 'bolts;
             }
             let p = &mut self.projectiles[i];
             p.x = ux;
@@ -3686,9 +3715,10 @@ impl WormGame {
                     self.ignite(fx, fy, from9);
                 }
                 self.projectiles.remove(i);
-            } else {
-                i += 1;
+                continue 'bolts;
             }
+            }
+            i += 1;
         }
     }
 

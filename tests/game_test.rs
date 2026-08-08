@@ -1167,6 +1167,9 @@ fn test_bolt_hits_head_on_swap_crossing() {
     // the bolt at (10,10) moves Right — they exchange cells in one frame.
     // Post-move-only comparison tunneled straight through.
     let mut game = WormGame::with_size(120, 38);
+    // v10 pin: the instant swap kill — v11 napalm ignites instead
+    // (test_v11_crossing_swap_ignites_not_kills covers both).
+    game.set_world_version(10);
     game.cycles[0].head = (10, 10);
     game.cycles[0].positions = vec![(10, 10), (11, 10)];
     game.projectiles.push(worm::game::Projectile {
@@ -3672,6 +3675,8 @@ fn v9_board() -> WormGame {
 #[test]
 fn test_v9_bolt_stops_at_four_and_ignites() {
     let mut game = v9_board();
+    // v9 pin: the 4-cell reach — v11 restored the full ray.
+    game.set_world_version(9);
     game.cycles[0].direction = worm::Direction::Right;
     game.cycles[0].held_powerup = Some(worm::game::PowerUpKind::TriShot);
     assert!(game.fire_powerup(0));
@@ -4100,4 +4105,78 @@ fn test_v10_input_queue_contracts() {
         (30, 13),
         "pre-v10 ghosts keep the recorded single-slot semantics"
     );
+}
+
+/* ------------------------------ world v11: napalm reach ------------------------------ */
+
+/// v11: a fired bolt cannot be outrun — 2 cells/frame, full ray — and a
+/// tail-chase connects: fire under the fleeing victim, catch, burn.
+#[test]
+fn test_v11_bolt_catches_a_fleeing_worm() {
+    let mut game = WormGame::with_size(120, 38);
+    game.cpu_autopilot = false;
+    game.food_items.clear();
+    game.cycles[0].head = (20, 20);
+    game.cycles[0].direction = worm::Direction::Right;
+    game.cycles[0].positions = vec![(20, 20), (19, 20)];
+    game.grid[20][20] = worm::CellType::Player;
+    game.grid[20][19] = worm::CellType::Player;
+    // The CPU flees along the same row, 6 ahead — pre-v11 a bolt at worm
+    // speed never gains a cell on it.
+    game.cycles[1].head = (26, 20);
+    game.cycles[1].direction = worm::Direction::Right;
+    game.cycles[1].positions = (0..8).map(|i| (26u16 - i, 20u16)).collect();
+    for i in 0..8 {
+        game.grid[20][(26 - i) as usize] = worm::CellType::CPU;
+    }
+    let before = game.cycles[1].positions.len();
+    game.cycles[0].held_powerup = Some(worm::game::PowerUpKind::TriShot);
+    assert!(game.fire_powerup(0));
+    // Steer the shooter off the row so it never rams the target's trail.
+    game.change_direction(worm::Direction::Down);
+    for _ in 0..80 {
+        if game.game_over {
+            break;
+        }
+        game.update();
+    }
+    assert!(
+        game.cycles[1].positions.len() < before || !game.cycles[1].alive,
+        "the double-speed bolt ran the fleeing worm down and the burn landed"
+    );
+}
+
+/// v11: the crossing swap catches fire instead of instant death — and
+/// the v10 pin keeps the old instant kill for recorded ghosts.
+#[test]
+fn test_v11_crossing_swap_ignites_not_kills() {
+    let run = |version: u8| -> (bool, bool) {
+        let mut game = WormGame::with_size(120, 38);
+        game.set_world_version(version);
+        game.cpu_autopilot = false;
+        game.food_items.clear();
+        game.cycles[0].head = (20, 20);
+        game.cycles[0].direction = worm::Direction::Right;
+        game.cycles[0].positions = vec![(20, 20), (19, 20)];
+        game.grid[20][20] = worm::CellType::Player;
+        game.grid[20][19] = worm::CellType::Player;
+        // Head-on CPU one cell past the bolt spawn: the classic swap.
+        game.cycles[1].head = (22, 20);
+        game.cycles[1].direction = worm::Direction::Left;
+        game.cycles[1].positions = vec![(22, 20), (23, 20), (24, 20)];
+        for x in 22..=24 {
+            game.grid[20][x] = worm::CellType::CPU;
+        }
+        game.cycles[0].held_powerup = Some(worm::game::PowerUpKind::TriShot);
+        assert!(game.fire_powerup(0));
+        game.change_direction(worm::Direction::Down); // shooter clears the row
+        game.update();
+        game.update();
+        (game.cycles[1].alive, !game.flames.is_empty())
+    };
+    let (alive11, fire11) = run(11);
+    assert!(fire11, "v11: the swept contact ignites");
+    assert!(alive11, "v11: no instant swap death — the burn does the work");
+    let (alive10, _) = run(10);
+    assert!(!alive10, "v10 ghosts keep the recorded instant swap kill");
 }
