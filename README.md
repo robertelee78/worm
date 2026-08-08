@@ -1,8 +1,14 @@
-# worm
+# worm — the opponent that earns its intelligence
 
-![worm](web/assets/hero.png)
+![A field naturalist's arena notebook: two neon light-cycle trails, a prediction card stamped before the turn, and an evidence dial that must click from watching to proven before the intercept gates close](docs/media/hero.png)
 
-A snake/Tron-lightcycle hybrid whose opponent is trying to learn *you*.
+**A game that only gets smarter when it can prove it learned you.**
+
+Worm is a snake/Tron duel that studies one specific player across
+rounds — and it may commit harder to an intercept *only after* its
+forecast provably beats a simple rival based on your own habits. No
+mystery difficulty ramp. No flattering accuracy counter. You watch the
+claim form — or fail — in public.
 
 **Play it:** [worm.robertgpt.ai](https://worm.robertgpt.ai) — or
 `cargo run --release` for the terminal build.
@@ -16,6 +22,30 @@ specific human it is playing, gets measurably better at predicting them across
 matches, and can show you the evidence. That claim is easy to make and easy to
 fool yourself about, so much of this repository is the machinery for testing
 whether it is true — including the parts that currently say **no**.
+
+---
+
+## Why distrust a game that says it learns you?
+
+<img src="docs/media/problem.png" width="420" align="right" alt="A worm forced down a corridor while a brass counter proudly reads 95% correct — and the field notebook says: nothing learned">
+
+Most "adaptive" games can congratulate themselves for nothing. Imagine
+a rival that predicts *straight* while you are trapped in a corridor,
+then calls the inevitable move proof that it understands you. That
+number can look excellent even when the board supplied the answer — in
+worm, roughly 95% of frames are routine straight travel.
+
+So worm removes every cheap way its opponent could appear intelligent:
+forecasts are scored only on genuine decisions, published (hash-sealed)
+*before* your input lands, and compared against your own online base
+rate rather than imaginary uniform chance. The refusal that anchors
+everything: **if a random coin-flip player ever looks learnable, the
+evidence harness is leaking the answer — and every other number in
+this repository is void.**
+
+<br clear="right"/>
+
+![The big idea: forced moves and easy agreements fall away; precommitted wins on real choices remain](docs/media/insight.svg)
 
 ---
 
@@ -195,6 +225,8 @@ events.
 
 ## The metric, and why the obvious version is wrong
 
+![Runtime flow: a genuine turn is identified, the precommitted forecast is scored against reality and the base-rate rival, evidence accumulates through scheduled looks, and only a proven read closes the intercept gate](docs/media/flow.svg)
+
 The number a project like this wants to show is "prediction accuracy". Here
 that number is worthless: ~95% of frames the player is continuing straight down
 an open corridor, so accuracy sits at 84–99% forever and cannot move.
@@ -252,6 +284,15 @@ under the exact physics it was played on.
 
 ## Playing it
 
+<img src="docs/media/use-case.png" width="420" align="right" alt="Three altitudes: play the duel, audit the adaptive-system claim, or borrow the evidence discipline as a test harness">
+
+Worm is useful at three altitudes: as a finished game, as a transparent
+adaptive-system study, and as a test harness for claims that are
+usually hand-waved — a rival that remembers *your* tells, with its
+evidence panel open.
+
+<br clear="right"/>
+
 **Terminal**
 
 ```bash
@@ -275,6 +316,12 @@ eviction fate. See [ADR-005](docs/adrs/005-durable-player-identity.md) for why
 that mattered.
 
 ## Development
+
+![Architecture: terminal and browser clients share one Rust game core — WormGame owns world rules and update order, CpuBrain owns learning and evidence, web-state serializes browser telemetry, and a sectioned wire format persists the brain](docs/media/architecture.svg)
+
+For the deep map — bounded contexts, invariants, and the academic
+lineage of every mechanism — see
+[docs/architecture.md](docs/architecture.md).
 
 ```bash
 scripts/eval.sh                                       # THE GAUNTLET — run before every merge

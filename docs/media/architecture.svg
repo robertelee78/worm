@@ -1,0 +1,22 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1000 760" role="img" aria-labelledby="title desc" data-archetype="containment">
+  <title id="title">Worm's implemented architecture</title>
+  <desc id="desc">Terminal and browser clients share one Rust game core. WormGame owns world rules and update order, CpuBrain owns learning and evidence, web state serializes browser telemetry, and a sectioned brain file preserves each player's learning. Tests and probes surround the crate as the falsification layer.</desc>
+  <style>.bg{fill:#132a2e}.shell{fill:#244348;stroke:#8fb0b0;stroke-width:3}.paper{fill:#fffdf4;stroke:#b8ad8e;stroke-width:3}.cyan{fill:#54d3c9}.coral{fill:#ef6a4b}.acid{fill:#d5e83f}.ink{fill:#132a2e}.light{fill:#fffdf4}.muted{fill:#8fb0b0}.label{font:650 29px 'Space Grotesk',sans-serif}.client{font:650 24px 'Space Grotesk',sans-serif}.body{font:500 21px 'IBM Plex Sans',sans-serif}.client-detail{font:500 18px 'IBM Plex Sans',sans-serif}.mono{font:600 18px 'IBM Plex Mono',monospace;letter-spacing:.04em}.pulse{animation:state 8s infinite}@keyframes state{0%,35%{opacity:.72}55%,100%{opacity:1}}@media(prefers-reduced-motion:reduce){.pulse{animation:none}}</style>
+  <rect class="bg" width="1000" height="760" rx="28"/>
+  <text class="mono muted" x="52" y="55">one Rust crate · several truthful surfaces</text>
+  <rect class="paper" x="52" y="88" width="310" height="112" rx="18"/><circle class="cyan" cx="105" cy="144" r="27"/><text class="client ink" x="145" y="139">terminal client</text><text class="client-detail ink" x="145" y="170">keys · render · save</text>
+  <rect class="paper" x="638" y="88" width="310" height="112" rx="18"/><circle class="coral" cx="691" cy="144" r="27"/><text class="client ink" x="731" y="139">browser client</text><text class="client-detail ink" x="731" y="170">canvas · local identity</text>
+  <path d="M207 200v58h191m395-58v58H602" fill="none" stroke="#8fb0b0" stroke-width="5"/>
+  <rect class="shell" x="120" y="245" width="760" height="365" rx="30"/>
+  <text class="mono muted" x="155" y="287">worm crate</text>
+  <rect class="paper" x="158" y="316" width="684" height="246" rx="24"/>
+  <text class="label ink" x="190" y="358">WormGame · world and update order</text>
+  <rect x="190" y="390" width="290" height="130" rx="18" fill="#e8e1c8" stroke="#b8ad8e" stroke-width="3"/><text class="label ink" x="220" y="433">game rules</text><text class="body ink" x="220" y="468">arena · trails · weapons</text><text class="body ink" x="220" y="498">choices · collisions · replay</text>
+  <rect x="520" y="390" width="290" height="130" rx="18" fill="#132a2e"/><text class="label light" x="550" y="433">CpuBrain</text><text class="body muted" x="550" y="468">predictors · evidence</text><text class="body muted" x="550" y="498">decision layers · ledgers</text>
+  <path d="M480 455h40" stroke="#ef6a4b" stroke-width="7"/><path d="M504 443l16 12-16 12" fill="none" stroke="#fffdf4" stroke-width="5"/>
+  <rect class="pulse acid" x="352" y="536" width="296" height="48" rx="14"/><text class="body ink" x="389" y="568">web state · one shared story</text>
+  <path d="M500 610v42" stroke="#8fb0b0" stroke-width="5"/>
+  <rect class="paper" x="240" y="650" width="520" height="74" rx="18"/><text class="label ink" x="278" y="684">sectioned player brain</text><text class="body ink" x="278" y="712">native file · browser database</text>
+  <rect x="52" y="632" width="150" height="92" rx="16" fill="#ef6a4b"/><text class="body ink" x="73" y="671">tests</text><text class="body ink" x="73" y="700">controls</text>
+  <rect x="798" y="632" width="150" height="92" rx="16" fill="#54d3c9"/><text class="body ink" x="821" y="671">probes</text><text class="body ink" x="821" y="700">replays</text>
+</svg>
