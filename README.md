@@ -237,11 +237,12 @@ clank means you truly whiffed), and its fifth wall strike punches a
 hole. The **bomb** is a fifteen-second decoy: indistinguishable from
 food until its final two seconds, when it flashes — softly, then hard —
 and detonates, punching walls. You dodge it by memory: *I planted
-that.* The **tri-shot** is napalm: three bolts fly four cells and drop
-fire wherever they stop — including under whatever they hit — and a
-worm caught in flame burns down on a wall-clock schedule, up to five
-segments in the first second, three in the next, one in the last,
-shedding embers as it shrinks; burned past the head is dead. One law
+that.* The **tri-shot** is napalm: three full-length bolts at double
+speed — a fired bolt cannot be outrun — and anything they touch
+catches fire on contact, dropping burning ground where they stop; a
+worm aflame burns down on a wall-clock schedule, up to five segments
+in the first second, three in the next, one in the last, shedding
+embers as it shrinks; burned past the head is dead. One law
 covers all three: **you are immune to your own discharged weapon** —
 your laser, your blast, your fire. The counterplay to everything else
 is attention.
