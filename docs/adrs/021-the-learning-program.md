@@ -310,3 +310,30 @@ citations), but six implementation contracts did not. All fixed:
 Plus (ordered 6): tactic attempts are EPISODES (one pursuit = one
 attempt, exactly-once closure, tested) and laser fires are recorded at
 the discharge site, not during telegraph charging.
+
+## The between-round ratchet (2026-08-07, owner reframing honored)
+
+The mincut evaluation had been framed against the 35ms live-frame
+budget — a requirement the owner never set. His intent was BETWEEN
+ROUNDS or overnight, where milliseconds are free. Re-evaluated at the
+right cost point, with the ladder run properly this time (planted
+instances verified independently before blaming anything — two of the
+three "failures" in this arc were the probe author's own graphs):
+
+- ruvector-mincut's cut VALUE is correct and cheap at 96 nodes
+  (2.2ms build); its partition/cut_edges — the boundary-NAMING parts —
+  are heuristic and fail clean planted structure (1/95 vs 48/48; its
+  own ALGORITHMS.md discloses this). Verdict: declined for naming,
+  with receipts.
+- `examples/drift_partition.rs` is the ratchet: an exact in-repo
+  Stoer–Wagner (50 lines, validated on the planted instance the crate
+  fails: cut 1, partition 48/48, 1ms) over a CO-MOVEMENT graph of the
+  96 context cells (edges = context neighbors, weights = era-delta
+  agreement from RAW per-era tallies — the decayed-counter
+  differencing bug was reproduced here and in learning_probe's
+  signature and fixed/retired respectively). The exact minimum cut
+  separates the region of situation-space that MOVED from the region
+  that HELD, in 267µs, named in words. First real output on the owner:
+  "gap5 food-right+chased −35%" — he has stopped panic-breaking under
+  pursuit. Wired into the weekly learning audit; the notebook gains it
+  when the drift alarm latches.

@@ -173,10 +173,11 @@ fn main() {
             b.spendable(),
             b.turn_events
         );
-        // The DRIFT SIGNATURE (#5 of the ruvector deep map, counting-
-        // native): WHICH situations changed between eras — hazard-rate
-        // delta per cell, mass-weighted. This is the sentence the drift
-        // alarm will someday hand the notebook.
+        // NOTE (2026-08-07): the first drift-signature here differenced
+        // DECAYED counters — invalid (impossible proportions possible).
+        // The honest per-cell era comparison lives in
+        // examples/drift_partition.rs (raw per-era tallies + exact cut);
+        // this decayed view stays only as a rough in-passing indicator.
         if let Some((t1, n1)) = &era1_hz {
             let mut deltas: Vec<(usize, f32, f32)> = (0..worm::cpu_ai::HAZARD_CELLS)
                 .filter(|&i| n1[i] >= 5.0 && b.hz_total[i] - n1[i] >= 5.0)

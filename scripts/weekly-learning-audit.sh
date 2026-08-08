@@ -11,4 +11,5 @@ mkdir -p .harness
   CORPUS=data/players/9d8e3a7d8d202fdd.json
   cargo run --release --example sona_probe -- "$CORPUS" 2>/dev/null | tail -8
   cargo run --release --example learning_probe -- "$CORPUS" 2>/dev/null | grep -E "era |KATA-2|thinness" -A2 | head -20
+  cargo run --release --example drift_partition -- "$CORPUS" 2>/dev/null | head -12
 } >> "$OUT" 2>&1
