@@ -5686,11 +5686,14 @@ pub fn should_fire(game: &mut WormGame, who: usize) -> bool {
             // trail sever), every opponent cell on a ray is a target — a shot
             // across their body is a sever even when their head is elsewhere.
             let (dx, dy) = game.cycles[who].direction.as_delta();
-            // World v9 NAPALM: bolts fly only 4 cells — an unlimited ray
-            // would fire at targets the fire can never reach (codex v6
-            // reject list). The napalm still pays past 4 via the burn
-            // patch, but the aim gate is the bolt's actual reach.
-            let max_reach: i16 = if game.arena_version >= 9 { 4 } else { i16::MAX };
+            // The aim gate is the bolt's ACTUAL reach per world version:
+            // v9/v10 napalm flew 4 cells; v11 restored the full ray at
+            // double speed (owner: "maybe they need to go further").
+            let max_reach: i16 = if game.arena_version == 9 || game.arena_version == 10 {
+                4
+            } else {
+                i16::MAX
+            };
             let on_a_ray = |px: u16, py: u16| -> bool {
                 let fdx = px as i16 - hx as i16;
                 let fdy = py as i16 - hy as i16;
@@ -7759,16 +7762,20 @@ mod tests {
             !should_fire(&mut game, 1),
             "bolts travel forward — a target behind the head is unhittable"
         );
-        game.cycles[0].head = (33, 20); // in front, within napalm reach
+        game.cycles[0].head = (33, 20); // in front, within any reach
         assert!(should_fire(&mut game, 1));
-        // World v9: a target past the 4-cell bolt reach is not a shot —
-        // firing at it would drop fire the target never touches.
+        // v9/v10: a target past the 4-cell bolt reach is not a shot.
         game.cycles[0].head = (36, 20);
+        game.set_world_version(9);
         assert!(
             !should_fire(&mut game, 1),
-            "the aim gate is the bolt's actual reach under napalm"
+            "the aim gate matched the 4-cell reach at v9/v10"
         );
-        // Pre-v9 physics keep the unlimited ray.
+        game.set_world_version(10);
+        assert!(!should_fire(&mut game, 1), "v10 kept the 4-cell gate");
+        // v11 restored the full ray (and pre-v9 always had it).
+        game.set_world_version(11);
+        assert!(should_fire(&mut game, 1));
         game.set_world_version(8);
         assert!(should_fire(&mut game, 1));
     }
