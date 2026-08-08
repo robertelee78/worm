@@ -270,6 +270,22 @@ impl LightCycle {
 /// interior shrinks a cell per side. The owner's decoy-bomb and napalm
 /// specs are later versions: one physics change per version, each with
 /// its own replay pinning and benchmark receipts.
+/// v8 (owner spec; ADR-022): THE TIMED DECOY. A planted bomb is a food
+/// decoy for ~15 wall-clock seconds, then DETONATES — punching arena
+/// walls like any other blast — instead of fizzling. The last two
+/// seconds FLASH (tier 1), the last one flashes harder (tier 2), so the
+/// timer kill is telegraphed: an attentive player gets two full seconds
+/// of visible warning, and the CPU reads the same fuse age the flash
+/// shows (information parity, no pre-flash reveal anywhere). Under v8
+/// `Bomb::fuse` counts MILLISECONDS, drained by the current frame
+/// delay each global frame — true wall-clock, deterministic, and a
+/// slipstream freeze cannot disarm a mine (bombs tick globally). The
+/// blast is OWNER-SAFE, trail included — ADR-023's firer-immunity rule
+/// applied to bombs (measured: the first expiry wave was severing the
+/// planting CPU to scrap through its own forgotten mines). Sudden
+/// death also starts closing one
+/// ring INSIDE the v6 arena wall (base 3) instead of the pre-v6 base 2
+/// it had kept out of replay caution.
 /// v7 (ADR-023, unanimous consult): LASER SIMULTANEITY — the beam
 /// exists across the one-cell movement transition. It is evaluated at
 /// discharge (unchanged: bombs, head kill, sever, breach — the aim the
@@ -285,7 +301,7 @@ impl LightCycle {
 /// of the v3 bolt-ordering fix. Same-frame deaths are atomic (both
 /// dead = draw); the firer is immune to their own beam; a frozen worm
 /// enters nothing but remains hittable at discharge.
-pub const ARENA_VERSION: u8 = 7;
+pub const ARENA_VERSION: u8 = 8;
 
 /// A beam discharged this frame, awaiting its post-move occupancy test
 /// (ADR-023 world v7). The cells are IMMUTABLE — snapshotted once at
@@ -905,6 +921,28 @@ impl WormGame {
             }
         }
         grid
+    }
+
+    /// THE WORLD-RULES VIEW (ADR-022): named readings of the one
+    /// serialized version byte, replacing scattered `arena_version >= N`
+    /// comparisons. A view, never independent flags.
+    /// How many lanes wide the outer corridor is.
+    pub fn corridor_lanes(&self) -> u16 {
+        if self.arena_version >= 6 { 2 } else { 1 }
+    }
+
+    /// What a bomb does when its fuse runs out.
+    /// `true` = detonate (v8 timed decoy); `false` = fizzle.
+    pub fn bomb_expiry_detonates(&self) -> bool {
+        self.arena_version >= 8
+    }
+
+    /// The ring offset sudden death closes FROM (exclusive): the first
+    /// ring to seal is base+1. Pre-v8 kept the pre-corridor base 2 for
+    /// replay identity even though the v6 wall moved to ring 3 — which
+    /// made the first "closure" the arena wall itself; v8 corrects it.
+    pub fn sudden_death_base(&self) -> u16 {
+        if self.arena_version >= 8 { 3 } else { 2 }
     }
 
     /// Whether this terminal is big enough for an outer corridor around the arena wall.
@@ -2276,7 +2314,8 @@ impl WormGame {
             let target = ((elapsed / SUDDEN_DEATH_INTERVAL) as u16).min(max_level);
             while self.shrink_level < target && !self.game_over {
                 self.shrink_level += 1;
-                self.close_ring(2 + self.shrink_level);
+                let base = self.sudden_death_base();
+                self.close_ring(base + self.shrink_level);
             }
             if self.game_over {
                 return false;
@@ -2284,7 +2323,7 @@ impl WormGame {
             if self.shrink_level < max_level {
                 let next_in = SUDDEN_DEATH_INTERVAL - (elapsed % SUDDEN_DEATH_INTERVAL);
                 if next_in <= 30 && self.time.is_multiple_of(3) {
-                    self.ring_ember_particles(2 + self.shrink_level + 1);
+                    self.ring_ember_particles(self.sudden_death_base() + self.shrink_level + 1);
                 }
             }
         }
@@ -2323,7 +2362,7 @@ impl WormGame {
         }
         let max_level = self.sudden_death_max_level();
         for level in (self.shrink_level + 1)..=max_level {
-            let off = 2 + level;
+            let off = self.sudden_death_base() + level;
             // Mirrors close_ring's own bail-out, so we never promise a seal it
             // will decline to perform.
             if self.width <= 2 * off + 4 || self.height <= 2 * off + 4 {
@@ -2939,10 +2978,16 @@ impl WormGame {
                 // seeded streams diverge from pre-mine builds — deliberate.
                 let disguise = self.rng_range(1..10) as u8;
 
+                // World v8: ~15 wall-clock seconds of decoy, in ms.
+                let fuse = if self.arena_version >= 8 {
+                    15_000
+                } else {
+                    BOMB_FUSE_FRAMES
+                };
                 self.bombs.push(Bomb {
                     x: hx,
                     y: hy,
-                    fuse: BOMB_FUSE_FRAMES,
+                    fuse,
                     armed_in: MINE_ARM_FRAMES,
                     disguise,
                     owner: who as u8,
@@ -3042,6 +3087,22 @@ impl WormGame {
             }
         }
         BeamPath { cells, breach, stop }
+    }
+
+    /// The decoy's telegraph (world v8): 0 = calm, 1 = flashing (final
+    /// ~2s), 2 = flashing hard (final ~1s). Fuse is milliseconds under
+    /// v8, so the tiers are exact wall-clock — no speed dependence.
+    pub fn bomb_flash_tier(&self, b: &Bomb) -> u8 {
+        if self.arena_version < 8 || b.tripped {
+            return 0;
+        }
+        if b.fuse <= 1000 {
+            2
+        } else if b.fuse <= 2000 {
+            1
+        } else {
+            0
+        }
     }
 
     /// ADR-023: one beam-render tick — fresh beams keep their solid
@@ -3345,15 +3406,31 @@ impl WormGame {
     }
 
     pub fn tick_bombs(&mut self) {
+        // World v8: the fuse counts MILLISECONDS, drained by the current
+        // frame delay — wall-clock at any speed, and a freeze disarms
+        // nothing (bombs tick on the global frame, not per-worm frames).
+        let tick_ms = if self.arena_version >= 8 {
+            (self.frame_delay().as_millis() as u32).max(1)
+        } else {
+            1
+        };
         for b in &mut self.bombs {
             b.armed_in = b.armed_in.saturating_sub(1);
-            b.fuse = b.fuse.saturating_sub(1);
+            b.fuse = b.fuse.saturating_sub(tick_ms);
         }
-        // A fuse that runs out FIZZLES. The fuse's only job is to stop stale
-        // mines accumulating over a long round (see the field doc) — it must
-        // never be a weapon: an attentive player can track every plant they
-        // saw, but nobody can track an invisible timer. A tripped mine keeps
-        // its fuse==0 for the drain below and is exempt here.
+        // Pre-v8: a fuse that runs out FIZZLES — its only job was to stop
+        // stale mines accumulating, and an INVISIBLE timer must never be a
+        // weapon. World v8 supplies the missing ingredient: the last two
+        // seconds FLASH (bomb_flash_tier), so the timer detonation is
+        // telegraphed and becomes fair. A tripped mine keeps its fuse==0
+        // for the drain below and is exempt from both.
+        if self.bomb_expiry_detonates() {
+            for b in &mut self.bombs {
+                if b.fuse == 0 {
+                    b.tripped = true;
+                }
+            }
+        }
         let mut fizzled: Vec<(u16, u16)> = Vec::new();
         self.bombs.retain(|b| {
             let expired = b.fuse == 0 && !b.tripped;
@@ -3437,12 +3514,35 @@ impl WormGame {
                 }
                 let (ux, uy) = (xx as u16, yy as u16);
                 match self.grid[uy as usize][ux as usize] {
-                    CellType::Player | CellType::CPU => {
+                    cell @ (CellType::Player | CellType::CPU) => {
+                        // World v8 (ADR-022, decided with the decoy): a blast
+                        // is OWNER-SAFE, trail included — the ADR-023 rule
+                        // ("the firer is immune to their own discharged
+                        // weapon, head and body") applied to bombs. The head
+                        // was always excluded; pre-v8 the trail sever stayed
+                        // for replay identity. Measured on the warm arms: a
+                        // 15s decoy outlives the planner's own wall-follow
+                        // lap, and expiry blasts were severing the planting
+                        // CPU to len-1 scrap (four deaths in one arm at the
+                        // first expiry wave, frame ~192).
+                        let owner_marker = if owner == 0 {
+                            CellType::Player
+                        } else {
+                            CellType::CPU
+                        };
+                        let owner_safe =
+                            self.arena_version >= 8 && cell == owner_marker;
                         // A living head marker survives the sweep — head fates
                         // are decided by the radius check below, and erasing a
                         // survivor's marker would let the opponent drive onto
-                        // an occupied head cell without a collision.
-                        if !self.cycles.iter().any(|c| c.alive && c.head == (ux, uy)) {
+                        // an occupied head cell without a collision. NOTE the
+                        // owner-safety must not `continue` the CELL loop: the
+                        // chain check below runs for every swept cell, and a
+                        // bomb sitting on the owner's own trail still chains
+                        // (codex v8 verify, blocking).
+                        if !owner_safe
+                            && !self.cycles.iter().any(|c| c.alive && c.head == (ux, uy))
+                        {
                             self.grid[uy as usize][ux as usize] = CellType::Empty;
                             cleared.push((ux, uy));
                         }

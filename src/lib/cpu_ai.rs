@@ -1287,7 +1287,9 @@ impl ReadRate {
     }
 
     /// The lateral channel's z against chance (exact per-frame variance).
-    fn lateral_z(&self) -> f32 {
+    /// Public for receipts (ADR-022): raw channel strength distinguishes
+    /// a missed geometric look from genuinely absent evidence.
+    pub fn lateral_z(&self) -> f32 {
         if self.lat_var <= 0.0 {
             return 0.0;
         }
@@ -4527,10 +4529,23 @@ fn cell_threatened_by_bomb(game: &WormGame, x: u16, y: u16, frames_ahead: u8) ->
     let trigger = crate::game::MINE_TRIGGER_CELLS as i32;
     for b in &game.bombs {
         // Our own mines cannot kill our HEAD — detonate() excludes the
-        // owner — so they are harmless to us and dodging them would be
-        // wasted caution. (The v7 timed decoy revisits this: an expiring
-        // blast severs the owner's trail; see ADR-022.)
+        // owner — so pre-v8 they are harmless to us and dodging them
+        // would be wasted caution. World v8 changed the ledger: an
+        // expiring decoy DETONATES and the blast severs the owner's
+        // TRAIL even though it spares the head. Own plants are therefore
+        // hazards for their WHOLE armed life — self-knowledge, the same
+        // "I planted that" memory rule the doze wake encodes (a human
+        // routes around their own bomb from the moment they drop it, not
+        // just when it starts flashing; flash-gating is a parity rule
+        // for ENEMY mines, and measured on the warm arms the flash-only
+        // version left the CPU laying 13 wall-clock seconds of trail
+        // through its own future blast cross: warm 79% vs cold 86%,
+        // non-inferiority broken by its own exploration plants).
         if b.owner == 1 {
+            // With v8 blasts owner-safe (trail included, ADR-023 rule),
+            // an own mine is pure infrastructure again — no dodge at any
+            // fuse age. (A full-life threat was measured worse: it bent
+            // early-game routes for zero physical risk.)
             continue;
         }
         let cheb = (x as i32 - b.x as i32)
@@ -7511,19 +7526,41 @@ mod tests {
     }
 
     /// Our own mines cannot kill us, so dodging them was the AI avoiding
-    /// blasts that were physically harmless to it.
+    /// blasts that were physically harmless to it. CALM decoys stay
+    /// harmless under v8 too — the threat begins with the flash window.
     #[test]
     fn our_own_mine_is_never_a_threat() {
         let mut game = WormGame::with_size(120, 38);
         game.bombs.push(crate::game::Bomb {
             x: 60,
             y: 20,
-            fuse: 1,
+            fuse: 15_000, // calm: far outside the v8 flash window
             armed_in: 0,
             disguise: 5,
             owner: 1,
             tripped: false,
         });
+        assert!(!cell_threatened_by_bomb(&game, 60, 20, 0));
+    }
+
+    /// World v8 blasts are OWNER-SAFE, trail included (the ADR-023 rule
+    /// applied to bombs) — so an own mine is pure infrastructure at ANY
+    /// fuse age, flashing included. A full-life threat was measured
+    /// worse: it bent early routes for zero physical risk.
+    #[test]
+    fn own_mine_is_no_threat_even_while_flashing() {
+        let mut game = WormGame::with_size(120, 38);
+        game.bombs.push(crate::game::Bomb {
+            x: 60,
+            y: 20,
+            fuse: 1_500, // tier 1: flashing
+            armed_in: 0,
+            disguise: 5,
+            owner: 1,
+            tripped: false,
+        });
+        assert!(!cell_threatened_by_bomb(&game, 60, 20, 0));
+        game.set_world_version(7);
         assert!(!cell_threatened_by_bomb(&game, 60, 20, 0));
     }
 
@@ -7991,7 +8028,7 @@ mod tests {
         game.bombs.push(crate::game::Bomb {
             x: hx,
             y: hy,
-            fuse: 1,
+            fuse: 15_000, // calm decoy — v8's threat starts at the flash
             disguise: 5,
             armed_in: 0,
             owner: 1,

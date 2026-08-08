@@ -1522,13 +1522,14 @@ fn rewrite_cpu_episode_dim(bytes: &[u8], new_dim: u16) -> Vec<u8> {
 #[test]
 fn test_ring_seal_eta_reports_the_scheduled_ring() {
     let game = WormGame::with_size(120, 38);
-    // Level 1 seals the ring at offset 3, at START + 1*INTERVAL.
+    // World v8: sudden death starts one ring INSIDE the v6 arena wall —
+    // level 1 seals the ring at offset 4, at START + 1*INTERVAL.
     let seals_at = worm::game::SUDDEN_DEATH_START + worm::game::SUDDEN_DEATH_INTERVAL;
 
-    assert_eq!(game.ring_seal_eta(3, 20), Some(seals_at - game.time));
-    assert_eq!(game.ring_seal_eta(20, 3), Some(seals_at - game.time));
+    assert_eq!(game.ring_seal_eta(4, 20), Some(seals_at - game.time));
+    assert_eq!(game.ring_seal_eta(20, 4), Some(seals_at - game.time));
     assert_eq!(
-        game.ring_seal_eta(116, 20),
+        game.ring_seal_eta(115, 20),
         Some(seals_at - game.time),
         "the far edge of the ring is on it too"
     );
@@ -1542,24 +1543,25 @@ fn test_ring_seal_eta_reports_the_scheduled_ring() {
 #[test]
 fn test_cpu_steps_off_a_ring_that_is_about_to_seal() {
     let mut game = WormGame::with_size(120, 38);
-    // Two frames before the offset-3 ring seals.
+    // Two frames before the first ring seals (offset 4 under v8 —
+    // one ring inside the v6 arena wall).
     game.time = worm::game::SUDDEN_DEATH_START + worm::game::SUDDEN_DEATH_INTERVAL - 2;
 
     // Stand the CPU on that ring, travelling along it — the wall-follow
     // behaviour that used to kill it.
-    game.cycles[1].head = (3, 20);
-    game.cycles[1].positions = vec![(3, 20)];
+    game.cycles[1].head = (4, 20);
+    game.cycles[1].positions = vec![(4, 20)];
     game.cycles[1].direction = worm::Direction::Down;
-    game.grid[20][3] = worm::CellType::CPU;
+    game.grid[20][4] = worm::CellType::CPU;
 
     assert!(
-        game.ring_seal_eta(3, 20).is_some_and(|e| e <= 3),
+        game.ring_seal_eta(4, 20).is_some_and(|e| e <= 3),
         "precondition: the CPU is standing on a ring about to seal"
     );
 
     let chosen = worm::cpu_decide(&mut game);
     let (dx, dy) = chosen.as_delta();
-    let nx = (3i16 + dx) as u16;
+    let nx = (4i16 + dx) as u16;
     let ny = (20i16 + dy) as u16;
 
     assert!(
@@ -2068,7 +2070,10 @@ fn test_intent_twins_disagree_only_on_ties() {
 /// killed by bomb blasts that didn't actually happen".
 #[test]
 fn test_expired_mine_fizzles_instead_of_detonating() {
+    // Pre-v8 physics pin: recorded ghosts keep the fizzle (an invisible
+    // timer must never be a weapon — before the flash telegraph existed).
     let mut game = mine_board();
+    game.set_world_version(7);
     // Player parked ON the blast axis, well outside the trigger ring but
     // deep inside where the old cross arms reached.
     game.cycles[0].head = (66, 20);
@@ -2096,6 +2101,78 @@ fn test_expired_mine_fizzles_instead_of_detonating() {
         game.grid[20][62],
         worm::CellType::Hole,
         "no blast: a fizzle must not punch walls or clear cells"
+    );
+}
+
+/// World v8 (ADR-022): the decoy's fuse IS the weapon now — telegraphed.
+/// Expiry detonates, the blast punches the arena wall, and the last two
+/// wall-clock seconds flash (tier 1 then tier 2).
+#[test]
+fn test_v8_decoy_expiry_detonates_with_telegraph() {
+    let mut game = mine_board();
+    assert!(game.bomb_expiry_detonates(), "v8 board");
+    game.cycles[0].head = (66, 20);
+    game.cycles[0].positions = vec![(66, 20)];
+    game.grid[20][66] = worm::CellType::Player;
+    game.bombs.push(worm::game::Bomb {
+        x: 60,
+        y: 20,
+        fuse: 2500, // ms — calm, then tier 1 at <=2000, tier 2 at <=1000
+        disguise: 5,
+        armed_in: 0,
+        owner: 1,
+        tripped: false,
+    });
+    assert_eq!(game.bomb_flash_tier(&game.bombs[0]), 0, "still a calm decoy");
+    // Drain wall-clock: tiers must appear in order before the blast.
+    let mut seen = [false; 3];
+    for _ in 0..1000 {
+        if game.bombs.is_empty() {
+            break;
+        }
+        seen[game.bomb_flash_tier(&game.bombs[0]) as usize] = true;
+        game.tick_bombs();
+    }
+    assert!(seen[1] && seen[2], "both flash tiers telegraph the detonation");
+    assert!(game.bombs.is_empty(), "the expiry detonated (tripped drain)");
+    assert!(
+        !game.cycles[0].alive,
+        "the on-axis player inside the cross arms dies to the expiry blast"
+    );
+    assert_eq!(game.death_cause, Some(worm::DeathCause::BombBlast));
+}
+
+/// World v8: the fuse is WALL-CLOCK — the same real time at any game
+/// speed, and a slipstream freeze cannot disarm it (global-frame drain).
+#[test]
+fn test_v8_decoy_fuse_is_wall_clock() {
+    // Slow game (no food): frame_delay ~115ms. Fast game: force the
+    // speed floor by crediting food. Same 15s decoy either way.
+    let mut slow = mine_board();
+    let mut fast = mine_board();
+    fast.food_eaten_total = 160; // speedup cap -> 35ms floor
+    for g in [&mut slow, &mut fast] {
+        // Far from both heads: proximity must not enter this test.
+        g.bombs.push(worm::game::Bomb {
+            x: 100, y: 30, fuse: 15_000, disguise: 3, armed_in: 0, owner: 1, tripped: false,
+        });
+    }
+    let mut slow_frames = 0u32;
+    while !slow.bombs.is_empty() {
+        slow.tick_bombs();
+        slow_frames += 1;
+    }
+    let mut fast_frames = 0u32;
+    while !fast.bombs.is_empty() {
+        fast.tick_bombs();
+        fast_frames += 1;
+    }
+    // Frames differ by the speed ratio; wall-clock is identical by
+    // construction (ms drained per frame == that frame's delay).
+    assert!(
+        fast_frames > slow_frames * 2,
+        "the fast game needs proportionally more frames for the same 15s \
+         (slow {slow_frames}, fast {fast_frames})"
     );
 }
 
@@ -3456,4 +3533,85 @@ fn test_v7_killing_beam_cools_after_game_over() {
         game.update();
     }
     assert!(game.beam_fx.is_empty(), "embers burn out; the layer empties");
+}
+
+/// codex v8 verify (blocking): a bomb sitting ON the owner's own trail
+/// still chain-detonates — owner-safety spares the trail cell, never
+/// the chain check.
+#[test]
+fn test_v8_bomb_on_owner_trail_still_chains() {
+    let mut game = v7_beam_board(); // fresh empty board at v8? board pins 7
+    game.set_world_version(8);
+    // CPU trail through (50,20); its own second mine sits on that cell.
+    game.cycles[1].head = (55, 20);
+    game.cycles[1].direction = worm::Direction::Right;
+    game.cycles[1].positions = (48..=55).rev().map(|x| (x as u16, 20u16)).collect();
+    for x in 48..=55 {
+        game.grid[20][x] = worm::CellType::CPU;
+    }
+    game.bombs.push(worm::game::Bomb {
+        x: 50, y: 20, fuse: 9_000, disguise: 3, armed_in: 0, owner: 1, tripped: false,
+    });
+    // A first mine at (46,20) tripped by the player's proximity: its
+    // blast cross covers (50,20).
+    game.bombs.push(worm::game::Bomb {
+        x: 46, y: 20, fuse: 9_000, disguise: 3, armed_in: 0, owner: 1, tripped: false,
+    });
+    game.cycles[0].head = (47, 20);
+    game.cycles[0].positions = vec![(47, 20)];
+    game.grid[20][47] = worm::CellType::Player;
+    game.tick_bombs();
+    assert!(
+        game.bombs.is_empty(),
+        "BOTH mines detonated — the chain reached the bomb sitting on the \
+         owner's trail (without the fix it survives the sweep untripped)"
+    );
+    // And the owner's trail cell survived the sweep (owner-safe).
+    assert_eq!(game.grid[20][50], worm::CellType::CPU);
+}
+
+/// codex v8 verify (blocking): sudden death actually closes ring 4
+/// first under v8 — asserted against a cell that is NOT already wall —
+/// and v7 replays keep the old base-2 schedule.
+#[test]
+fn test_v8_first_closure_is_ring_four_and_v7_keeps_ring_three() {
+    let mut game = WormGame::with_size(120, 38);
+    assert_eq!(game.sudden_death_base(), 3);
+    game.time = worm::game::SUDDEN_DEATH_START + worm::game::SUDDEN_DEATH_INTERVAL;
+    assert_eq!(game.grid[4][10], worm::CellType::Empty, "ring-4 lane open pre-close");
+    game.update();
+    assert_eq!(
+        game.grid[4][10],
+        worm::CellType::Wall,
+        "v8 level 1 seals offset 4 — one ring INSIDE the arena wall"
+    );
+    // v7 pin: the same schedule step seals offset 3 (the arena wall line),
+    // leaving ring 4 open.
+    let mut old = WormGame::with_size(120, 38);
+    old.set_world_version(7);
+    old.time = worm::game::SUDDEN_DEATH_START + worm::game::SUDDEN_DEATH_INTERVAL;
+    old.update();
+    assert_eq!(
+        old.grid[4][10],
+        worm::CellType::Empty,
+        "v7 replays keep the recorded base-2 schedule (ring 4 stays open)"
+    );
+}
+
+/// codex v8 verify: the flash channel on the wire — calm decoys ship
+/// ONLY inside the food list; flashing ones appear in bombFlash.
+#[test]
+fn test_v8_flash_wire_calm_absent_flashing_present() {
+    let mut game = WormGame::with_size(60, 30);
+    game.bombs.push(worm::game::Bomb {
+        x: 30, y: 15, fuse: 9_000, disguise: 4, armed_in: 0, owner: 1, tripped: false,
+    });
+    let s = worm::web_state::to_json(&game);
+    assert!(!s.contains("bombFlash\":[[30,15"), "calm decoy leaks nothing: {s:.0?}");
+    game.bombs[0].fuse = 1_500;
+    let s = worm::web_state::to_json(&game);
+    assert!(s.contains("\"bombFlash\":[[30,15,1]]"), "tier 1 appears on the wire");
+    game.bombs[0].fuse = 900;
+    let s = worm::web_state::to_json(&game);
+    assert!(s.contains("\"bombFlash\":[[30,15,2]]"), "tier 2 appears on the wire");
 }
