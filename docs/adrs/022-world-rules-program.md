@@ -1,13 +1,20 @@
 # ADR-022: The World-Rules Program — Two-Lane Corridor, Timed Decoy, Napalm
 
 ## Status
-Accepted — v6 (corridor) in execution; v7 (decoy) and v8 (napalm)
-design-gated on the interaction matrix below and the owner decisions
-marked OPEN. Supersedes nothing; extends the ARENA_VERSION discipline
-that v2–v5 established.
+v6 (corridor) Implemented and LIVE — verified SOUND by both consultants
+(codex round 2; kimi-k3 round 2), merged as 72906d8, wasm rebuilt with
+`--features wasm` (the first build shipped a 366-byte stub; the browser
+probe caught it). v7 (decoy) and v8 (napalm) remain design-gated on the
+interaction matrix below and the owner decisions marked OPEN.
+Supersedes nothing; extends the ARENA_VERSION discipline v2–v5
+established.
 
 ## Date
 2026-08-07
+
+## Updated
+2026-08-07 — v6 landed live; verification-round findings and their
+fixes folded into Receipts.
 
 ## Context
 
