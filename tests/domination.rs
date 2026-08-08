@@ -124,6 +124,19 @@ fn play(games: u32, seed: u64, warm: bool) -> (Record, f32) {
 /// family-earned peak (codex v6 Q2: report family evidence, not only the
 /// published record).
 fn play_v(games: u32, seed: u64, warm: bool, version: u8) -> ((Record, f32), worm::FunnelStats, f32) {
+    let (a, b, c, _) = play_vz(games, seed, warm, version);
+    (a, b, c)
+}
+
+/// play_v plus the lateral channel's raw receipts: (z, lat_samples,
+/// latched) — the quantity that distinguishes "strength present, look
+/// missed" from "evidence genuinely gone" (ADR-022 receipts rule).
+fn play_vz(
+    games: u32,
+    seed: u64,
+    warm: bool,
+    version: u8,
+) -> ((Record, f32), worm::FunnelStats, f32, (f32, u32, bool)) {
     let mut rec = Record::default();
     let mut game = WormGame::with_size_seed(120, 38, seed);
     game.set_world_version(version);
@@ -158,7 +171,7 @@ fn play_v(games: u32, seed: u64, warm: bool, version: u8) -> ((Record, f32), wor
                 rec.player += 1;
                 if warm { print!("    [WARM] "); }
                 println!(
-                    "    [cpu death] game {} frame {} cause {:?} reason {:?} len {} read {:.2} style x{:.1}",
+                    "    [cpu death] game {} frame {} cause {:?} reason {:?} len {} read {:.2} style x{:.1} at {:?} holes {}",
                     g,
                     game.frame_count,
                     game.death_cause,
@@ -166,7 +179,12 @@ fn play_v(games: u32, seed: u64, warm: bool, version: u8) -> ((Record, f32), wor
                     game.cycles[1].positions.len(),
                     game.read_rate,
                     worm::cpu_ai::PORTFOLIO_STYLES[game.cpu_brain.portfolio.active],
-                );
+                    game.cycles[1].head,
+                    game
+                        .grid
+                        .iter()
+                        .map(|r| r.iter().filter(|&&c| c == worm::CellType::Hole).count())
+                        .sum::<usize>());
             }
             _ => {
                 rec.draw += 1;
@@ -193,7 +211,9 @@ fn play_v(games: u32, seed: u64, warm: bool, version: u8) -> ((Record, f32), wor
         // gate at ANY round end, so the peak stays falsifiable.
         lift = lift.max(game.cpu_brain.lifetime_read.earned_read());
     }
-    ((rec, lift), game.funnel, game.cpu_brain.family_earned_read())
+    let lr = &game.cpu_brain.lifetime_read;
+    let zrec = (lr.lateral_z(), lr.lat_samples, lr.lat_latched);
+    ((rec, lift), game.funnel, game.cpu_brain.family_earned_read(), zrec)
 }
 
 /// THE PRODUCT TEST.
@@ -203,13 +223,20 @@ fn play_v(games: u32, seed: u64, warm: bool, version: u8) -> ((Record, f32), wor
 /// numbers look in isolation.
 #[test]
 fn learning_converts_into_winning() {
-    // Two independent 30-game arms per side: a single arm is chaotically
-    // sensitive (one small behavior change reshuffles every subsequent
-    // round), and +-3 games of pure noise would dwarf the invariant being
-    // asserted.
+    // Paired arms per seed: a single arm is chaotically sensitive (one
+    // small behavior change reshuffles every subsequent round), and +-3
+    // games of pure noise would dwarf the invariant being asserted.
     // Three paired seeds (codex: increase seeds when the result sits near
     // the margin — at two seeds the gap measured within one game of it).
-    let games = 30;
+    // 90 games/arm (ADR-022 re-baseline, receipted at world v8): the
+    // discrete geometric looks are chaos-amplified by ANY physics change
+    // — under v8 the same seeds show z growing monotonically (e.g.
+    // 987654: 3.05 -> 4.05 -> 4.80 at n 52/88/136) but the boundary
+    // crossing lands beyond 60 games; at 90 all three seeds latch
+    // (0.51/0.38/0.38). Strength present, look late: supply-side arm
+    // length, not a learner change — the same class as the habitual
+    // arm's 60 -> 90 at v6 (funnel + z receipts in warm_arm_receipt).
+    let games = 90;
     let seeds = [20260805u64, 31337, 987_654];
     let mut cold = Record { cpu: 0, player: 0, draw: 0 };
     let mut warm = Record { cpu: 0, player: 0, draw: 0 };
@@ -318,18 +345,20 @@ fn a_learned_habitual_player_is_dominated() {
 #[ignore]
 fn warm_arm_receipt() {
     for seed in [20260805u64, 31337, 987654] {
-        for version in [5u8, 6u8] {
-            let ((rec, lift), f, fam) = play_v(30, seed, true, version);
+        for version in [7u8, 8u8] {
+            let ((rec, lift), f, fam, (z, n, latched)) = play_vz(30, seed, true, version);
             println!(
-                "warm30 seed {} v{}: cpu {} p {} d {}  lift {:.2} family {:.2} lat_supply {}",
-                seed, version, rec.cpu, rec.player, rec.draw, lift, fam, f.lat_supply
+                "warm30 seed {} v{}: cpu {} p {} d {}  lift {:.2} family {:.2} lat_supply {} z {:.2} n {} latched {}",
+                seed, version, rec.cpu, rec.player, rec.draw, lift, fam, f.lat_supply, z, n, latched
             );
         }
-        let ((rec, lift), f, fam) = play_v(60, seed, true, 6);
-        println!(
-            "warm60 seed {} v6: cpu {} p {} d {}  lift {:.2} family {:.2} lat_supply {}",
-            seed, rec.cpu, rec.player, rec.draw, lift, fam, f.lat_supply
-        );
+        for (games, ver) in [(90u32, 7u8), (60, 8), (90, 8)] {
+            let ((rec, lift), f, fam, (z, n, latched)) = play_vz(games, seed, true, ver);
+            println!(
+                "warm{} seed {} v{}: cpu {} p {} d {}  lift {:.2} family {:.2} lat_supply {} z {:.2} n {} latched {}",
+                games, seed, ver, rec.cpu, rec.player, rec.draw, lift, fam, f.lat_supply, z, n, latched
+            );
+        }
     }
 }
 

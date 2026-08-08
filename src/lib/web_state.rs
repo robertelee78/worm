@@ -53,6 +53,11 @@ struct GameState {
     powerups: Vec<(u16, u16, u8)>,
     bolts: Vec<(u16, u16, i16, i16)>,
     bombs: Vec<(u16, u16, u32)>,
+    /// World v8 telegraph: flashing decoys only — (x, y, tier). A bomb
+    /// below tier 1 stays inside the food list (the disguise); this
+    /// channel EXISTS only once the flash would reveal it anyway, so
+    /// the browser cannot leak a pre-flash danger zone (ADR-022).
+    bomb_flash: Vec<(u16, u16, u8)>,
     particles: Vec<(f32, f32, u8, u8, u8, u32)>,
     /// ADR-023 beam render layer: (cells, age). Age 0 = lethal core,
     /// 1-5 dimming afterimage, 6-20 embers. The cells are the SIM's own
@@ -410,6 +415,14 @@ impl GameState {
             // overlay would paint a target on every one of them. The field is
             // kept rather than removed so the wire shape stays stable.
             bombs: Vec::new(),
+            bomb_flash: game
+                .bombs
+                .iter()
+                .filter_map(|b| {
+                    let t = game.bomb_flash_tier(b);
+                    (t > 0).then_some((b.x, b.y, t))
+                })
+                .collect(),
             beams: game
                 .beam_fx
                 .iter()

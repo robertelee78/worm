@@ -4,14 +4,14 @@
 // The ?v= must match BUILD below (and index.html's) — an unversioned glue
 // import could pair a cached old worm.js with a fresh wasm on the next
 // rebuild that changes the bindings.
-import init, { WasmGame } from './pkg/worm.js?v=24';
+import init, { WasmGame } from './pkg/worm.js?v=25';
 import { Sfx } from './audio.js';
 import { computeBoardLayout, VIEWPORT_BLOCK_GUTTER } from './layout.js';
 
 let CELL = 14; // recomputed by applyBoardLayout() to fit the measured stage
 // Bump together with the ?v= in index.html whenever the wasm bundle is
 // rebuilt — it keys the cache-busting query on the .wasm fetch.
-const BUILD = 24;
+const BUILD = 25;
 const MATCH_TARGET = 3;
 const STATE_SCHEMA_VERSION = 2;
 const ROUND_SCHEMA_VERSION = 1;
@@ -1468,6 +1468,21 @@ function render(s) {
     offCtx.beginPath();
     offCtx.arc(cx, cy, R * 1.05, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * frac);
     offCtx.stroke();
+  }
+
+  // DECOY FLASH (world v8): the last two seconds of a planted bomb
+  // strobe — tier 1 at ~6Hz in warning orange, tier 2 at ~14Hz in hard
+  // white. The channel only carries flashing bombs, so nothing here can
+  // reveal a calm decoy.
+  if (s.bombFlash) {
+    const now = performance.now();
+    for (const [bx, by, tier] of s.bombFlash) {
+      const hz = tier >= 2 ? 14 : 6;
+      const on = Math.floor(now / (1000 / hz / 2)) % 2 === 0;
+      if (!on) continue;
+      offCtx.fillStyle = tier >= 2 ? 'rgba(255,255,255,0.95)' : 'rgba(255,150,40,0.85)';
+      offCtx.fillRect(bx * CELL, by * CELL, CELL, CELL);
+    }
   }
 
   // particles (additive)
