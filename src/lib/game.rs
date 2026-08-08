@@ -705,6 +705,22 @@ impl WormGame {
         }
     }
 
+    /// Is the CPU being ENVELOPED — its open region collapsed under 60%
+    /// of eight decisions ago with the player nearby? The same signal
+    /// that raises its evacuate standards (task #13 v1); exposed so the
+    /// weapon heuristic can respond too. Board knowledge.
+    pub fn cpu_enveloped(&self) -> bool {
+        let ring = &self.cpu_brain.region_ring;
+        let collapsing = ring.len() >= 8
+            && ring.back().copied().unwrap_or(0)
+                < ring.front().copied().unwrap_or(1) * 6 / 10;
+        let (px, py) = self.cycles[0].head;
+        let (cx, cy) = self.cycles[1].head;
+        let near =
+            ((px as i32 - cx as i32).abs() + (py as i32 - cy as i32).abs()) <= 12;
+        collapsing && near
+    }
+
     /// How much manufactured opening recklessness (the bold_* knobs) is
     /// still warranted: 1.0 at first contact and even scores, fading to 0
     /// as the CPU pulls AHEAD on the visible scoreboard. Boldness exists to

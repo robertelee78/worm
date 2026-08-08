@@ -2771,3 +2771,39 @@ fn the_cpu_knows_what_the_slipstream_does() {
     );
     assert!(!worm::cpu_ai::step_enters_corridor(&game, 1, worm::Direction::Down));
 }
+
+/// The BREACH SHOT: an enveloped CPU holding a laser fires to punch an
+/// exit even with no kill shot available; unenveloped it holds fire.
+#[test]
+fn an_enveloped_cpu_blasts_itself_an_exit() {
+    let mut game = worm::WormGame::with_size_seed(40, 30, 5);
+    game.cycles[1].head = (10, 10);
+    game.cycles[1].positions = vec![(10, 10)].into();
+    game.grid[10][10] = worm::CellType::CPU;
+    game.cycles[1].direction = worm::Direction::Left;
+    game.cycles[1].held_powerup = Some(worm::game::PowerUpKind::Laser);
+    // Player near (envelopment needs ≤12) but OFF row 10 — a horizontal
+    // beam ricochets along its own row, so row 10 would be a legal kill
+    // line, not a breach test.
+    game.cycles[0].head = (14, 15);
+    game.cycles[0].positions = vec![(14, 15)].into();
+    game.grid[15][14] = worm::CellType::Player;
+
+    // Not enveloped: region stable — no breach shot (and no kill line:
+    // the beam travels away from the player).
+    for _ in 0..8 {
+        game.cpu_brain.region_ring.push_back(500);
+    }
+    assert!(!worm::cpu_ai::should_fire(&mut game, 1), "stable region: hold fire");
+
+    // Enveloped: region collapsed under 60% with the player near.
+    game.cpu_brain.region_ring.clear();
+    for v in [500, 480, 440, 400, 360, 330, 300, 250] {
+        game.cpu_brain.region_ring.push_back(v);
+    }
+    assert!(game.cpu_enveloped(), "test setup: enveloped");
+    assert!(
+        worm::cpu_ai::should_fire(&mut game, 1),
+        "walls closing + laser in hand = blast an exit"
+    );
+}

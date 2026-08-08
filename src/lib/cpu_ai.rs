@@ -73,21 +73,7 @@ fn escape_floor_cells(game: &WormGame, who: usize) -> f32 {
         // standards rise NOW (+50%), not at the last legal frame. Board
         // knowledge (both players can see the space), defensive only,
         // and it decays the moment the space stops shrinking.
-        let envelopment = {
-            let ring = &game.cpu_brain.region_ring;
-            let collapsing = ring.len() >= 8
-                && ring.back().copied().unwrap_or(0)
-                    < ring.front().copied().unwrap_or(1) * 6 / 10;
-            let (px, py) = game.cycles[0].head;
-            let (chx, chy) = game.cycles[1].head;
-            let near = ((px as i32 - chx as i32).abs() + (py as i32 - chy as i32).abs())
-                <= 12;
-            if collapsing && near {
-                1.5
-            } else {
-                1.0
-            }
-        };
+        let envelopment = if game.cpu_enveloped() { 1.5 } else { 1.0 };
         let aversion = aversion * envelopment;
         (own_len * t.escape_multiple + t.escape_margin) * discipline * aversion
     }
@@ -5609,8 +5595,26 @@ pub fn should_fire(game: &mut WormGame, who: usize) -> bool {
             // a row/col — fire when the (possibly bounced) beam path reaches
             // the player's head. The telegraph draws this exact path.
             let (dx, dy) = game.cycles[who].direction.as_delta();
-            let beam = beam_cells(game, hx, hy, dx, dy);
-            beam.contains(&(ox, oy))
+            let beam = game.beam_cells(hx, hy, dx, dy);
+            if beam.contains(&(ox, oy)) {
+                return true;
+            }
+            // BREACH SHOT (owner: "I expect it to know how to punch holes"):
+            // an enveloped CPU holding a laser blasts itself an exit — the
+            // beam's fifth wall strike punches a Hole, and the survival
+            // layers already know how to take one. Only when the walls are
+            // actually closing (cpu_enveloped), and only if the breach
+            // would land close enough to reach (within 12 cells). Board
+            // knowledge + self-preservation; the telegraph still plays.
+            who == 1
+                && game.cpu_enveloped()
+                && beam
+                    .breach
+                    .map(|(bx, by)| {
+                        (bx as i32 - hx as i32).abs() + (by as i32 - hy as i32).abs()
+                            <= 12
+                    })
+                    .unwrap_or(false)
         }
         crate::game::PowerUpKind::TriShot => {
             // Bolts occupy exactly three rays — straight ahead and the two
