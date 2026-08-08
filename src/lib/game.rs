@@ -2964,6 +2964,11 @@ impl WormGame {
             // draw. The player-fired path runs OUTSIDE update() (which
             // stops once game_over is set), so this is its only chance.
             self.reconcile_beams();
+            // Age here too: this exit ends the frame, and the fresh flip
+            // must happen NOW so the killing beam's solid core paints
+            // exactly once (k3 v7 round 2: without this, the first
+            // post-game pump does the flip and the core paints twice).
+            self.age_beam_fx();
             self.advance_projectiles();
             self.tick_bombs();
         }

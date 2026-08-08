@@ -72,6 +72,18 @@ an un-hit intersection.
   beams may kill both: draw.
 - A slipstream-frozen worm enters nothing (it did not move) but
   remains fully hittable and severable by the discharge-time test.
+- TRUNCATION RULE (B2, ruled Option 1 unanimously in verify round 2):
+  a death truncates the movement transition at the point of death. The
+  post-move reconciliation grades against the world as it stood at
+  truncation — movements that resolved before the truncation are in
+  the world; movements that had not resolved never happened. A worm
+  whose movement never resolved cannot enter a line. This is the same
+  player-first sequential resolution the head-on rule already encodes;
+  the reconciliation inherits it, it does not create it. (Shadow-step
+  and simultaneous-movement alternatives considered and rejected: the
+  former grades the beam against a world the game never shows — the
+  mirror of the lie this ADR closes — and the latter is a new world
+  version, not an edge-case patch.)
 - Accepted asymmetry (k3): the dual test is firer-generous — a target
   on the line pre-move that steps OFF during the frame still dies to
   the ignition test, though the painted frame shows no intersection.

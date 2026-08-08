@@ -33,9 +33,12 @@ convergent verdicts. This ADR is their synthesis and the plan of record.
 
 ## Decision 1 — Unbundle: one physics change per world version
 
-**v6 = corridor only. v7 = timed decoy. v8 = napalm.** Ordered by
-increasing rule-novelty (pure geometry → new timer state → new per-cycle
-worm state + new DeathCause). Unanimous across both consultants.
+**v6 = corridor only; the timed decoy and napalm each get their own
+later version.** Ordered by increasing rule-novelty (pure geometry →
+new timer state → new per-cycle worm state + new DeathCause). Unanimous
+across both consultants. (Updated 2026-08-08: ADR-023 took v7 for the
+laser simultaneity fix — an owner-reported live defect outranked the
+planned features — so the decoy is v8 and napalm v9.)
 
 The spike is the empirical argument: its read-collapse was unattributable
 among three simultaneous changes until a version-pinned A/B isolated

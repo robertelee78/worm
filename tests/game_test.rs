@@ -3425,3 +3425,35 @@ fn owner_round_connects_under_v7() {
     }
     panic!("owner round (arena 6, frames 268) not found in the collection");
 }
+
+/// ADR-023 renderer contract, sim side: the killing beam's core paints
+/// exactly once — the fire-ends-game exit flips `fresh` immediately,
+/// and post-game pumps decay the layer (codex/k3 v7 verify round 2).
+#[test]
+fn test_v7_killing_beam_cools_after_game_over() {
+    let mut game = v7_beam_board();
+    // CPU standing ON the player's line: ignition head-kill ends the
+    // game inside fire_powerup.
+    game.cycles[0].head = (30, 24);
+    game.cycles[0].direction = worm::Direction::Left;
+    game.cycles[0].positions = vec![(30, 24), (31, 24)];
+    game.grid[24][30] = worm::CellType::Player;
+    game.grid[24][31] = worm::CellType::Player;
+    game.cycles[1].head = (10, 24);
+    game.cycles[1].direction = worm::Direction::Up;
+    game.cycles[1].positions = vec![(10, 24)];
+    game.grid[24][10] = worm::CellType::CPU;
+    game.cycles[0].held_powerup = Some(worm::game::PowerUpKind::Laser);
+    assert!(game.fire_powerup(0));
+    assert!(game.game_over, "ignition head-kill ends the game");
+    assert_eq!(game.beam_fx.len(), 1);
+    assert_eq!(game.beam_fx[0].age, 0, "the kill frame paints the solid core");
+    // Post-game pumps: the browser calls update() unconditionally; the
+    // layer decays instead of glowing hot forever.
+    game.update();
+    assert_eq!(game.beam_fx[0].age, 1, "first post-game pump: afterimage");
+    for _ in 0..25 {
+        game.update();
+    }
+    assert!(game.beam_fx.is_empty(), "embers burn out; the layer empties");
+}

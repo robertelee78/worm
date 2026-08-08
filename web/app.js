@@ -595,8 +595,12 @@ function loop(now) {
   // didn't actually happen". Excess banked time is dropped below: game time
   // briefly slows instead of teleporting, and what renders is what happened.
   while (acc >= delay && steps < 2) {
+    // Post-game, update() is a false-returning no-op EXCEPT that it keeps
+    // aging the beam layer — the killing shot cools from core to embers
+    // under the round-over overlay instead of glowing hot forever
+    // (ADR-023 renderer contract; k3/codex v7 verify round 2).
+    game.update();
     if (!game.is_over()) {
-      game.update();
       playSfx();
     }
     acc -= delay;
