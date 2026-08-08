@@ -11,7 +11,7 @@ import { computeBoardLayout, VIEWPORT_BLOCK_GUTTER } from './layout.js';
 let CELL = 14; // recomputed by applyBoardLayout() to fit the measured stage
 // Bump together with the ?v= in index.html whenever the wasm bundle is
 // rebuilt — it keys the cache-busting query on the .wasm fetch.
-const BUILD = 22;
+const BUILD = 23;
 const MATCH_TARGET = 3;
 const STATE_SCHEMA_VERSION = 2;
 const ROUND_SCHEMA_VERSION = 1;
@@ -1349,6 +1349,16 @@ function render(s) {
   // the radius as a pulsing zone that intensifies as the fuse runs down, so
   // "I didn't see the bomb" never happens again.
   const BLAST = 10; // BOMB_RADIUS_CELLS (engine constant)
+  (s.bombs || []).forEach(([bx, by], bi) => {
+    const tier = s.bombFlash?.[bi] || 0;
+    if (!tier) return;
+    const hz = tier === 2 ? 14 : 6;
+    const on = (Math.sin(performance.now() / 1000 * hz * Math.PI * 2) > 0);
+    if (on) {
+      offCtx.fillStyle = tier === 2 ? 'rgba(255,255,255,0.95)' : 'rgba(255,80,30,0.8)';
+      offCtx.fillRect(bx * CELL, by * CELL, CELL, CELL);
+    }
+  });
   for (const [bx, by, fuse] of s.bombs) {
     const key = `${bx},${by}`;
     const maxF = Math.max(bombMaxFuse.get(key) || 0, fuse);
@@ -1443,6 +1453,44 @@ function render(s) {
     offCtx.fillRect(px * CELL - 1, py * CELL - 1, 3, 3);
   }
   offCtx.globalCompositeOperation = 'source-over';
+
+  // NAPALM (world v6): flame patches — layered flickering fire.
+  if (s.flames && s.flames.length) {
+    offCtx.globalCompositeOperation = 'lighter';
+    const t = performance.now() / 1000;
+    for (const [fx, fy, lifeFrac] of s.flames) {
+      const cx = fx * CELL + CELL / 2, cy = fy * CELL + CELL / 2;
+      for (let layer = 0; layer < 3; layer++) {
+        const flick = Math.sin(t * (9 + layer * 5) + fx * 3.1 + fy * 1.7 + layer) * 0.5 + 0.5;
+        const r = (CELL * (0.9 - layer * 0.22)) * (0.7 + 0.4 * flick) * (0.5 + 0.5 * lifeFrac);
+        const cols = ['255, 60, 0', '255, 150, 20', '255, 230, 120'];
+        offCtx.fillStyle = `rgba(${cols[layer]}, ${0.25 + 0.35 * flick * lifeFrac})`;
+        offCtx.beginPath();
+        offCtx.arc(cx, cy - layer * 2 * flick, Math.max(1, r), 0, Math.PI * 2);
+        offCtx.fill();
+      }
+    }
+    offCtx.globalCompositeOperation = 'source-over';
+  }
+
+  // Burning worms: ember overlay along the tail that is being eaten.
+  if (s.burning && s.cycles) {
+    offCtx.globalCompositeOperation = 'lighter';
+    const t = performance.now() / 1000;
+    s.cycles.forEach((c, ci) => {
+      if (!s.burning[ci] || !c.alive) return;
+      const n = c.pos.length;
+      c.pos.forEach(([px, py], i) => {
+        // Strongest at the tail (burning tail-first), fading toward the head.
+        const heat = Math.max(0, 1 - (n - 1 - i) / Math.max(1, n * 0.5));
+        if (heat <= 0.05) return;
+        const flick = Math.sin(t * 13 + i * 2.4) * 0.5 + 0.5;
+        offCtx.fillStyle = `rgba(255, ${60 + (120 * flick) | 0}, 0, ${0.25 + 0.45 * heat * flick})`;
+        offCtx.fillRect(px * CELL, py * CELL, CELL, CELL);
+      });
+    });
+    offCtx.globalCompositeOperation = 'source-over';
+  }
 
   // SLIPSTREAM FX — light-speed distortion anchored on YOUR worm:
   // hyperspace streaks tearing outward, chromatic warp rings, and a

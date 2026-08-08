@@ -4724,9 +4724,7 @@ pub fn step_enters_corridor(game: &WormGame, who: usize, d: Direction) -> bool {
     if nx < 0 || ny < 0 || nx >= game.width as i16 || ny >= game.height as i16 {
         return false;
     }
-    let (nx, ny) = (nx as u16, ny as u16);
-    let ring1 = nx == 1 || ny == 1 || nx == game.width - 2 || ny == game.height - 2;
-    ring1 || game.grid[ny as usize][nx as usize] == crate::game::CellType::Hole
+    game.pos_in_corridor(nx as u16, ny as u16)
 }
 
 pub fn project_player_straight(game: &WormGame, frames: usize) -> Vec<(u16, u16)> {
@@ -4783,14 +4781,7 @@ fn predict_player_positions_iterative(
         // every hunt five cells ahead of a nearly-frozen worm. On held
         // frames the projection holds position with them.
         if game.arena_version >= 4 && game.has_corridor() {
-            let in_corr = {
-                let (ux, uy) = (px as u16, py as u16);
-                let ring1 =
-                    ux == 1 || uy == 1 || ux == game.width - 2 || uy == game.height - 2;
-                ring1
-                    || game.grid[uy as usize][ux as usize]
-                        == crate::game::CellType::Hole
-            };
+            let in_corr = game.pos_in_corridor(px as u16, py as u16);
             let frame = game.frame_count + 1 + step as u32;
             if in_corr && frame % 16 != 0 {
                 positions.push((px as u16, py as u16));

@@ -152,6 +152,21 @@ pub const LASER_MAX_BOUNCES: u32 = 4;
 ///
 /// The breach is data, not an effect: `beam_cells` is `&self` and runs every
 /// frame while the CPU is merely aiming, so only `fire_powerup` applies it.
+/// A napalm patch (world v6): ignited where a tri-shot bolt ends, burns
+/// for ~3 wall-seconds. Contact burns a worm down on a schedule — up to
+/// 5 segments in the first second of CONTINUOUS contact, 3 in the
+/// second, 1 in the third; a worm burned past its length dies head-first.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Flame {
+    pub x: u16,
+    pub y: u16,
+    /// Frames of burn remaining.
+    pub life: u32,
+    /// Frames-per-second at ignition (fixes the burn schedule).
+    pub fps: u32,
+    pub owner: u8,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BeamPath {
     pub cells: Vec<(u16, u16)>,
@@ -260,7 +275,16 @@ impl LightCycle {
 /// the 180-ban's anchor within one held frame: changing your mind got
 /// keypresses eaten ("impossible to turn"), and a two-press sequence
 /// could sneak a true reversal past the ban into your own neck.
-pub const ARENA_VERSION: u8 = 5;
+/// v6 (owner spec, three changes): the corridor is TWO lanes wide (arena
+/// wall moves to ring 3 — turning and overtaking in the ring become
+/// real); a planted bomb is a food decoy for ~15s that FLASHES at ~13s,
+/// flashes harder at ~14s, and DETONATES at ~15s (punching walls) —
+/// timed detonation returns, but telegraphed, unlike the unannounced
+/// blasts v-old fizzled away; and the tri-shot is NAPALM: bolts fly only
+/// 4 cells and ignite 3-second flames that burn a touching worm down —
+/// up to 5 segments in the first second of contact, 3 in the second,
+/// 1 in the third — head burned = dead.
+pub const ARENA_VERSION: u8 = 6;
 
 pub struct WormGame {
     /// Arena geometry this game builds (replays pin their recorded one).
@@ -289,6 +313,15 @@ pub struct WormGame {
     pub powerups: Vec<(u16, u16, PowerUpKind)>,
     /// Live tri-shot bolts in flight.
     pub projectiles: Vec<Projectile>,
+    /// Live napalm patches (world v6).
+    pub flames: Vec<Flame>,
+    /// Per-cycle napalm state: frames since CAUGHT (0 = not burning),
+    /// segments burned this catch, and the fps that fixes the schedule.
+    /// STICKY: once caught, the 3-second 5/3/1 schedule runs to
+    /// completion even as the burning tail shrinks out of the flames.
+    pub burn_contact: [u32; 2],
+    pub burn_taken: [u32; 2],
+    pub burn_fps: [u32; 2],
     /// Planted bombs counting down.
     pub bombs: Vec<Bomb>,
     /// Frames until the next power-up spawn attempt.
@@ -385,6 +418,8 @@ pub enum DeathCause {
     BombBlast,
     Laser,
     TriShotBolt,
+    /// Napalm (world v6): burned down past the head.
+    Burned,
 }
 
 impl DeathCause {
@@ -400,6 +435,7 @@ impl DeathCause {
             DeathCause::BombBlast => "blown up by a mine disguised as food",
             DeathCause::Laser => "laser beam",
             DeathCause::TriShotBolt => "caught in a tri-shot burst",
+            DeathCause::Burned => "burned down by napalm",
         }
     }
 }
@@ -590,6 +626,10 @@ impl WormGame {
         let mut game = Self {
             arena_version: ARENA_VERSION,
             ledgers_finalized: false,
+            flames: Vec::new(),
+            burn_contact: [0; 2],
+            burn_taken: [0; 2],
+            burn_fps: [14; 2],
             width,
             height,
             grid,
@@ -671,6 +711,7 @@ impl WormGame {
                     let kind = match cause {
                         DeathCause::Laser => Some(PowerUpKind::Laser),
                         DeathCause::TriShotBolt => Some(PowerUpKind::TriShot),
+                        DeathCause::Burned => Some(PowerUpKind::TriShot),
                         DeathCause::BombBlast => Some(PowerUpKind::Bomb),
                         _ => None,
                     };
@@ -764,8 +805,11 @@ impl WormGame {
         for y in 0..height {
             for x in 0..width {
                 let frame = x == 0 || y == 0 || x == width - 1 || y == height - 1;
-                let on_ring2 =
-                    x == 2 || y == 2 || x == width - 3 || y == height - 3;
+                let ring = if arena >= 6 { 3 } else { 2 };
+                let on_ring2 = x == ring
+                    || y == ring
+                    || x == width - 1 - ring
+                    || y == height - 1 - ring;
                 // ARENA V2 (owner play report, 2026-08-06): v1 ran the
                 // arena-wall rows/columns all the way to the frame, so at
                 // every corner the wall's ends CROSSED the ring-1
@@ -775,10 +819,14 @@ impl WormGame {
                 // its own rectangle; the corridor turns the corners.
                 // V1 is kept verbatim: recorded ghosts replay on the
                 // geometry they were played on.
+                let ring = if arena >= 6 { 3 } else { 2 };
                 let arena_wall = corridor
                     && on_ring2
                     && (arena < 2
-                        || (x >= 2 && y >= 2 && x <= width - 3 && y <= height - 3));
+                        || (x >= ring
+                            && y >= ring
+                            && x <= width - 1 - ring
+                            && y <= height - 1 - ring));
                 if frame || arena_wall {
                     grid[y as usize][x as usize] = CellType::Wall;
                 }
@@ -800,8 +848,28 @@ impl WormGame {
     /// arena wall at all: beams stopped dead instead of bouncing or breaching,
     /// and bomb blasts silently stopped breaking walls. The endgame quietly
     /// played by different rules from the rest of the round.
+    /// Rebuild THIS game under a different world-rules version — test
+    /// support for pinning old physics without restart()'s round side
+    /// effects. Re-marks worms and food onto the fresh grid.
+    pub fn set_world_version(&mut self, v: u8) {
+        self.arena_version = v;
+        self.grid = Self::build_grid(self.width, self.height, v);
+        for (i, c) in self.cycles.iter().enumerate() {
+            let marker = if i == 0 { CellType::Player } else { CellType::CPU };
+            for &(x, y) in &c.positions {
+                self.grid[y as usize][x as usize] = marker;
+            }
+        }
+        for &(x, y, _) in &self.food_items {
+            if self.grid[y as usize][x as usize] == CellType::Empty {
+                self.grid[y as usize][x as usize] = CellType::Food;
+            }
+        }
+    }
+
     pub fn arena_wall_offset(&self) -> u16 {
-        2 + self.shrink_level
+        let base = if self.arena_version >= 6 { 3 } else { 2 };
+        base + self.shrink_level
     }
 
     pub fn is_arena_wall(&self, x: u16, y: u16) -> bool {
@@ -2040,6 +2108,7 @@ impl WormGame {
             self.advance_projectiles();
         }
         self.tick_bombs();
+        self.tick_flames();
         if self.game_over {
             return false;
         }
@@ -2398,6 +2467,10 @@ impl WormGame {
         self.cpu_brain.prev_pc_dist = 0;
         self.cpu_brain.pending_book = None;
         self.cpu_brain.region_ring.clear();
+        self.flames.clear();
+        self.burn_contact = [0; 2];
+        self.burn_taken = [0; 2];
+        self.burn_fps = [14; 2];
         self.cpu_brain.last_opp_prediction = None;
         self.cpu_history.clear();
         self.powerups.clear();
@@ -2473,8 +2546,23 @@ impl WormGame {
             return false;
         }
         let (x, y) = self.cycles[idx].head;
-        let ring1 = x == 1 || y == 1 || x == self.width - 2 || y == self.height - 2;
-        ring1 || self.grid[y as usize][x as usize] == CellType::Hole
+        self.pos_in_corridor(x, y)
+    }
+
+    /// Is this cell in the outer corridor (between the frame and the
+    /// arena wall — one lane pre-v6, two lanes from v6) or a punched
+    /// hole in the wall itself?
+    pub fn pos_in_corridor(&self, x: u16, y: u16) -> bool {
+        if !self.has_corridor() {
+            return false;
+        }
+        let ring = if self.arena_version >= 6 { 3 } else { 2 };
+        let in_ring = (x >= 1 && x < ring)
+            || (y >= 1 && y < ring)
+            || (x > self.width - 1 - ring && x <= self.width - 2)
+            || (y > self.height - 1 - ring && y <= self.height - 2);
+        (in_ring && self.grid[y as usize][x as usize] != CellType::Wall)
+            || self.grid[y as usize][x as usize] == CellType::Hole
     }
 
     pub fn player_in_corridor(&self) -> bool {
@@ -2642,13 +2730,19 @@ impl WormGame {
             PowerUpKind::TriShot => {
                 // Straight ahead plus the two forward diagonals.
                 let dirs = [(dx, dy), (dx + dy, dy + dx), (dx - dy, dy - dx)];
+                // World v6 NAPALM: bolts fly only 4 cells, then ignite.
+                let steps = if self.arena_version >= 6 {
+                    4
+                } else {
+                    TRI_SHOT_MAX_STEPS
+                };
                 for (ddx, ddy) in dirs {
                     self.projectiles.push(Projectile {
                         x: hx,
                         y: hy,
                         dx: ddx,
                         dy: ddy,
-                        steps_left: TRI_SHOT_MAX_STEPS,
+                        steps_left: steps,
                         from: who as u8,
                     });
                 }
@@ -2661,10 +2755,20 @@ impl WormGame {
                 // under a seed. NOTE: this consumes a draw at plant time, so
                 // seeded streams diverge from pre-mine builds — deliberate.
                 let disguise = self.rng_range(1..10) as u8;
+                // World v6: the decoy lives ~15 wall-seconds at the tick
+                // rate it was planted under (deterministic — frame_delay
+                // is a pure function of state), then DETONATES with a
+                // two-second flash telegraph. Pre-v6 keeps the fizzle.
+                let fuse = if self.arena_version >= 6 {
+                    ((15_000u64 / self.frame_delay().as_millis().max(1) as u64) as u32)
+                        .max(30)
+                } else {
+                    BOMB_FUSE_FRAMES
+                };
                 self.bombs.push(Bomb {
                     x: hx,
                     y: hy,
-                    fuse: BOMB_FUSE_FRAMES,
+                    fuse,
                     armed_in: MINE_ARM_FRAMES,
                     disguise,
                     owner: who as u8,
@@ -2927,8 +3031,13 @@ impl WormGame {
                 && (self.cycles[opp].head == (ux, uy)
                     || self.grid[uy as usize][ux as usize] == opp_marker);
             if contact {
-                self.bolt_blast(ux, uy, pdx, pdy, from);
-                self.projectiles.remove(i);
+                if self.arena_version >= 6 {
+                    self.ignite(ux, uy, from);
+                    self.projectiles.remove(i);
+                } else {
+                    self.bolt_blast(ux, uy, pdx, pdy, from);
+                    self.projectiles.remove(i);
+                }
                 continue;
             }
             let p = &mut self.projectiles[i];
@@ -2936,6 +3045,12 @@ impl WormGame {
             p.y = uy;
             p.steps_left = p.steps_left.saturating_sub(1);
             if p.steps_left == 0 {
+                let (fx, fy) = (self.projectiles[i].x, self.projectiles[i].y);
+                let from2 = self.projectiles[i].from;
+                if self.arena_version >= 6 {
+                    // Spent bolt: the napalm lands where it stops.
+                    self.ignite(fx, fy, from2);
+                }
                 self.projectiles.remove(i);
             } else {
                 i += 1;
@@ -2944,16 +3059,157 @@ impl WormGame {
     }
 
     /// Tick bomb fuses and detonate any at zero (chain reactions included).
+    /// The decoy's telegraph (world v6): 0 = calm, 1 = flashing (final
+    /// ~2s), 2 = flashing hard (final ~1s). Derived from the remaining
+    /// fuse against the CURRENT tick rate.
+    pub fn bomb_flash_tier(&self, b: &Bomb) -> u8 {
+        if self.arena_version < 6 || b.tripped {
+            return 0;
+        }
+        let frames_per_sec =
+            (1000u64 / self.frame_delay().as_millis().max(1) as u64).max(1) as u32;
+        if b.fuse <= frames_per_sec {
+            2
+        } else if b.fuse <= frames_per_sec * 2 {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// Ignite a napalm patch (world v6). ~3 wall-seconds of flame at the
+    /// tick rate at ignition.
+    pub fn ignite(&mut self, x: u16, y: u16, owner: u8) {
+        let fps = (1000u64 / self.frame_delay().as_millis().max(1) as u64).max(1) as u32;
+        self.flames.push(Flame {
+            x,
+            y,
+            life: fps * 3,
+            fps,
+            owner,
+        });
+        self.add_impact_particles(x, y, (255, 140, 30));
+        play_beep(SfxKind::Detonate, 220, 50);
+    }
+
+    /// Burn schedule: segments a worm should have lost after `t` frames
+    /// of continuous contact (fps-normalized): 5 in second one, 3 in
+    /// second two, 1 in second three — 9 max per continuous contact.
+    fn burn_target(t: u32, fps: u32) -> u32 {
+        let fps = fps.max(1);
+        if t <= fps {
+            (5 * t).div_ceil(fps)
+        } else if t <= fps * 2 {
+            5 + (3 * (t - fps)).div_ceil(fps)
+        } else {
+            (8 + (t - fps * 2).div_ceil(fps)).min(9)
+        }
+    }
+
+    /// Tick napalm (world v6): age flames, apply contact burns tail-first,
+    /// kill a worm burned past its length.
+    pub fn tick_flames(&mut self) {
+        if self.arena_version < 6 || (self.flames.is_empty() && self.burn_contact == [0; 2])
+        {
+            for f in &mut self.flames {
+                f.life = f.life.saturating_sub(1);
+            }
+            self.flames.retain(|f| f.life > 0);
+            return;
+        }
+        for f in &mut self.flames {
+            f.life = f.life.saturating_sub(1);
+        }
+        self.flames.retain(|f| f.life > 0);
+
+        for who in 0..2usize {
+            if !self.cycles[who].alive {
+                continue;
+            }
+            let touching = self
+                .flames
+                .iter()
+                .filter(|f| f.owner != who as u8)
+                .any(|f| self.cycles[who].positions.contains(&(f.x, f.y)));
+            let burning = self.burn_contact[who] > 0;
+            if !touching && !burning {
+                continue;
+            }
+            if !burning {
+                // Caught: the schedule's clock starts and STICKS.
+                self.burn_fps[who] = self
+                    .flames
+                    .iter()
+                    .filter(|f| f.owner != who as u8)
+                    .map(|f| f.fps)
+                    .max()
+                    .unwrap_or(14);
+            }
+            let fps = self.burn_fps[who];
+            if self.burn_contact[who] >= fps * 3 {
+                // The napalm burned itself out on this worm.
+                self.burn_contact[who] = 0;
+                self.burn_taken[who] = 0;
+                continue;
+            }
+            self.burn_contact[who] += 1;
+            let target = Self::burn_target(self.burn_contact[who], fps);
+            while self.burn_taken[who] < target {
+                self.burn_taken[who] += 1;
+                let cycle = &mut self.cycles[who];
+                if cycle.positions.len() <= 1 {
+                    // Head burned: the worm dies where it stands.
+                    cycle.alive = false;
+                    if self.death_cause.is_none() {
+                        self.death_cause = Some(DeathCause::Burned);
+                    }
+                    if self.game_over {
+                        self.winner = None;
+                    } else {
+                        self.game_over = true;
+                        self.winner = Some(1 - who);
+                        play_death_riff(90);
+                    }
+                    break;
+                }
+                let tail = cycle.positions.pop().unwrap();
+                let marker = if who == 0 { CellType::Player } else { CellType::CPU };
+                if self.grid[tail.1 as usize][tail.0 as usize] == marker {
+                    self.grid[tail.1 as usize][tail.0 as usize] = CellType::Empty;
+                }
+                self.add_impact_particles(tail.0, tail.1, (255, 90, 20));
+            }
+            // Deliberately NO early return on game_over: both worms may
+            // burn to death in the same tick, and simultaneity is a DRAW
+            // (the death branch above already nulls the winner when the
+            // game was over before its kill).
+        }
+    }
+
     pub fn tick_bombs(&mut self) {
         for b in &mut self.bombs {
             b.armed_in = b.armed_in.saturating_sub(1);
             b.fuse = b.fuse.saturating_sub(1);
         }
-        // A fuse that runs out FIZZLES. The fuse's only job is to stop stale
-        // mines accumulating over a long round (see the field doc) — it must
-        // never be a weapon: an attentive player can track every plant they
-        // saw, but nobody can track an invisible timer. A tripped mine keeps
-        // its fuse==0 for the drain below and is exempt here.
+        // Pre-v6: a fuse that runs out FIZZLES (an invisible timer must
+        // not be a weapon). World v6 REVERSES this with the missing
+        // ingredient supplied: the last ~2 seconds FLASH (see
+        // bomb_flash_tier), so the timer detonation is telegraphed — an
+        // attentive player gets two full seconds of visible warning, and
+        // the blast punches arena walls like any other.
+        if self.arena_version >= 6 {
+            let due: Vec<(u16, u16)> = self
+                .bombs
+                .iter()
+                .filter(|b| b.fuse == 0 && !b.tripped)
+                .map(|b| (b.x, b.y))
+                .collect();
+            for (x, y) in due {
+                if let Some(b) = self.bombs.iter_mut().find(|b| b.x == x && b.y == y) {
+                    b.tripped = true;
+                }
+            }
+        }
         let mut fizzled: Vec<(u16, u16)> = Vec::new();
         self.bombs.retain(|b| {
             let expired = b.fuse == 0 && !b.tripped;

@@ -351,6 +351,8 @@ fn test_laser_detonating_own_bomb_does_not_self_kill() {
 #[test]
 fn test_same_frame_kills_are_a_draw() {
     let mut game = WormGame::with_size(120, 38);
+    // Pre-v6 physics (instant bolt kills) — pinned for the replay rules.
+    game.set_world_version(5);
     for row in &mut game.grid {
         for cell in row.iter_mut() {
             if *cell != worm::CellType::Wall {
@@ -1213,11 +1215,11 @@ fn test_bomb_blast_breaks_arena_wall_not_frame() {
     });
     game.tick_bombs();
     assert_eq!(
-        game.grid[5][2],
+        game.grid[5][3],
         worm::CellType::Hole,
-        "ring-2 wall cell in the blast must open"
+        "the arena-wall cell (ring 3 under v6) in the blast must open"
     );
-    assert_eq!(game.grid[2][5], worm::CellType::Hole);
+    assert_eq!(game.grid[3][5], worm::CellType::Hole);
     assert_eq!(
         game.grid[5][0],
         worm::CellType::Wall,
@@ -1669,13 +1671,13 @@ fn test_arena_wall_tracks_sudden_death_shrink() {
     // first shrink: beams stopped dead instead of bouncing or breaching, and
     // bomb blasts stopped breaking walls.
     let mut game = WormGame::with_size(120, 38);
-    assert!(game.is_arena_wall(2, 20), "ring 2 is the wall before any shrink");
-    assert!(!game.is_arena_wall(3, 20));
+    assert!(game.is_arena_wall(3, 20), "ring 3 is the wall before any shrink (v6)");
+    assert!(!game.is_arena_wall(4, 20));
 
     game.shrink_level = 1;
-    assert!(game.is_arena_wall(3, 20), "the wall moves inward with the shrink");
-    assert!(!game.is_arena_wall(2, 20), "the old ring is no longer the wall");
-    assert_eq!(game.arena_wall_offset(), 3);
+    assert!(game.is_arena_wall(4, 20), "the wall moves inward with the shrink");
+    assert!(!game.is_arena_wall(3, 20), "the old ring is no longer the wall");
+    assert_eq!(game.arena_wall_offset(), 4);
 }
 
 /* ------------------------- bomb as a proximity mine ----------------------- */
@@ -1916,31 +1918,32 @@ fn test_escorted_wall_lane_is_refused_before_the_lock_forms() {
             }
         }
     }
-    // CPU in the top lane (row 3, arena wall ring at y=2), heading Left.
-    game.cycles[1].head = (30, 3);
+    // CPU in the top lane (row 4 — the arena wall sits at y=3 under v6),
+    // heading Left.
+    game.cycles[1].head = (30, 4);
     game.cycles[1].direction = worm::Direction::Left;
     game.cycles[1].prev_direction = worm::Direction::Left;
-    game.cycles[1].positions = vec![(30, 3), (31, 3)];
+    game.cycles[1].positions = vec![(30, 4), (31, 4)];
     for &(x, y) in &game.cycles[1].positions {
         game.grid[y as usize][x as usize] = worm::CellType::CPU;
     }
     // Player escorting abeam: one row below, one column behind, same heading.
-    game.cycles[0].head = (31, 4);
+    game.cycles[0].head = (31, 5);
     game.cycles[0].direction = worm::Direction::Left;
     game.cycles[0].prev_direction = worm::Direction::Left;
-    game.cycles[0].positions = vec![(31, 4), (32, 4), (33, 4), (34, 4)];
+    game.cycles[0].positions = vec![(31, 5), (32, 5), (33, 5), (34, 5)];
     for &(x, y) in &game.cycles[0].positions {
         game.grid[y as usize][x as usize] = worm::CellType::Player;
     }
 
     // The geometry itself is recognised…
     assert!(
-        worm::escorted_lane_step(&game, (30, 3), worm::Direction::Left),
+        worm::escorted_lane_step(&game, (30, 4), worm::Direction::Left),
         "continuing straight in an escorted wall lane must read as escorted"
     );
     // …and a perpendicular exit is not tarred with the same brush.
     assert!(
-        !worm::escorted_lane_step(&game, (30, 3), worm::Direction::Down),
+        !worm::escorted_lane_step(&game, (30, 4), worm::Direction::Down),
         "leaving the lane is the escape, not part of the trap"
     );
 
@@ -2068,6 +2071,10 @@ fn test_intent_twins_disagree_only_on_ties() {
 #[test]
 fn test_expired_mine_fizzles_instead_of_detonating() {
     let mut game = mine_board();
+    // Pre-v6 physics (bolts blast, expiry fizzles) — pinned: replays
+    // of old rounds still run these rules. restart() rebuilds the grid
+    // under the pinned geometry.
+    game.set_world_version(5);
     // Player parked ON the blast axis, well outside the trigger ring but
     // deep inside where the old cross arms reached.
     game.cycles[0].head = (66, 20);
@@ -2126,6 +2133,10 @@ fn trishot_board() -> WormGame {
 #[test]
 fn test_bolt_on_trail_severs_from_the_hit_back() {
     let mut game = trishot_board();
+    // Pre-v6 physics (bolts blast, expiry fizzles) — pinned: replays
+    // of old rounds still run these rules. restart() rebuilds the grid
+    // under the pinned geometry.
+    game.set_world_version(5);
     // CPU body crossing the straight ray at x=20, head safely off-ray and
     // far from the 2x2 burst.
     game.cycles[1].head = (20, 26);
@@ -2177,6 +2188,7 @@ fn test_bolt_on_trail_severs_from_the_hit_back() {
 #[test]
 fn test_head_inside_burst_dies() {
     let mut game = trishot_board();
+    game.set_world_version(5);
     // Head sits one cell PAST the trail cell the bolt strikes, inside the
     // forward-biased 2x2 (impact (20,20) heading Right covers (21,20)).
     game.cycles[1].head = (21, 20);
@@ -2208,6 +2220,10 @@ fn test_head_inside_burst_dies() {
 #[test]
 fn test_burst_spares_walls_and_own_trail() {
     let mut game = trishot_board();
+    // Pre-v6 physics (bolts blast, expiry fizzles) — pinned: replays
+    // of old rounds still run these rules. restart() rebuilds the grid
+    // under the pinned geometry.
+    game.set_world_version(5);
     // Opponent trail hugging the top wall lane so the burst quadrant
     // includes an arena-wall cell.
     let wall_y = 2usize; // arena wall ring
@@ -2537,12 +2553,12 @@ fn a_mid_round_book_latch_waits_for_the_round_boundary() {
 fn the_corridor_turns_the_corners_and_replays_keep_their_arena() {
     use worm::CellType;
     let game = worm::WormGame::with_size_seed(40, 30, 5);
-    // v2: corridor corner cells are walkable...
+    // v6: two corridor lanes are walkable, wall at ring 3...
     assert_eq!(game.grid[1][1], CellType::Empty, "corner corridor cell");
-    assert_eq!(game.grid[2][1], CellType::Empty, "corner turn (x=1,y=2)");
-    assert_eq!(game.grid[1][2], CellType::Empty, "corner turn (x=2,y=1)");
-    // ...while the arena wall's own corner still stands.
-    assert_eq!(game.grid[2][2], CellType::Wall, "arena wall corner");
+    assert_eq!(game.grid[2][2], CellType::Empty, "second lane (v6)");
+    assert_eq!(game.grid[3][2], CellType::Empty, "corner turn inside lane");
+    // ...while the arena wall's own corner still stands at ring 3.
+    assert_eq!(game.grid[3][3], CellType::Wall, "arena wall corner (v6)");
 
     // A v1 replay pins the old geometry: the wall ends cross the corridor.
     let mut old = worm::WormGame::with_size_seed(40, 30, 5);
@@ -2578,13 +2594,20 @@ fn a_bolt_ahead_of_its_firer_kills_first() {
         steps_left: 10,
     });
     game.update();
-    assert_eq!(
-        game.death_cause,
-        Some(worm::DeathCause::TriShotBolt),
-        "the bolt must land before the body"
+    // v6 semantics: the bolt IGNITES on contact before the firer's body
+    // arrives — the ordering property this test exists to pin. The kill
+    // is no longer instantaneous (napalm gives one frame to flee), so
+    // the assertions are: the firer did NOT die ramming the target the
+    // bolt had already reached, and the napalm is burning at the point
+    // of contact.
+    assert!(game.cycles[0].alive, "the firer never rams a target the bolt reached first");
+    assert!(
+        game.death_cause != Some(worm::DeathCause::HeadOn)
+            && game.death_cause != Some(worm::DeathCause::EnemyTrail),
+        "no ram mis-report: {:?}",
+        game.death_cause
     );
-    assert_eq!(game.winner, Some(0), "the firer wins by the bolt");
-    assert!(game.cycles[0].alive, "the firer never reaches the corpse");
+    assert!(!game.flames.is_empty(), "the napalm landed where the bolt hit");
 }
 
 /// Codex verification fix 1: the session's LAST round persists. The
@@ -2700,7 +2723,7 @@ fn corridor_keypresses_are_not_eaten_and_reversals_stay_banned() {
     game.grid[3][1] = worm::CellType::Player;
     game.cycles[0].direction = worm::Direction::Down;
     game.cycles[0].prev_direction = worm::Direction::Down;
-    game.grid[4][2] = worm::CellType::Hole;
+    // v6: x==2 is the second corridor lane (open); the wall is x==3.
     game.cycles[1].head = (20, 15);
     game.cycles[1].positions = vec![(20, 15)].into();
     game.grid[15][20] = worm::CellType::CPU;
@@ -2758,13 +2781,14 @@ fn the_cpu_knows_what_the_slipstream_does() {
         path.iter().all(|&p| p == (6, 1)),
         "a slipped player projects (nearly) stationary, got {path:?}"
     );
-    // Entry detection: from the arena the only way in is a punched hole.
-    game.cycles[1].head = (6, 3);
+    // Entry detection: from the arena the only way in is a punched hole
+    // (v6: the wall sits at ring 3).
+    game.cycles[1].head = (6, 4);
     assert!(
         !worm::cpu_ai::step_enters_corridor(&game, 1, worm::Direction::Up),
         "the intact arena wall is not an entry"
     );
-    game.grid[2][6] = worm::CellType::Hole;
+    game.grid[3][6] = worm::CellType::Hole;
     assert!(
         worm::cpu_ai::step_enters_corridor(&game, 1, worm::Direction::Up),
         "a punched hole is"
@@ -2805,5 +2829,69 @@ fn an_enveloped_cpu_blasts_itself_an_exit() {
     assert!(
         worm::cpu_ai::should_fire(&mut game, 1),
         "walls closing + laser in hand = blast an exit"
+    );
+}
+
+/// World v6 contract: the napalm burn schedule — a touched worm loses up
+/// to 5 segments in the first second of continuous contact, its head
+/// burns when the flames outlast its length, and the corridor is two
+/// lanes wide.
+#[test]
+fn napalm_burns_on_schedule_and_the_corridor_is_two_lanes() {
+    let mut game = worm::WormGame::with_size_seed(40, 30, 5);
+    // Two corridor lanes on the v6 board.
+    assert!(game.pos_in_corridor(1, 10) && game.pos_in_corridor(2, 10));
+    assert!(!game.pos_in_corridor(3, 10), "ring 3 is the wall line");
+
+    // A 4-segment player standing in a flame.
+    game.cycles[0].head = (10, 10);
+    game.cycles[0].positions =
+        vec![(10, 10), (10, 11), (10, 12), (10, 13)].into();
+    for &(x, y) in &[(10u16, 10u16), (10, 11), (10, 12), (10, 13)] {
+        game.grid[y as usize][x as usize] = worm::CellType::Player;
+    }
+    game.flames.push(worm::game::Flame {
+        x: 10,
+        y: 12,
+        life: 200,
+        fps: 10,
+        owner: 1,
+    });
+    // One second of contact (fps=10): up to 5 segments — but the worm has
+    // 4, so the head burns and the CPU wins.
+    for _ in 0..10 {
+        game.tick_flames();
+        if game.game_over {
+            break;
+        }
+    }
+    assert!(game.game_over, "a short worm in fire burns to the head inside a second");
+    assert_eq!(game.winner, Some(1));
+    assert_eq!(game.death_cause, Some(worm::DeathCause::Burned));
+}
+
+/// The decoy's timer: under v6 an untripped bomb at fuse 0 DETONATES
+/// (telegraphed by flash tiers first) instead of fizzling.
+#[test]
+fn the_decoy_detonates_after_its_flash() {
+    let mut game = worm::WormGame::with_size_seed(40, 30, 5);
+    game.bombs.push(worm::game::Bomb {
+        x: 20,
+        y: 20,
+        fuse: 3,
+        disguise: 5,
+        armed_in: 0,
+        owner: 0,
+        tripped: false,
+    });
+    // Flash tier rises as the fuse runs down (fps ~ 1000/frame_delay).
+    let b = game.bombs[0].clone();
+    assert!(game.bomb_flash_tier(&b) >= 1, "final frames flash");
+    for _ in 0..4 {
+        game.tick_bombs();
+    }
+    assert!(
+        game.bombs.is_empty(),
+        "the expired decoy detonated (tripped path) instead of lingering"
     );
 }

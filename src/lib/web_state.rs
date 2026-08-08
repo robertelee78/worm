@@ -39,6 +39,12 @@ struct GameState {
     /// SLIPSTREAM: the player is out in the corridor and world time runs
     /// at half speed (drives the browser's visual effect).
     slipstream: bool,
+    /// Napalm patches: (x, y, lifeFraction 0..1) — the renderer animates.
+    flames: Vec<(u16, u16, f32)>,
+    /// Per-cycle: currently burning (drives the body flame effect).
+    burning: [bool; 2],
+    /// Per-bomb flash tiers, aligned with `bombs` order (0 calm, 1, 2).
+    bomb_flash: Vec<u8>,
     frame: u32,
     time: u32,
     over: bool,
@@ -359,6 +365,13 @@ impl GameState {
         Self {
             schema_version: STATE_SCHEMA_VERSION,
             slipstream: game.player_in_corridor(),
+            flames: game
+                .flames
+                .iter()
+                .map(|f| (f.x, f.y, f.life as f32 / (f.fps.max(1) * 3) as f32))
+                .collect(),
+            burning: [game.burn_contact[0] > 0, game.burn_contact[1] > 0],
+            bomb_flash: game.bombs.iter().map(|b| game.bomb_flash_tier(b)).collect(),
             w: game.width,
             h: game.height,
             frame: game.frame_count,
