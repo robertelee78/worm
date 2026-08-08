@@ -771,8 +771,8 @@ impl Portfolio {
         let sum: f32 = self.weights.iter().sum();
         let mut p = [0.25f32; 4];
         if sum > 0.0 && sum.is_finite() {
-            for i in 0..4 {
-                p[i] = (1.0 - EXP3_GAMMA) * self.weights[i] / sum + EXP3_GAMMA / 4.0;
+            for (pi, w) in p.iter_mut().zip(self.weights.iter()) {
+                *pi = (1.0 - EXP3_GAMMA) * w / sum + EXP3_GAMMA / 4.0;
             }
         }
         p
@@ -798,12 +798,12 @@ impl Portfolio {
         let p = self.probs();
         let mut u = (fnv1a64(&draw.to_le_bytes()) % 10_000) as f32 / 10_000.0;
         self.active = 3;
-        for i in 0..4 {
-            if u < p[i] {
+        for (i, &pi) in p.iter().enumerate() {
+            if u < pi {
                 self.active = i;
                 break;
             }
-            u -= p[i];
+            u -= pi;
         }
         self.rounds += 1;
     }
@@ -1325,6 +1325,7 @@ impl ReadRate {
     ///    base cannot express, e.g. alternation);
     ///  * lateral lift over uniform chance (catches habits the base ALSO
     ///    calls — a real read even though the discordant stream is silent).
+    ///
     /// A null player latches neither, so an unearned read is exactly 0.
     pub fn earned_read(&self) -> f32 {
         let mcnemar = if self.mc_latched {
@@ -2823,7 +2824,7 @@ impl CpuBrain {
                 || l
                     .round_summaries
                     .iter()
-                    .any(|&(lat, alt, _, _)| alt > lat.saturating_sub(1).max(0))
+                    .any(|&(lat, alt, _, _)| alt > lat.saturating_sub(1))
                 || !l.ref_alt_median.is_finite() && l.ref_frozen
                 || l.alt_above > l.alt_trials
                 || l.gap_above > l.gap_trials;
@@ -3712,7 +3713,7 @@ fn best_food_target(
             return; // post-eat trap
         }
         let score = value / (md as f32 + 2.0);
-        if best.map_or(true, |(b, _, _)| score > b) {
+        if best.is_none_or(|(b, _, _)| score > b) {
             best = Some((score, sd, open));
         }
     };
@@ -4058,8 +4059,8 @@ pub fn encode_player_context(
     // other slot was <= 1.0, so after L2 this one block carried ~47% of the
     // vector's energy and cosine retrieval was mostly comparing tail lengths.
     if pairs > 0.0 {
-        for i in 25..28 {
-            vector[i] /= pairs;
+        for v in &mut vector[25..28] {
+            *v /= pairs;
         }
     }
     if let Some(t) = last_turn {
@@ -4695,8 +4696,8 @@ fn predict_player_positions_book(
     };
 
     let mut scenarios: Vec<(f32, Vec<(u16, u16)>)> = vec![(no_turn_mass, base.clone())];
-    for t in 0..max_frames {
-        if turn_mass[t] <= 1e-4 {
+    for (t, &mass) in turn_mass.iter().enumerate().take(max_frames) {
+        if mass <= 1e-4 {
             continue;
         }
         let (p_l, p_r) = split_at(t);
@@ -4803,7 +4804,7 @@ fn predict_player_positions_iterative(
         if game.arena_version >= 4 && game.has_corridor() {
             let in_corr = game.pos_in_corridor(px as u16, py as u16);
             let frame = game.frame_count + 1 + step as u32;
-            if in_corr && frame % 16 != 0 {
+            if in_corr && !frame.is_multiple_of(16) {
                 positions.push((px as u16, py as u16));
                 continue;
             }
@@ -4996,7 +4997,7 @@ impl Ensemble {
         let mut awake_loss = 0.0f32;
         let mut awake = 0u32;
         let mut slept = [false; ENSEMBLE_MODELS];
-        for i in 0..ENSEMBLE_MODELS {
+        for (i, slept_i) in slept.iter_mut().enumerate() {
             if let Some(pred) = self.pending[i].take() {
                 let hit = pred == actual;
                 self.num[i] += if hit { w2 } else { -w2 };
@@ -5011,7 +5012,7 @@ impl Ensemble {
                 self.w_fast[i] *= (-eta_fast * loss).exp();
                 self.w_slow[i] *= (-eta_slow * loss).exp();
             } else {
-                slept[i] = true;
+                *slept_i = true;
             }
         }
         // SLEEPERS ARE NOT CHARGED. The specialist-Hedge alternative —
@@ -5441,15 +5442,15 @@ fn m_arm_family(
     intent_family(game, &targets, committed)
 }
 
-pub fn compute_ensemble(
-    game: &WormGame,
-    brain: &CpuBrain,
-) -> (
+/// (per-model forecasts, elected model, its weight, intercept anchors).
+pub type EnsembleVerdict = (
     [Option<Direction>; ENSEMBLE_MODELS],
     usize,
     f32,
     [Option<(u16, u16)>; 2],
-) {
+);
+
+pub fn compute_ensemble(game: &WormGame, brain: &CpuBrain) -> EnsembleVerdict {
     let tail = &brain.player_tail;
     let (eat, eat_w, eat_commit) = m_eat_family(game, brain.intent_targets[0]);
     let (hunt, hunt_w) = m_hunt_family(game);
@@ -5544,8 +5545,8 @@ pub fn select_active(brain: &CpuBrain, masked: &[Option<Direction>]) -> (usize, 
     };
     let mut best = usize::MAX;
     let mut best_w = f32::NEG_INFINITY;
-    for i in 0..ENSEMBLE_MODELS {
-        if e.den[i] <= 0.0 || masked[i].is_none() {
+    for (i, m) in masked.iter().enumerate() {
+        if e.den[i] <= 0.0 || m.is_none() {
             continue;
         }
         if rank(i) > best_w {
@@ -5673,39 +5674,6 @@ pub fn should_fire(game: &mut WormGame, who: usize) -> bool {
     }
 }
 
-/// Beam path with arena-wall ricochet — mirror of game.rs beam_cells (the
-/// CPU's aim, the telegraph, and the actual shot must trace the same path).
-fn beam_cells(game: &WormGame, hx: u16, hy: u16, dx: i16, dy: i16) -> Vec<(u16, u16)> {
-    let mut out = Vec::new();
-    let mut x = hx as i16;
-    let mut y = hy as i16;
-    let mut rdx = dx;
-    let mut rdy = dy;
-    let mut bounces = 0;
-    loop {
-        x += rdx;
-        y += rdy;
-        if x < 0 || y < 0 || x >= game.width as i16 || y >= game.height as i16 {
-            break;
-        }
-        let (ux, uy) = (x as u16, y as u16);
-        if game.grid[uy as usize][ux as usize] == crate::game::CellType::Wall {
-            if bounces < 4 && game.is_arena_wall(ux, uy) {
-                if (ux == 2 || ux == game.width - 3) && rdx != 0 {
-                    rdx = -rdx;
-                }
-                if (uy == 2 || uy == game.height - 3) && rdy != 0 {
-                    rdy = -rdy;
-                }
-                bounces += 1;
-                continue;
-            }
-            break;
-        }
-        out.push((ux, uy));
-    }
-    out
-}
 
 /// Faithful to rps-ai's `think` + `decide`: memory-driven read,
 /// confidence-gated, blended with a base-rate prior, resolved by
@@ -6200,8 +6168,8 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
                     // encounters — and the earned trail kills — coming.
                     let (pdx, pdy) = game.cycles[0].direction.as_delta();
                     let (rx, ry) = (nx as i16 - px as i16, ny as i16 - py as i16);
-                    let ahead = rx * pdx as i16 + ry * pdy as i16 > 0;
-                    let lane_off = (rx * pdy as i16 - ry * pdx as i16).abs();
+                    let ahead = rx * pdx + ry * pdy > 0;
+                    let lane_off = (rx * pdy - ry * pdx).abs();
                     let head_on_lane = ahead && lane_off <= 1;
                     closer && !head_on_lane && count_open_space(game, nx, ny) >= escape_cells
                 })
@@ -6709,7 +6677,7 @@ pub fn record_player_episode(
     // always-straight baseline — and those disagreements are where all the
     // evidence of reading a player lives. The routine anchors stay as a
     // small calibration trickle, not as ballast.
-    if decision || brain.opp_brain.seq % STRAIGHT_KEEP_EVERY == 0 {
+    if decision || brain.opp_brain.seq.is_multiple_of(STRAIGHT_KEEP_EVERY) {
         brain.opp_brain.remember(context, player_next_dir);
     }
 }
@@ -6965,15 +6933,19 @@ mod tests {
     #[test]
     fn mcnemar_p_value_is_exact() {
         // 20 disagreements, all won by the CPU: p = 0.5^20.
-        let mut all = ReadRate::default();
-        all.cpu_only = 20;
-        all.mode_only = 0;
+        let all = ReadRate {
+            cpu_only: 20,
+            mode_only: 0,
+            ..ReadRate::default()
+        };
         assert!((all.p_value() - 0.5f32.powi(20)).abs() < 1e-9);
 
         // A dead-even split is the least significant result possible.
-        let mut even = ReadRate::default();
-        even.cpu_only = 10;
-        even.mode_only = 10;
+        let even = ReadRate {
+            cpu_only: 10,
+            mode_only: 10,
+            ..ReadRate::default()
+        };
         assert!(even.p_value() > 0.4, "p = {}", even.p_value());
 
         // No disagreements at all: nothing to conclude.
@@ -7199,9 +7171,11 @@ mod tests {
     /// undisclosed subset must not buy global aggression.
     #[test]
     fn an_abstaining_book_cannot_spend_full_evidence() {
-        let mut b = ClassBooks::default();
-        b.side_opportunities = 100;
-        b.side_declarations = 25;
+        let mut b = ClassBooks {
+            side_opportunities: 100,
+            side_declarations: 25,
+            ..ClassBooks::default()
+        };
         // Force a proven book_read so spendable is limited by coverage only.
         for i in 0..120u64 {
             let s = i.wrapping_mul(6364136223846793005).wrapping_add(7);

@@ -122,7 +122,8 @@ fn main() {
         let mut pend: Option<([Option<Direction>; ENSEMBLE_MODELS], Option<Direction>)> = None;
         let mut prev_heading = game.cycles[0].direction;
         let mut prev_legal = worm::legal_options_from(&game, 0, prev_heading);
-        let mut proj_pending: Option<(Vec<(u16, u16)>, Vec<(u16, u16)>, usize)> = None;
+        type ProjPending = (Vec<(u16, u16)>, Vec<(u16, u16)>, usize);
+        let mut proj_pending: Option<ProjPending> = None;
         let mut realized: Vec<(u16, u16)> = Vec::new();
         while !game.game_over && game.frame_count <= r.frames {
             // Freeze both projections from the CURRENT state every 5th frame.

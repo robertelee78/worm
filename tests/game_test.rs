@@ -2273,7 +2273,7 @@ fn test_errand_commitment_survives_while_closing() {
     game.cycles[1].positions = vec![(45, 35)];
     game.grid[35][45] = worm::CellType::CPU;
 
-    let mut place_player = |game: &mut WormGame, head: (u16, u16), neck: (u16, u16)| {
+    let place_player = |game: &mut WormGame, head: (u16, u16), neck: (u16, u16)| {
         for row in &mut game.grid {
             for cell in row.iter_mut() {
                 if *cell == worm::CellType::Player {
@@ -2325,7 +2325,7 @@ fn test_ghost_replay_reproduces_a_recorded_round_exactly() {
     let mut tick = 0u32;
     while !game.game_over && game.frame_count < 900 {
         tick += 1;
-        if tick % 7 == 0 {
+        if tick.is_multiple_of(7) {
             let cur = game.cycles[0].direction;
             let right = match cur {
                 worm::Direction::Up => worm::Direction::Right,
@@ -2562,12 +2562,12 @@ fn a_bolt_ahead_of_its_firer_kills_first() {
     // bolt that is one cell from the CPU.
     let cpu_head = (20u16, 10u16);
     game.cycles[1].head = cpu_head;
-    game.cycles[1].positions = vec![cpu_head].into();
+    game.cycles[1].positions = vec![cpu_head];
     game.grid[10][20] = worm::CellType::CPU;
     game.cycles[1].direction = worm::Direction::Right;
     let player_head = (18u16, 10u16);
     game.cycles[0].head = player_head;
-    game.cycles[0].positions = vec![player_head].into();
+    game.cycles[0].positions = vec![player_head];
     game.grid[10][18] = worm::CellType::Player;
     game.cycles[0].direction = worm::Direction::Right;
     game.projectiles.push(worm::Projectile {
@@ -2625,11 +2625,11 @@ fn the_corridor_worm_slips_while_the_arena_worm_flies() {
     // Player out in the corridor lane, CPU mid-arena, both heading right
     // along clear lanes.
     game.cycles[0].head = (5, 1);
-    game.cycles[0].positions = vec![(5, 1)].into();
+    game.cycles[0].positions = vec![(5, 1)];
     game.grid[1][5] = worm::CellType::Player;
     game.cycles[0].direction = worm::Direction::Right;
     game.cycles[1].head = (5, 15);
-    game.cycles[1].positions = vec![(5, 15)].into();
+    game.cycles[1].positions = vec![(5, 15)];
     game.grid[15][5] = worm::CellType::CPU;
     game.cycles[1].direction = worm::Direction::Right;
 
@@ -2660,11 +2660,11 @@ fn the_fast_worm_pays_the_reaction_tax() {
     let mut game = worm::WormGame::with_size_seed(40, 30, 5);
     game.read_rate = 1.0; // fully sharp: no opening doze in the way
     game.cycles[0].head = (5, 1); // player out in the corridor
-    game.cycles[0].positions = vec![(5, 1)].into();
+    game.cycles[0].positions = vec![(5, 1)];
     game.grid[1][5] = worm::CellType::Player;
     game.cycles[0].direction = worm::Direction::Right;
     game.cycles[1].head = (20, 15);
-    game.cycles[1].positions = vec![(20, 15)].into();
+    game.cycles[1].positions = vec![(20, 15)];
     game.grid[15][20] = worm::CellType::CPU;
     game.cycles[1].direction = worm::Direction::Right;
 
@@ -2696,14 +2696,14 @@ fn corridor_keypresses_are_not_eaten_and_reversals_stay_banned() {
     // Player descending the left corridor column with a real neck above,
     // and a punched hole beside them to legally turn into.
     game.cycles[0].head = (1, 4);
-    game.cycles[0].positions = vec![(1, 4), (1, 3)].into();
+    game.cycles[0].positions = vec![(1, 4), (1, 3)];
     game.grid[4][1] = worm::CellType::Player;
     game.grid[3][1] = worm::CellType::Player;
     game.cycles[0].direction = worm::Direction::Down;
     game.cycles[0].prev_direction = worm::Direction::Down;
     game.grid[4][2] = worm::CellType::Hole;
     game.cycles[1].head = (20, 15);
-    game.cycles[1].positions = vec![(20, 15)].into();
+    game.cycles[1].positions = vec![(20, 15)];
     game.grid[15][20] = worm::CellType::CPU;
     game.cycles[1].direction = worm::Direction::Right;
     game.cpu_autopilot = false;
@@ -2750,7 +2750,7 @@ fn the_cpu_knows_what_the_slipstream_does() {
     // Player slipped in the top corridor lane; no move-frame inside the
     // 5-frame horizon from frame 1.
     game.cycles[0].head = (6, 1);
-    game.cycles[0].positions = vec![(6, 1)].into();
+    game.cycles[0].positions = vec![(6, 1)];
     game.grid[1][6] = worm::CellType::Player;
     game.cycles[0].direction = worm::Direction::Right;
     game.frame_count = 1;
@@ -2780,7 +2780,7 @@ fn the_cpu_knows_what_the_slipstream_does() {
 fn an_enveloped_cpu_blasts_itself_an_exit() {
     let mut game = worm::WormGame::with_size_seed(40, 30, 5);
     game.cycles[1].head = (10, 10);
-    game.cycles[1].positions = vec![(10, 10)].into();
+    game.cycles[1].positions = vec![(10, 10)];
     game.grid[10][10] = worm::CellType::CPU;
     game.cycles[1].direction = worm::Direction::Left;
     game.cycles[1].held_powerup = Some(worm::game::PowerUpKind::Laser);
@@ -2788,7 +2788,7 @@ fn an_enveloped_cpu_blasts_itself_an_exit() {
     // beam ricochets along its own row, so row 10 would be a legal kill
     // line, not a breach test.
     game.cycles[0].head = (14, 15);
-    game.cycles[0].positions = vec![(14, 15)].into();
+    game.cycles[0].positions = vec![(14, 15)];
     game.grid[15][14] = worm::CellType::Player;
 
     // Not enveloped: region stable — no breach shot (and no kill line:

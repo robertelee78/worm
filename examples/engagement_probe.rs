@@ -88,7 +88,7 @@ fn forager(game: &WormGame, rng: &mut Rng) -> Direction {
         for &(fx, fy, fv) in &game.food_items {
             let dist = (nx as i16 - fx as i16).abs() + (ny as i16 - fy as i16).abs();
             let score = fv as f32 / (dist as f32 + 1.0);
-            if best.map_or(true, |(b, _)| score > b) {
+            if best.is_none_or(|(b, _)| score > b) {
                 best = Some((score, d));
             }
         }
@@ -538,7 +538,7 @@ fn report(label: &str, a: &Agg, show_trails: bool) {
     }
     if !a.dwells.is_empty() {
         let mut d = a.dwells.clone();
-        d.sort_by(|x, y| y.2.cmp(&x.2));
+        d.sort_by_key(|x| std::cmp::Reverse(x.2));
         println!("corner-dwell episodes >=20 frames (longest first):");
         for (g, f0, n, r) in d.iter().take(8) {
             println!("   game {:>2}  frames {}..{}  ({} frames)  entered while: {}", g, f0, f0 + n, n, r);

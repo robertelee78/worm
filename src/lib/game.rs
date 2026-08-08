@@ -1034,7 +1034,7 @@ impl WormGame {
         // own making, no decisions, no learning about it (a frozen frame
         // is not a choice). The other worm plays at full rate. Solid
         // while frozen: it can still be hit, shot, and sealed in.
-        let slip_hold = self.arena_version >= 4 && self.frame_count % 16 != 0;
+        let slip_hold = self.arena_version >= 4 && !self.frame_count.is_multiple_of(16);
         let player_frozen = slip_hold && self.cycle_in_corridor(self.player);
         let cpu_frozen = slip_hold && self.cycle_in_corridor(1);
 
@@ -1839,9 +1839,9 @@ impl WormGame {
             && ((self.cycles[0].alive && self.cycle_in_corridor(0))
                 || (self.cycles[1].alive && self.cycle_in_corridor(1)));
         let slip_lag =
-            slip_clock && !cpu_frozen && self.frame_count % 4 != 0;
+            slip_clock && !cpu_frozen && !self.frame_count.is_multiple_of(4);
         let cpu_dozing = self.cpu_autopilot
-            && ((open_k > 1 && self.frame_count % open_k != 0) || slip_lag)
+            && ((open_k > 1 && !self.frame_count.is_multiple_of(open_k)) || slip_lag)
             && {
             let cy = &self.cycles[1];
             let (dx, dy) = cy.direction.as_delta();

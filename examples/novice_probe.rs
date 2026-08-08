@@ -10,6 +10,7 @@
 //!   * steers greedily toward the nearest food with no route planning;
 //!   * avoids walls/trails only one cell ahead (no flood fill);
 //!   * occasionally dithers (random legal turn).
+//!
 //! Runs on the browser board with a COLD brain each game (a first-time
 //! visitor has taught the CPU nothing).
 
@@ -25,11 +26,11 @@ impl Rng {
 
 fn novice(game: &WormGame, rng: &mut Rng, tick: u32) -> Option<Direction> {
     // Attention: a casual player adjusts course a few times a second.
-    if tick % 5 != 0 {
+    if !tick.is_multiple_of(5) {
         return None;
     }
     let cur = game.cycles[0].direction;
-    let legal = worm::legal_options_from(&game, 0, cur);
+    let legal = worm::legal_options_from(game, 0, cur);
     if legal.is_empty() {
         return None;
     }
