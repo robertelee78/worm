@@ -2036,8 +2036,40 @@ impl WormGame {
                     .bombs
                     .iter()
                     .any(|b| b.owner == 1 && b.x == nx as u16 && b.y == ny as u16);
+            // World v9 (both consultants, adopted narrowly): holding
+            // heading into an open cell with ZERO onward exits — a
+            // one-step dead-end pocket — wakes the doze exactly like a
+            // wall would. Same static-geometry class as the wall/ring/
+            // own-mine reflexes; a trail DIRECTLY ahead stays invisible
+            // (stepping into it remains the classic earned kill), and
+            // the wake only hands control to the normal decision — it
+            // never redirects a decided step. (Receipt: dozy CPUs died
+            // pocketed at the interior-ring corners between the
+            // persona's wall lap and the wall — 16 of 26 warm losses,
+            // the same cells and frames since v6, amplified by every
+            // physics change.)
+            let pocket_ahead = self.arena_version >= 9
+                && !wall_ahead
+                && nx >= 0
+                && ny >= 0
+                && self.passable(nx as u16, ny as u16)
+                && {
+                    let (hx0, hy0) = (cy.head.0 as i16, cy.head.1 as i16);
+                    [(1i16, 0i16), (-1, 0), (0, 1), (0, -1)].iter().all(
+                        |&(ddx, ddy)| {
+                            let (px, py) = (nx + ddx, ny + ddy);
+                            (px, py) == (hx0, hy0)
+                                || px < 0
+                                || py < 0
+                                || px >= self.width as i16
+                                || py >= self.height as i16
+                                || !self.passable(px as u16, py as u16)
+                        },
+                    )
+                };
             !wall_ahead
                 && !own_mine_ahead
+                && !pocket_ahead
                 && !crate::cpu_ai::ring_doomed_step(self, cy.head, cy.direction)
         };
         let cpu_dir = if cpu_frozen {
@@ -2578,6 +2610,40 @@ impl WormGame {
         self.cpu_brain.earned_snapshot = base;
         if base > 0.0 {
             self.cpu_brain.discipline_latched = true;
+        }
+        // DWELL RELEASE (k3 v9 ruling 2b): a latch that keeps spending
+        // ~nothing for K consecutive round boundaries is holding a dead
+        // read — the diluted z can hover just above the Schmitt release
+        // forever while the player's old habit is long gone. Release is
+        // keyed to the spend (harm), and the honest-unlearning claim
+        // stays a hard == 0.0.
+        {
+            // The family spend is max(published, book): the dwell must
+            // release EVERY latch funding it, or a 0.02 book residue
+            // holds the "read" forever while the published side idles.
+            let lr = &self.cpu_brain.lifetime_read;
+            let br = &self.cpu_brain.class_books.book_read;
+            let latched =
+                lr.lat_latched || lr.mc_latched || br.lat_latched || br.mc_latched;
+            if latched && base > 0.0 && base < crate::cpu_ai::CpuBrain::SPEND_DWELL_FLOOR
+            {
+                self.cpu_brain.spend_dwell = self.cpu_brain.spend_dwell.saturating_add(1);
+                if self.cpu_brain.spend_dwell
+                    >= crate::cpu_ai::CpuBrain::SPEND_DWELL_ROUNDS
+                {
+                    let lr = &mut self.cpu_brain.lifetime_read;
+                    lr.lat_latched = false;
+                    lr.mc_latched = false;
+                    let br = &mut self.cpu_brain.class_books.book_read;
+                    br.lat_latched = false;
+                    br.mc_latched = false;
+                    self.cpu_brain.spend_dwell = 0;
+                    self.cpu_brain.earned_snapshot =
+                        self.cpu_brain.family_earned_read();
+                }
+            } else {
+                self.cpu_brain.spend_dwell = 0;
+            }
         }
         self.cpu_brain.book_spend_snapshot = self.cpu_brain.class_books.spendable();
         self.cpu_brain.book_authority_snapshot =
@@ -3539,9 +3605,6 @@ impl WormGame {
                 self.detonate(b.x, b.y, fowner);
             }
         }
-        if self.game_over {
-            return;
-        }
         let mut deaths = [false; 2];
         for (who, death_slot) in deaths.iter_mut().enumerate() {
             if !self.cycles[who].alive {
@@ -3569,17 +3632,19 @@ impl WormGame {
             let b = &mut self.burns[who];
             b.contact_ms = b.contact_ms.saturating_add(tick_ms);
             let t = b.contact_ms;
+            // FLOOR pacing (k3 v9 verify): each tier's quota spreads
+            // across its second and COMPLETES at the boundary — the
+            // 5th segment lands at t=1.0s, the 8th at 2.0s, the 9th at
+            // 3.0s; ceil pacing front-loaded each tier's first quantum
+            // onto the boundary tick.
             let target = if t >= 3_000 {
                 9
             } else if t >= 2_000 {
-                // Third second: 8 spread over the second, capped at 9.
                 8 + (t - 2_000) / 1_000
             } else if t >= 1_000 {
-                // Second second: 5 done, 3 more spread across it.
-                5 + ((t - 1_000) * 3).div_ceil(1_000)
+                5 + (t - 1_000) * 3 / 1_000
             } else {
-                // First second: up to 5, spread across it.
-                (t * 5).div_ceil(1_000)
+                t * 5 / 1_000
             };
             while b.taken < target {
                 b.taken += 1;
@@ -3619,6 +3684,10 @@ impl WormGame {
                     }
                 }
             }
+            // ATOMIC with any death already on this frame (codex v9
+            // verify: the hazard phase must run on game-over exits too —
+            // a burn completing while the other worm crashed is a draw,
+            // same law as reconcile_beams).
             self.game_over = true;
             self.winner = match (!self.cycles[0].alive, !self.cycles[1].alive) {
                 (true, true) => None,

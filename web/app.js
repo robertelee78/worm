@@ -1382,6 +1382,24 @@ function render(s) {
     offCtx.fillRect(x * CELL + CELL * 0.28, y * CELL + CELL * 0.28, CELL * 0.44, CELL * 0.44);
   }
 
+  // NAPALM (world v9): flame patches — three flickering layers whose
+  // alpha tracks remaining life; drawn under worms so a body crossing
+  // fire reads as IN it.
+  if (s.flames && s.flames.length) {
+    const t = performance.now();
+    for (const [fx, fy, lifePct] of s.flames) {
+      const base = 0.25 + 0.65 * (lifePct / 100);
+      const flick = 0.75 + 0.25 * Math.sin(t / 47 + fx * 3.1 + fy * 1.7);
+      offCtx.fillStyle = `rgba(255, 90, 20, ${(base * flick).toFixed(3)})`;
+      offCtx.fillRect(fx * CELL, fy * CELL, CELL, CELL);
+      offCtx.fillStyle = `rgba(255, 170, 30, ${(base * flick * 0.7).toFixed(3)})`;
+      offCtx.fillRect(fx * CELL + 2, fy * CELL + 2, CELL - 4, CELL - 4);
+      offCtx.fillStyle = `rgba(255, 240, 120, ${(base * flick * 0.5).toFixed(3)})`;
+      offCtx.fillRect(fx * CELL + CELL / 2 - 2, fy * CELL + CELL / 2 - 2, 4, 4);
+    }
+  }
+
+
   // LASER BEAMS (ADR-023 contract): the sim's own cells, full-cell
   // quads, drawn UNDER the worms. Age 0 = solid lethal core; 1-5 =
   // rapidly dimming afterimage; 6-20 = sparse embers, visibly residue.
@@ -1483,23 +1501,6 @@ function render(s) {
     offCtx.beginPath();
     offCtx.arc(cx, cy, R * 1.05, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * frac);
     offCtx.stroke();
-  }
-
-  // NAPALM (world v9): flame patches — three flickering layers whose
-  // alpha tracks remaining life; drawn under worms so a body crossing
-  // fire reads as IN it.
-  if (s.flames && s.flames.length) {
-    const t = performance.now();
-    for (const [fx, fy, lifePct] of s.flames) {
-      const base = 0.25 + 0.65 * (lifePct / 100);
-      const flick = 0.75 + 0.25 * Math.sin(t / 47 + fx * 3.1 + fy * 1.7);
-      offCtx.fillStyle = `rgba(255, 90, 20, ${(base * flick).toFixed(3)})`;
-      offCtx.fillRect(fx * CELL, fy * CELL, CELL, CELL);
-      offCtx.fillStyle = `rgba(255, 170, 30, ${(base * flick * 0.7).toFixed(3)})`;
-      offCtx.fillRect(fx * CELL + 2, fy * CELL + 2, CELL - 4, CELL - 4);
-      offCtx.fillStyle = `rgba(255, 240, 120, ${(base * flick * 0.5).toFixed(3)})`;
-      offCtx.fillRect(fx * CELL + CELL / 2 - 2, fy * CELL + CELL / 2 - 2, 4, 4);
-    }
   }
 
   // DECOY FLASH (world v8): the last two seconds of a planted bomb

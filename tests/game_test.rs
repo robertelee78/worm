@@ -3679,14 +3679,39 @@ fn test_v9_burn_schedule_five_three_one() {
     }
     // Player fire under the CPU's mid-body.
     game.ignite(30, 10, 0);
-    let mut lens = Vec::new();
     let mut ms = 0u32;
+    let mut was_burning = false;
+    let mut at = [0usize; 3]; // len at the 1s / 2s / 3s boundaries
     while ms < 3_600 {
+        // Sample on the ENGINE's contact clock, just before each
+        // boundary tranche begins; stop when the schedule completes
+        // (the state resets to 0 and must not re-arm the sampler).
+        let t_now = game.burns[1].contact_ms;
+        if was_burning && t_now == 0 {
+            // The 9th segment burns and the state resets inside one
+            // tick — the 3s checkpoint is the completed state.
+            at[2] = game.cycles[1].positions.len();
+            break;
+        }
+        was_burning |= t_now > 0;
+        // Under FLOOR pacing each tier COMPLETES at its boundary: the
+        // first tick at-or-past the mark holds exactly the tier total.
+        for (i, mark) in [1_000u32, 2_000, 3_000].iter().enumerate() {
+            if t_now >= *mark && at[i] == 0 {
+                at[i] = game.cycles[1].positions.len();
+            }
+        }
         game.tick_flames();
         ms += game.frame_delay().as_millis() as u32;
-        lens.push(game.cycles[1].positions.len());
     }
-    let final_len = *lens.last().unwrap();
+    // codex v9 verify: the tier boundaries themselves, not just the
+    // total — at[i] holds the length at the LAST tick before each
+    // boundary, i.e. the tranche totals: 5, then 5+3, then the loop's
+    // final state adds the last 1.
+    assert_eq!(20 - at[0], 5, "first second: up to 5 segments");
+    assert_eq!(20 - at[1], 8, "second second: 3 more");
+    assert_eq!(20 - at[2], 9, "third second: the last 1");
+    let final_len = game.cycles[1].positions.len();
     assert_eq!(20 - final_len, 9, "5+3+1 segments burn off, then the fire lets go");
     assert!(game.cycles[1].alive, "a 20-long worm survives the full schedule");
     assert_eq!(game.burns[1].contact_ms, 0, "the burn state resets after completion");
@@ -3766,10 +3791,22 @@ fn test_v9_flame_cooks_decoy() {
     game.bombs.push(worm::game::Bomb {
         x: 40, y: 15, fuse: 14_000, disguise: 4, armed_in: 0, owner: 1, tripped: false,
     });
+    // A CPU trail cell inside the blast cross: the cook's detonation is
+    // credited to the FLAME owner (the player), so the CPU trail is fair
+    // game for the sweep — proof the blast really ran with fire credit.
+    game.cycles[1].positions = vec![(20, 10), (44, 15)];
+    game.grid[15][44] = worm::CellType::CPU;
     game.ignite(40, 15, 0);
     assert!(
         game.bombs.is_empty(),
         "the decoy cooked off the moment fire touched it"
+    );
+    assert_eq!(
+        game.grid[15][44],
+        worm::CellType::Empty,
+        "the cook detonated with the flame owner's credit — the opponent \
+         trail in the cross was swept (owner-safe rules applied to the \
+         player as owner, CPU as target)"
     );
 }
 
@@ -3803,4 +3840,114 @@ fn test_v8_pin_trishot_still_blasts() {
         game.advance_projectiles();
     }
     assert!(game.flames.is_empty(), "v8 replays never see fire");
+}
+
+/// codex v9 verify (blocking): the hazard phase runs on game-over exits
+/// too — a burn completing while the opponent's death already ended the
+/// game converts the result to a draw, atomically.
+#[test]
+fn test_v9_burn_completing_on_a_death_frame_is_a_draw() {
+    let mut game = v9_board();
+    // Short CPU already deep in a burn.
+    game.cycles[1].positions = vec![(20, 10), (21, 10)];
+    game.grid[10][21] = worm::CellType::CPU;
+    game.ignite(21, 10, 0);
+    game.tick_flames(); // caught
+    assert!(game.burns[1].contact_ms > 0);
+    // The player dies this frame (any cause); the frame's hazard phase
+    // still burns the CPU down — both dead, draw.
+    game.cycles[0].alive = false;
+    game.game_over = true;
+    game.winner = Some(1);
+    if game.death_cause.is_none() {
+        game.death_cause = Some(worm::DeathCause::Wall);
+    }
+    let mut ms = 0u32;
+    while game.cycles[1].alive && ms < 2_000 {
+        game.tick_flames();
+        ms += game.frame_delay().as_millis() as u32;
+    }
+    assert!(!game.cycles[1].alive, "the burn ran to its kill despite game_over");
+    assert_eq!(game.winner, None, "both dead on the frame -> draw, atomically");
+}
+
+/// v9 rulings (both consultants): the doze wakes before entering an
+/// open one-step dead-end pocket — and a trail DIRECTLY ahead stays
+/// invisible (the classic earned kill is untouched).
+#[test]
+fn test_v9_doze_wakes_at_a_pocket_but_stays_blind_to_trails() {
+    let pocket = |version: u8| -> bool {
+        let mut game = worm::WormGame::with_size_seed(60, 30, 7);
+        game.set_world_version(version);
+        game.frame_count = 0; // update() observes frame 1: doze candidate
+        let (hx, hy) = game.cycles[1].head;
+        let (dx, dy) = game.cycles[1].direction.as_delta();
+        let (nx, ny) = ((hx as i16 + dx) as u16, (hy as i16 + dy) as u16);
+        // Box the successor: every onward exit is enemy trail.
+        for (ddx, ddy) in [(1i16, 0i16), (-1, 0), (0, 1), (0, -1)] {
+            let (px, py) = (nx as i16 + ddx, ny as i16 + ddy);
+            if (px as u16, py as u16) == (hx, hy) {
+                continue;
+            }
+            game.grid[py as usize][px as usize] = worm::CellType::Player;
+        }
+        game.update();
+        game.cpu_telemetry.decision.is_some()
+    };
+    assert!(pocket(9), "v9: the pocket wakes the doze (a decision frame)");
+    assert!(!pocket(8), "pre-v9 arms keep their recorded blindness");
+
+    // Trail DIRECTLY ahead: still invisible to the doze.
+    let mut game = worm::WormGame::with_size_seed(60, 30, 7);
+    game.frame_count = 0;
+    let (hx, hy) = game.cycles[1].head;
+    let (dx, dy) = game.cycles[1].direction.as_delta();
+    game.grid[(hy as i16 + dy) as usize][(hx as i16 + dx) as usize] =
+        worm::CellType::Player;
+    game.update();
+    assert!(
+        game.cpu_telemetry.decision.is_none(),
+        "a trail one cell ahead never wakes the doze — the earned Tron \
+         kill survives the pocket rule"
+    );
+}
+
+/// k3 v9 ruling 2b: the DWELL release. A latched read whose spend sits
+/// below the behavioral floor for K consecutive round boundaries
+/// releases outright; a healthy spend resets the dwell.
+#[test]
+fn test_dwell_release_frees_a_dead_latch() {
+    let mut game = worm::WormGame::with_size_seed(60, 30, 7);
+    // A latched-but-nearly-dead published read: tiny positive lift.
+    let lr = &mut game.cpu_brain.lifetime_read;
+    lr.lat_samples = 400;
+    lr.lat_hits = 218;
+    lr.lat_chance = 200.0;
+    lr.lat_var = 100.0;
+    lr.lat_latched = true;
+    game.refresh_read_rate();
+    let spend = game.cpu_brain.family_earned_read();
+    assert!(
+        spend > 0.0 && spend < worm::CpuBrain::SPEND_DWELL_FLOOR,
+        "fixture: latched with a sub-floor spend ({spend})"
+    );
+    for _ in 0..worm::CpuBrain::SPEND_DWELL_ROUNDS {
+        game.refresh_read_rate();
+    }
+    assert_eq!(
+        game.cpu_brain.family_earned_read(),
+        0.0,
+        "K below-floor boundaries release the dead latch to a hard zero"
+    );
+    // A healthy read never dwells out.
+    let lr = &mut game.cpu_brain.lifetime_read;
+    lr.lat_hits = 380;
+    lr.lat_latched = true;
+    for _ in 0..3 * worm::CpuBrain::SPEND_DWELL_ROUNDS as usize {
+        game.refresh_read_rate();
+    }
+    assert!(
+        game.cpu_brain.family_earned_read() > 0.0,
+        "a spend above the floor holds its latch indefinitely"
+    );
 }

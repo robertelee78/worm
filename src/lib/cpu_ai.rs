@@ -1588,6 +1588,16 @@ pub struct CpuBrain {
     /// only survival basics are latched.
     #[serde(skip)]
     pub discipline_latched: bool,
+    /// DWELL RELEASE counter (k3 v9 ruling 2b): consecutive round
+    /// boundaries at which a latched read's SE-shrunk spend sat below
+    /// the behavioral floor. The Schmitt pair (open at the look bound,
+    /// release at z<1) has an unbounded dead zone between them — under
+    /// heavy dilution the diluted z can asymptote just above 1.0 and
+    /// the latch never releases while spending nothing. K consecutive
+    /// below-floor boundaries release it: keyed to HARM (a spend too
+    /// small to change behavior), never to a loosened assertion.
+    #[serde(skip)]
+    pub spend_dwell: u8,
     /// Round-boundary snapshots of the book's spendable evidence and
     /// projection authority (codex round 3): a latch that opens mid-round
     /// must not reshape projections or defensive trust before any
@@ -2472,6 +2482,7 @@ impl Default for CpuBrain {
             prev_pc_dist: 0,
             earned_snapshot: 0.0,
             discipline_latched: false,
+            spend_dwell: 0,
             book_spend_snapshot: 0.0,
             book_authority_snapshot: false,
             tactic_prefer_direct: false,
@@ -2492,6 +2503,13 @@ impl CpuBrain {
     /// individually latched under the shared family-wise anytime boundary
     /// and spending an SE-shrunk lift. The book half sits behind the
     /// book_spend attribution switch (codex D10).
+    /// Below this spend the read moves no behavior worth defending —
+    /// the dwell release's floor (k3 v9 ruling 2b).
+    pub const SPEND_DWELL_FLOOR: f32 = 0.05;
+    /// Consecutive below-floor round boundaries before a latched read
+    /// releases outright.
+    pub const SPEND_DWELL_ROUNDS: u8 = 5;
+
     pub fn family_earned_read(&self) -> f32 {
         let published = self.lifetime_read.earned_read();
         if crate::tuning::tuning().book_spend < 0.5 {
