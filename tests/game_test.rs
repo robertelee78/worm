@@ -351,6 +351,8 @@ fn test_laser_detonating_own_bomb_does_not_self_kill() {
 #[test]
 fn test_same_frame_kills_are_a_draw() {
     let mut game = WormGame::with_size(120, 38);
+    // v8 pin: pre-napalm bolt physics (recorded ghosts keep it).
+    game.set_world_version(8);
     for row in &mut game.grid {
         for cell in row.iter_mut() {
             if *cell != worm::CellType::Wall {
@@ -2204,6 +2206,8 @@ fn trishot_board() -> WormGame {
 #[test]
 fn test_bolt_on_trail_severs_from_the_hit_back() {
     let mut game = trishot_board();
+    // v8 pin: pre-napalm bolt physics (recorded ghosts keep it).
+    game.set_world_version(8);
     // CPU body crossing the straight ray at x=20, head safely off-ray and
     // far from the 2x2 burst.
     game.cycles[1].head = (20, 26);
@@ -2255,6 +2259,8 @@ fn test_bolt_on_trail_severs_from_the_hit_back() {
 #[test]
 fn test_head_inside_burst_dies() {
     let mut game = trishot_board();
+    // v8 pin: pre-napalm bolt physics (recorded ghosts keep it).
+    game.set_world_version(8);
     // Head sits one cell PAST the trail cell the bolt strikes, inside the
     // forward-biased 2x2 (impact (20,20) heading Right covers (21,20)).
     game.cycles[1].head = (21, 20);
@@ -2286,6 +2292,8 @@ fn test_head_inside_burst_dies() {
 #[test]
 fn test_burst_spares_walls_and_own_trail() {
     let mut game = trishot_board();
+    // v8 pin: pre-napalm bolt physics (recorded ghosts keep it).
+    game.set_world_version(8);
     // Opponent trail hugging the top wall lane so the burst quadrant
     // includes an arena-wall cell.
     let wall_y = 3usize; // arena wall ring (ring 3 since world v6)
@@ -2635,6 +2643,8 @@ fn the_corridor_turns_the_corners_and_replays_keep_their_arena() {
 #[test]
 fn a_bolt_ahead_of_its_firer_kills_first() {
     let mut game = worm::WormGame::with_size_seed(40, 30, 3);
+    // v8 pin: pre-napalm bolt physics (recorded ghosts keep it).
+    game.set_world_version(8);
     // Place the duel by hand: CPU head at (20,10); player right behind a
     // bolt that is one cell from the CPU.
     let cpu_head = (20u16, 10u16);
@@ -3614,4 +3624,183 @@ fn test_v8_flash_wire_calm_absent_flashing_present() {
     game.bombs[0].fuse = 900;
     let s = worm::web_state::to_json(&game);
     assert!(s.contains("\"bombFlash\":[[30,15,2]]"), "tier 2 appears on the wire");
+}
+
+/* ------------------------------ world v9: napalm ------------------------------ */
+
+fn v9_board() -> WormGame {
+    let mut game = WormGame::with_size(120, 38);
+    assert!(game.arena_version >= 9);
+    game.cpu_autopilot = false;
+    game.food_items.clear();
+    game.cycles[0].head = (60, 20);
+    game.cycles[0].positions = vec![(60, 20)];
+    game.grid[20][60] = worm::CellType::Player;
+    game.cycles[1].head = (20, 10);
+    game.cycles[1].positions = vec![(20, 10)];
+    game.grid[10][20] = worm::CellType::CPU;
+    game
+}
+
+/// The bolt flies 4 cells and drops fire where it stops; the flame lasts
+/// ~3 wall-clock seconds.
+#[test]
+fn test_v9_bolt_stops_at_four_and_ignites() {
+    let mut game = v9_board();
+    game.cycles[0].direction = worm::Direction::Right;
+    game.cycles[0].held_powerup = Some(worm::game::PowerUpKind::TriShot);
+    assert!(game.fire_powerup(0));
+    for _ in 0..6 {
+        game.advance_projectiles();
+    }
+    assert!(game.projectiles.is_empty(), "bolts are spent after 4 cells");
+    assert!(
+        game.flames.iter().any(|f| (f.x, f.y) == (64, 20)),
+        "the straight bolt's fire lands exactly 4 cells out"
+    );
+    assert_eq!(game.flames.len(), 3, "all three bolts ignite");
+    // Fire burns out on the wall clock.
+    for _ in 0..400 {
+        game.tick_flames();
+    }
+    assert!(game.flames.is_empty(), "flames die after ~3s");
+}
+
+/// The 5/3/1 wall-clock schedule, sticky to completion: a long worm
+/// standing in fire loses up to 5 segments in second one, 3 in second
+/// two, 1 in second three — 9 total — then the fire lets go.
+#[test]
+fn test_v9_burn_schedule_five_three_one() {
+    let mut game = v9_board();
+    game.cycles[1].positions = (0..20).map(|i| (20u16 + i, 10u16)).collect();
+    game.cycles[1].head = (20, 10);
+    for i in 0..20 {
+        game.grid[10][20 + i as usize] = worm::CellType::CPU;
+    }
+    // Player fire under the CPU's mid-body.
+    game.ignite(30, 10, 0);
+    let mut lens = Vec::new();
+    let mut ms = 0u32;
+    while ms < 3_600 {
+        game.tick_flames();
+        ms += game.frame_delay().as_millis() as u32;
+        lens.push(game.cycles[1].positions.len());
+    }
+    let final_len = *lens.last().unwrap();
+    assert_eq!(20 - final_len, 9, "5+3+1 segments burn off, then the fire lets go");
+    assert!(game.cycles[1].alive, "a 20-long worm survives the full schedule");
+    assert_eq!(game.burns[1].contact_ms, 0, "the burn state resets after completion");
+}
+
+/// STICKY: the schedule keeps burning even after the tail shrinks out
+/// of the flame cell (the fire "caught" — it is not contact-gated).
+#[test]
+fn test_v9_burn_is_sticky_after_leaving_the_fire() {
+    let mut game = v9_board();
+    game.cycles[1].positions = (0..12).map(|i| (20u16 + i, 10u16)).collect();
+    game.cycles[1].head = (20, 10);
+    for i in 0..12 {
+        game.grid[10][20 + i as usize] = worm::CellType::CPU;
+    }
+    // Fire on the TAIL TIP cell only.
+    game.ignite(31, 10, 0);
+    // One tick catches; then remove the flame entirely (simulates the
+    // burning tail having shrunk out / fire elsewhere gone).
+    game.tick_flames();
+    assert!(game.burns[1].contact_ms > 0, "caught");
+    game.flames.clear();
+    let mut ms = 0u32;
+    while ms < 3_600 {
+        game.tick_flames();
+        ms += game.frame_delay().as_millis() as u32;
+    }
+    assert_eq!(
+        12 - game.cycles[1].positions.len(),
+        9,
+        "the full 5/3/1 schedule ran to completion without the flame"
+    );
+}
+
+/// Burned past the head = dead, attributed to the flame's owner.
+#[test]
+fn test_v9_head_burn_kills_and_attributes() {
+    let mut game = v9_board();
+    // A 3-long CPU: 5-segment first second burns past its head.
+    game.cycles[1].positions = vec![(20, 10), (21, 10), (22, 10)];
+    for x in 20..=22 {
+        game.grid[10][x] = worm::CellType::CPU;
+    }
+    game.ignite(22, 10, 0);
+    let mut ms = 0u32;
+    while !game.game_over && ms < 2_000 {
+        game.tick_flames();
+        ms += game.frame_delay().as_millis() as u32;
+    }
+    assert!(game.game_over, "a 3-long worm cannot survive the first second");
+    assert_eq!(game.winner, Some(0));
+    assert_eq!(game.death_cause, Some(worm::DeathCause::Burned));
+    assert_eq!(game.burns[1].burned_by, 0, "the kill credits the firer");
+}
+
+/// ADR-023 rule: the firer is immune to their OWN fire.
+#[test]
+fn test_v9_own_fire_never_burns() {
+    let mut game = v9_board();
+    game.cycles[1].positions = vec![(20, 10), (21, 10), (22, 10)];
+    for x in 20..=22 {
+        game.grid[10][x] = worm::CellType::CPU;
+    }
+    // The CPU's own fire under its own body.
+    game.ignite(21, 10, 1);
+    for _ in 0..200 {
+        game.tick_flames();
+    }
+    assert!(game.cycles[1].alive);
+    assert_eq!(game.cycles[1].positions.len(), 3, "own fire burned nothing");
+}
+
+/// Fire COOKS a decoy: early detonation, credited to the flame's owner.
+#[test]
+fn test_v9_flame_cooks_decoy() {
+    let mut game = v9_board();
+    game.bombs.push(worm::game::Bomb {
+        x: 40, y: 15, fuse: 14_000, disguise: 4, armed_in: 0, owner: 1, tripped: false,
+    });
+    game.ignite(40, 15, 0);
+    assert!(
+        game.bombs.is_empty(),
+        "the decoy cooked off the moment fire touched it"
+    );
+}
+
+/// A frozen worm still burns — the schedule runs on the global wall
+/// clock (consistency over mercy; ADR-022 matrix).
+#[test]
+fn test_v9_frozen_worm_burns() {
+    let mut game = v9_board();
+    game.cycles[1].positions = (0..12).map(|i| (20u16 + i, 10u16)).collect();
+    for i in 0..12 {
+        game.grid[10][20 + i as usize] = worm::CellType::CPU;
+    }
+    game.ignite(25, 10, 0);
+    // tick_flames has no per-worm freeze gate at all — burning is global
+    // by construction; assert segments come off without any update().
+    for _ in 0..40 {
+        game.tick_flames();
+    }
+    assert!(game.cycles[1].positions.len() < 12, "the fire does not care who moves");
+}
+
+/// v8 pin: recorded ghosts keep the blast tri-shot (no flames at all).
+#[test]
+fn test_v8_pin_trishot_still_blasts() {
+    let mut game = v9_board();
+    game.set_world_version(8);
+    game.cycles[0].direction = worm::Direction::Right;
+    game.cycles[0].held_powerup = Some(worm::game::PowerUpKind::TriShot);
+    assert!(game.fire_powerup(0));
+    for _ in 0..80 {
+        game.advance_projectiles();
+    }
+    assert!(game.flames.is_empty(), "v8 replays never see fire");
 }

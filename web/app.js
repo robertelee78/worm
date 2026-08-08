@@ -4,14 +4,14 @@
 // The ?v= must match BUILD below (and index.html's) — an unversioned glue
 // import could pair a cached old worm.js with a fresh wasm on the next
 // rebuild that changes the bindings.
-import init, { WasmGame } from './pkg/worm.js?v=25';
+import init, { WasmGame } from './pkg/worm.js?v=26';
 import { Sfx } from './audio.js';
 import { computeBoardLayout, VIEWPORT_BLOCK_GUTTER } from './layout.js';
 
 let CELL = 14; // recomputed by applyBoardLayout() to fit the measured stage
 // Bump together with the ?v= in index.html whenever the wasm bundle is
 // rebuilt — it keys the cache-busting query on the .wasm fetch.
-const BUILD = 25;
+const BUILD = 26;
 const MATCH_TARGET = 3;
 const STATE_SCHEMA_VERSION = 2;
 const ROUND_SCHEMA_VERSION = 1;
@@ -1425,6 +1425,21 @@ function render(s) {
       const [x, y] = c.pos[i];
       offCtx.fillRect(x * CELL + 1, y * CELL + 1, CELL - 2, CELL - 2);
     }
+    // BURNING (world v9): while the sticky schedule runs, the body
+    // sheds embers — the "it's getting burned/shrunk" effect.
+    if (s.burning && s.burning[ci] && c.alive) {
+      const t2 = performance.now();
+      for (let i = Math.max(1, len - 6); i < len; i++) {
+        const [bx2, by2] = c.pos[i];
+        const j = Math.sin(t2 / 31 + i * 2.7);
+        offCtx.fillStyle = `rgba(255, ${120 + 80 * Math.abs(j) | 0}, 30, 0.85)`;
+        offCtx.fillRect(
+          bx2 * CELL + CELL / 2 - 2 + j * 3,
+          by2 * CELL + CELL / 2 - 2 - Math.abs(j) * 4,
+          4, 4
+        );
+      }
+    }
     // head: white triangle pointing along travel
     if (c.alive) {
       const [hx, hy] = c.head;
@@ -1468,6 +1483,23 @@ function render(s) {
     offCtx.beginPath();
     offCtx.arc(cx, cy, R * 1.05, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * frac);
     offCtx.stroke();
+  }
+
+  // NAPALM (world v9): flame patches — three flickering layers whose
+  // alpha tracks remaining life; drawn under worms so a body crossing
+  // fire reads as IN it.
+  if (s.flames && s.flames.length) {
+    const t = performance.now();
+    for (const [fx, fy, lifePct] of s.flames) {
+      const base = 0.25 + 0.65 * (lifePct / 100);
+      const flick = 0.75 + 0.25 * Math.sin(t / 47 + fx * 3.1 + fy * 1.7);
+      offCtx.fillStyle = `rgba(255, 90, 20, ${(base * flick).toFixed(3)})`;
+      offCtx.fillRect(fx * CELL, fy * CELL, CELL, CELL);
+      offCtx.fillStyle = `rgba(255, 170, 30, ${(base * flick * 0.7).toFixed(3)})`;
+      offCtx.fillRect(fx * CELL + 2, fy * CELL + 2, CELL - 4, CELL - 4);
+      offCtx.fillStyle = `rgba(255, 240, 120, ${(base * flick * 0.5).toFixed(3)})`;
+      offCtx.fillRect(fx * CELL + CELL / 2 - 2, fy * CELL + CELL / 2 - 2, 4, 4);
+    }
   }
 
   // DECOY FLASH (world v8): the last two seconds of a planted bomb

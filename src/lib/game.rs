@@ -270,6 +270,19 @@ impl LightCycle {
 /// interior shrinks a cell per side. The owner's decoy-bomb and napalm
 /// specs are later versions: one physics change per version, each with
 /// its own replay pinning and benchmark receipts.
+/// v9 (owner spec; ADR-022): NAPALM. The tri-shot's bolts fly only 4
+/// cells, and wherever a bolt ENDS — wall-hit, 4-cell expiry, or worm
+/// contact — it ignites a flame patch that burns ~3 wall-clock seconds.
+/// A worm in CONTINUOUS contact burns down on a wall-clock schedule: up
+/// to 5 segments in the first second, 3 in the second, 1 in the third —
+/// and the schedule is STICKY (once caught it runs to completion even
+/// as the burning tail shrinks out of the fire). Burned past the head =
+/// dead (DeathCause::Burned, attributed to the flame's owner for the
+/// weapon ledger). The firer is IMMUNE to their own flames — the same
+/// ADR-023 rule the laser and (since v8) the bomb obey. Flames COOK a
+/// decoy they touch (early detonation), burn frozen worms (wall-clock
+/// spares nobody), and flames tick in the common hazard phase on every
+/// frame exit. In the two-lane corridor a patch blocks ONE lane.
 /// v8 (owner spec; ADR-022): THE TIMED DECOY. A planted bomb is a food
 /// decoy for ~15 wall-clock seconds, then DETONATES — punching arena
 /// walls like any other blast — instead of fizzling. The last two
@@ -301,7 +314,36 @@ impl LightCycle {
 /// of the v3 bolt-ordering fix. Same-frame deaths are atomic (both
 /// dead = draw); the firer is immune to their own beam; a frozen worm
 /// enters nothing but remains hittable at discharge.
-pub const ARENA_VERSION: u8 = 8;
+pub const ARENA_VERSION: u8 = 9;
+
+/// A napalm patch (world v9): ignited where a tri-shot bolt ends.
+/// Life counts wall-clock milliseconds, drained by the current frame
+/// delay each global frame (the v8 fuse clock).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Flame {
+    pub x: u16,
+    pub y: u16,
+    /// Milliseconds of burn remaining.
+    pub life_ms: u32,
+    /// Who lit it — burn kills credit this cycle's weapon ledger, and
+    /// the owner is immune to their own fire (ADR-023 rule).
+    pub owner: u8,
+}
+
+/// One worm's burn state (world v9). STICKY: once caught, the 5/3/1
+/// schedule runs to completion on the wall clock even if the burning
+/// tail shrinks out of the fire. Never parallel arrays, never inferred
+/// from DeathCause alone (codex v6 reject list) — the owner is recorded
+/// at catch for ledger attribution.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BurnState {
+    /// Milliseconds since caught; 0 = not burning.
+    pub contact_ms: u32,
+    /// Segments already burned off this catch.
+    pub taken: u32,
+    /// Who lit the fire that caught this worm.
+    pub burned_by: u8,
+}
 
 /// A beam discharged this frame, awaiting its post-move occupancy test
 /// (ADR-023 world v7). The cells are IMMUTABLE — snapshotted once at
@@ -378,6 +420,10 @@ pub struct WormGame {
     pub arena_version: u8,
     /// Evidence-supply funnel receipts (diagnostic only).
     pub funnel: FunnelStats,
+    /// Live napalm patches (world v9).
+    pub flames: Vec<Flame>,
+    /// Per-cycle burn state (world v9).
+    pub burns: [BurnState; 2],
     /// World v7 (ADR-023): beams discharged this frame, awaiting their
     /// post-move occupancy test.
     pub pending_beams: Vec<PendingBeam>,
@@ -509,6 +555,8 @@ pub enum DeathCause {
     BombBlast,
     Laser,
     TriShotBolt,
+    /// Napalm (world v9): burned down past the head.
+    Burned,
 }
 
 impl DeathCause {
@@ -524,6 +572,7 @@ impl DeathCause {
             DeathCause::BombBlast => "blown up by a mine disguised as food",
             DeathCause::Laser => "laser beam",
             DeathCause::TriShotBolt => "caught in a tri-shot burst",
+            DeathCause::Burned => "burned down by napalm",
         }
     }
 }
@@ -714,6 +763,8 @@ impl WormGame {
         let mut game = Self {
             arena_version: ARENA_VERSION,
             funnel: FunnelStats::default(),
+            flames: Vec::new(),
+            burns: [BurnState::default(), BurnState::default()],
             pending_beams: Vec::new(),
             beam_fx: Vec::new(),
             laser_audit: None,
@@ -800,6 +851,9 @@ impl WormGame {
                     let kind = match cause {
                         DeathCause::Laser => Some(PowerUpKind::Laser),
                         DeathCause::TriShotBolt => Some(PowerUpKind::TriShot),
+                        // Watch-item (ADR-022): burn kills feed the same
+                        // close-range loop they came from.
+                        DeathCause::Burned => Some(PowerUpKind::TriShot),
                         DeathCause::BombBlast => Some(PowerUpKind::Bomb),
                         _ => None,
                     };
@@ -1662,6 +1716,7 @@ impl WormGame {
             // step; either may kill the surviving CPU and turn the loss into
             // a draw (bombs alone used to tick while bolts froze mid-air).
             self.advance_projectiles();
+            self.tick_flames();
             self.tick_bombs();
             return false;
         }
@@ -2195,6 +2250,7 @@ impl WormGame {
             // step; either may kill the surviving player and turn the CPU win
             // into a draw (bombs alone used to tick while bolts froze).
             self.advance_projectiles();
+            self.tick_flames();
             self.tick_bombs();
             return false;
         }
@@ -2288,6 +2344,7 @@ impl WormGame {
             self.age_beam_fx();
             // Bombs at fuse 0 still get their frame-end tick — a blast can
             // turn this into a (deeper) draw, same as every death site.
+            self.tick_flames();
             self.tick_bombs();
             return false;
         }
@@ -2299,6 +2356,7 @@ impl WormGame {
         if self.arena_version < 3 {
             self.advance_projectiles();
         }
+        self.tick_flames();
         self.tick_bombs();
         if self.game_over {
             return false;
@@ -2666,6 +2724,8 @@ impl WormGame {
         self.cpu_brain.pending_book = None;
         self.pending_beams.clear();
         self.beam_fx.clear();
+        self.flames.clear();
+        self.burns = [BurnState::default(), BurnState::default()];
         self.cpu_brain.region_ring.clear();
         self.cpu_brain.last_opp_prediction = None;
         self.cpu_history.clear();
@@ -2957,14 +3017,19 @@ impl WormGame {
             PowerUpKind::TriShot => {
                 // Straight ahead plus the two forward diagonals.
                 let dirs = [(dx, dy), (dx + dy, dy + dx), (dx - dy, dy - dx)];
-
+                // World v9 NAPALM: bolts fly only 4 cells, then ignite.
+                let steps = if self.arena_version >= 9 {
+                    4
+                } else {
+                    TRI_SHOT_MAX_STEPS
+                };
                 for (ddx, ddy) in dirs {
                     self.projectiles.push(Projectile {
                         x: hx,
                         y: hy,
                         dx: ddx,
                         dy: ddy,
-                        steps_left: TRI_SHOT_MAX_STEPS,
+                        steps_left: steps,
                         from: who as u8,
                     });
                 }
@@ -3015,6 +3080,7 @@ impl WormGame {
             // post-game pump does the flip and the core paints twice).
             self.age_beam_fx();
             self.advance_projectiles();
+            self.tick_flames();
             self.tick_bombs();
         }
         true
@@ -3331,12 +3397,19 @@ impl WormGame {
                 let p = &self.projectiles[i];
                 (p.x as i16 + p.dx, p.y as i16 + p.dy, p.from)
             };
-            let dead_cell = x < 0
-                || y < 0
-                || x >= self.width as i16
-                || y >= self.height as i16
-                || self.grid[y as usize][x as usize] == CellType::Wall;
-            if dead_cell {
+            let off_board =
+                x < 0 || y < 0 || x >= self.width as i16 || y >= self.height as i16;
+            let wall_cell =
+                !off_board && self.grid[y as usize][x as usize] == CellType::Wall;
+            if off_board || wall_cell {
+                // World v9: a bolt that dies on a wall drops its fire on
+                // the LAST open cell it occupied (a bolt off the board
+                // edge ignites nothing — there is no cell).
+                if self.arena_version >= 9 && wall_cell {
+                    let (lx, ly) = (self.projectiles[i].x, self.projectiles[i].y);
+                    let from9 = self.projectiles[i].from;
+                    self.ignite(lx, ly, from9);
+                }
                 self.projectiles.remove(i);
                 continue;
             }
@@ -3389,7 +3462,13 @@ impl WormGame {
                 && (self.cycles[opp].head == (ux, uy)
                     || self.grid[uy as usize][ux as usize] == opp_marker);
             if contact {
-                self.bolt_blast(ux, uy, pdx, pdy, from);
+                if self.arena_version >= 9 {
+                    // NAPALM: contact drops fire UNDER the victim — the
+                    // burn schedule does the killing, not a blast.
+                    self.ignite(ux, uy, from);
+                } else {
+                    self.bolt_blast(ux, uy, pdx, pdy, from);
+                }
                 self.projectiles.remove(i);
                 continue;
             }
@@ -3398,10 +3477,156 @@ impl WormGame {
             p.y = uy;
             p.steps_left = p.steps_left.saturating_sub(1);
             if p.steps_left == 0 {
+                if self.arena_version >= 9 {
+                    // Spent bolt: the napalm lands where it stops.
+                    let (fx, fy) = (self.projectiles[i].x, self.projectiles[i].y);
+                    let from9 = self.projectiles[i].from;
+                    self.ignite(fx, fy, from9);
+                }
                 self.projectiles.remove(i);
             } else {
                 i += 1;
             }
+        }
+    }
+
+    /// Ignite a napalm patch (world v9): ~3 wall-clock seconds of flame.
+    /// Fire on a planted decoy COOKS it — early detonation (ADR-022).
+    pub fn ignite(&mut self, x: u16, y: u16, owner: u8) {
+        if let Some(i) = self.bombs.iter().position(|b| b.x == x && b.y == y) {
+            let b = self.bombs.remove(i);
+            self.detonate(b.x, b.y, owner);
+        }
+        self.flames.push(Flame {
+            x,
+            y,
+            life_ms: 3_000,
+            owner,
+        });
+        play_beep(SfxKind::TriShot, 700, 50);
+    }
+
+    /// The napalm hazard phase (world v9): age flames on the wall clock,
+    /// catch worms standing in fire, and run each caught worm's STICKY
+    /// 5/3/1 burn schedule to completion — tail-first, head last; a worm
+    /// burned past its head dies. The owner of the flame that caught a
+    /// worm is recorded for ledger attribution; a worm is IMMUNE to its
+    /// own fire (ADR-023 rule). Frozen worms burn: the clock is global.
+    pub fn tick_flames(&mut self) {
+        if self.arena_version < 9 {
+            return;
+        }
+        let tick_ms = (self.frame_delay().as_millis() as u32).max(1);
+        for f in &mut self.flames {
+            f.life_ms = f.life_ms.saturating_sub(tick_ms);
+        }
+        self.flames.retain(|f| f.life_ms > 0);
+        // Cook any decoy a flame overlaps (spawned under an existing
+        // flame, or the flame spread onto it via ignite above).
+        let cooked: Vec<(u16, u16, u8)> = self
+            .bombs
+            .iter()
+            .filter_map(|b| {
+                self.flames
+                    .iter()
+                    .find(|f| (f.x, f.y) == (b.x, b.y))
+                    .map(|f| (b.x, b.y, f.owner))
+            })
+            .collect();
+        for (bx, by, fowner) in cooked {
+            if let Some(i) = self.bombs.iter().position(|b| (b.x, b.y) == (bx, by)) {
+                let b = self.bombs.remove(i);
+                self.detonate(b.x, b.y, fowner);
+            }
+        }
+        if self.game_over {
+            return;
+        }
+        let mut deaths = [false; 2];
+        for (who, death_slot) in deaths.iter_mut().enumerate() {
+            if !self.cycles[who].alive {
+                self.burns[who] = BurnState::default();
+                continue;
+            }
+            let burning = self.burns[who].contact_ms > 0;
+            if !burning {
+                // Catch: any body cell standing in someone ELSE's fire.
+                let catcher = self.flames.iter().find(|f| {
+                    f.owner != who as u8
+                        && self.cycles[who].positions.contains(&(f.x, f.y))
+                });
+                if let Some(f) = catcher {
+                    self.burns[who] = BurnState {
+                        contact_ms: 1,
+                        taken: 0,
+                        burned_by: f.owner,
+                    };
+                }
+                continue;
+            }
+            // STICKY schedule, wall-clock: up to 5 segments in the first
+            // second of contact, 3 in the second, 1 in the third.
+            let b = &mut self.burns[who];
+            b.contact_ms = b.contact_ms.saturating_add(tick_ms);
+            let t = b.contact_ms;
+            let target = if t >= 3_000 {
+                9
+            } else if t >= 2_000 {
+                // Third second: 8 spread over the second, capped at 9.
+                8 + (t - 2_000) / 1_000
+            } else if t >= 1_000 {
+                // Second second: 5 done, 3 more spread across it.
+                5 + ((t - 1_000) * 3).div_ceil(1_000)
+            } else {
+                // First second: up to 5, spread across it.
+                (t * 5).div_ceil(1_000)
+            };
+            while b.taken < target {
+                b.taken += 1;
+                let cy = &mut self.cycles[who];
+                if cy.positions.len() <= 1 {
+                    // Burned past the head.
+                    *death_slot = true;
+                    break;
+                }
+                let (tx, ty) = cy.positions.pop().unwrap();
+                let marker = if who == 0 { CellType::Player } else { CellType::CPU };
+                if self.grid[ty as usize][tx as usize] == marker {
+                    self.grid[ty as usize][tx as usize] = CellType::Empty;
+                }
+                self.particles.push(Particle {
+                    x: tx as f32,
+                    y: ty as f32,
+                    vx: 0.0,
+                    vy: 0.0,
+                    lifetime: 14,
+                    color: (255, 140, 30),
+                });
+            }
+            if b.contact_ms >= 3_000 && !*death_slot {
+                // Schedule complete — the fire lets go.
+                self.burns[who] = BurnState::default();
+            }
+        }
+        if deaths[0] || deaths[1] {
+            for (who, dead) in deaths.iter().enumerate() {
+                if *dead {
+                    let (hx, hy) = self.cycles[who].head;
+                    self.add_impact_particles(hx, hy, (255, 120, 30));
+                    self.cycles[who].alive = false;
+                    if self.death_cause.is_none() {
+                        self.death_cause = Some(DeathCause::Burned);
+                    }
+                }
+            }
+            self.game_over = true;
+            self.winner = match (!self.cycles[0].alive, !self.cycles[1].alive) {
+                (true, true) => None,
+                (true, false) => Some(1),
+                (false, true) => Some(0),
+                (false, false) => unreachable!(),
+            };
+            play_death_riff(90);
         }
     }
 
