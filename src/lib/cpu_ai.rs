@@ -4723,6 +4723,26 @@ fn predict_player_positions_book(
 
 /// Public evaluation wrappers: the two projection strategies from the
 /// same live state, for paired grading (rca_probe, ADR-020 stage 2.1).
+/// Would stepping `d` take this cycle INTO slipstream space (ring-1
+/// corridor or a punched hole) from outside? Board knowledge: corridor
+/// entry costs 16× time under world v4+, and a hunting CPU that
+/// blunders in gets frozen while its prey flies.
+pub fn step_enters_corridor(game: &WormGame, who: usize, d: Direction) -> bool {
+    if game.arena_version < 4 || !game.has_corridor() || game.cycle_in_corridor(who) {
+        return false;
+    }
+    let (hx, hy) = game.cycles[who].head;
+    let (dx, dy) = d.as_delta();
+    let nx = hx as i16 + dx;
+    let ny = hy as i16 + dy;
+    if nx < 0 || ny < 0 || nx >= game.width as i16 || ny >= game.height as i16 {
+        return false;
+    }
+    let (nx, ny) = (nx as u16, ny as u16);
+    let ring1 = nx == 1 || ny == 1 || nx == game.width - 2 || ny == game.height - 2;
+    ring1 || game.grid[ny as usize][nx as usize] == crate::game::CellType::Hole
+}
+
 pub fn project_player_straight(game: &WormGame, frames: usize) -> Vec<(u16, u16)> {
     let dir = game
         .cpu_brain
@@ -4770,7 +4790,27 @@ fn predict_player_positions_iterative(
             )
     };
 
-    for _ in 0..max_frames {
+    for step in 0..max_frames {
+        // SLIPSTREAM AWARENESS (owner report: the CPU "never learned about
+        // slipstream"): under world v4+ a player in the corridor steps
+        // only when frame % 16 == 0 — projecting them at full speed aimed
+        // every hunt five cells ahead of a nearly-frozen worm. On held
+        // frames the projection holds position with them.
+        if game.arena_version >= 4 && game.has_corridor() {
+            let in_corr = {
+                let (ux, uy) = (px as u16, py as u16);
+                let ring1 =
+                    ux == 1 || uy == 1 || ux == game.width - 2 || uy == game.height - 2;
+                ring1
+                    || game.grid[uy as usize][ux as usize]
+                        == crate::game::CellType::Hole
+            };
+            let frame = game.frame_count + 1 + step as u32;
+            if in_corr && frame % 16 != 0 {
+                positions.push((px as u16, py as u16));
+                continue;
+            }
+        }
         // Check if the player will hit a wall/trail in their current direction.
         let (ddx, ddy) = pdir.as_delta();
         let blocked = !open(px + ddx, py + ddy);
@@ -6130,6 +6170,7 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
             let toward = candidates
                 .iter()
                 .copied()
+                .filter(|&d| !step_enters_corridor(game, 1, d))
                 .filter(|&d| {
                     let (ddx, ddy) = d.as_delta();
                     let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
@@ -6206,6 +6247,11 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
                 let mut best_dir = wall_dir;
                 let mut best_score = f32::NEG_INFINITY;
                 for &d in candidates {
+                    // SLIPSTREAM: a hunt that steps into the corridor
+                    // freezes the hunter — never worth it.
+                    if step_enters_corridor(game, 1, d) {
+                        continue;
+                    }
                     let (ddx, ddy) = d.as_delta();
                     let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
                     let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
@@ -6284,6 +6330,11 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
                 let mut best_dir = wall_dir;
                 let mut best_score = f32::NEG_INFINITY;
                 for &d in candidates {
+                    // SLIPSTREAM: a hunt that steps into the corridor
+                    // freezes the hunter — never worth it.
+                    if step_enters_corridor(game, 1, d) {
+                        continue;
+                    }
                     let (ddx, ddy) = d.as_delta();
                     let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
                     let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;

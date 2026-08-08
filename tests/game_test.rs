@@ -2738,3 +2738,36 @@ fn corridor_keypresses_are_not_eaten_and_reversals_stay_banned() {
     assert!(game.cycles[0].alive, "the executed turn is safe");
     assert_eq!(game.cycles[0].head, (2, 4), "turned through the hole");
 }
+
+/// SLIPSTREAM WORLD MODEL (owner report: "the CPU never learned about
+/// slipstream"): its projection of a slipped player must hold them
+/// nearly stationary (they step 1 frame in 16, not every frame), and
+/// its aggressive layers must never step INTO the corridor themselves.
+#[test]
+fn the_cpu_knows_what_the_slipstream_does() {
+    let mut game = worm::WormGame::with_size_seed(40, 30, 5);
+    // Player slipped in the top corridor lane; no move-frame inside the
+    // 5-frame horizon from frame 1.
+    game.cycles[0].head = (6, 1);
+    game.cycles[0].positions = vec![(6, 1)].into();
+    game.grid[1][6] = worm::CellType::Player;
+    game.cycles[0].direction = worm::Direction::Right;
+    game.frame_count = 1;
+    let path = worm::cpu_ai::project_player_straight(&game, 5);
+    assert!(
+        path.iter().all(|&p| p == (6, 1)),
+        "a slipped player projects (nearly) stationary, got {path:?}"
+    );
+    // Entry detection: from the arena the only way in is a punched hole.
+    game.cycles[1].head = (6, 3);
+    assert!(
+        !worm::cpu_ai::step_enters_corridor(&game, 1, worm::Direction::Up),
+        "the intact arena wall is not an entry"
+    );
+    game.grid[2][6] = worm::CellType::Hole;
+    assert!(
+        worm::cpu_ai::step_enters_corridor(&game, 1, worm::Direction::Up),
+        "a punched hole is"
+    );
+    assert!(!worm::cpu_ai::step_enters_corridor(&game, 1, worm::Direction::Down));
+}
