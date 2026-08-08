@@ -50,12 +50,21 @@ BINARY_KNOBS = {"BOOK_BEND", "BOOK_SPEND"}
 
 
 def champion_defaults():
+    # Isolated target dir: the night of 2026-08-07 a 17-hour read-only
+    # verification agent squatted the shared target/ lock and the sweep
+    # crashed with an empty-stdout IndexError. The loop now builds in its
+    # own sandboxed target and FAILS LOUDLY with stderr when cargo does.
+    env = dict(os.environ, TERM="dumb", CARGO_TERM_COLOR="never",
+               CARGO_TARGET_DIR=os.path.join(ROOT, ".darwin", "target"))
     p = subprocess.run(
         ["cargo", "run", "--release", "--example", "print_tuning"],
-        cwd=ROOT, capture_output=True, text=True, timeout=300,
-        env=dict(os.environ, TERM="dumb", CARGO_TERM_COLOR="never"),
+        cwd=ROOT, capture_output=True, text=True, timeout=1800, env=env,
     )
-    return json.loads(p.stdout.strip().splitlines()[-1])
+    out = p.stdout.strip()
+    if not out:
+        sys.exit(f"print_tuning produced no output (exit {p.returncode}):\n"
+                 + p.stderr[-2000:])
+    return json.loads(out.splitlines()[-1])
 
 
 def make_knobs(seed):
@@ -81,7 +90,9 @@ LINE = re.compile(
 
 
 def run_gauntlet(env_overrides):
-    env = dict(os.environ, TERM="dumb", CARGO_TERM_COLOR="never", **env_overrides)
+    env = dict(os.environ, TERM="dumb", CARGO_TERM_COLOR="never",
+               CARGO_TARGET_DIR=os.path.join(ROOT, ".darwin", "target"),
+               **env_overrides)
     p = subprocess.run(
         ["cargo", "test", "--release", "--test", "domination", "--",
          "--nocapture", "--test-threads=1"],
