@@ -113,6 +113,32 @@ read went from 6% (habit models only) to ~76-85%
 difficulty multiplier would just restore the arbitrary clock ramp ADR-007
 deleted.
 
+### Measured against its owner: 10% → 80%
+
+The whole stack's report card, session by session against the one
+player with a long history (153 rounds; peak earned read = the
+statistically-proven evidence the difficulty spends):
+
+| session | rounds | CPU win % | peak earned read |
+|--------:|-------:|----------:|-----------------:|
+| 1 (pre-honest era) | 48 | 10% | 0.00 |
+| 2 | 20 | 75% | 0.00 |
+| 3 (honest evidence lands) | 13 | 38% | 0.41 |
+| 4 | 13 | 46% | 0.63 |
+| 5 | 59 | **80%** | 0.62 |
+
+Honest caveats attached: sessions 1–2 ran on older builds, so the full
+arc conflates build improvements with learning; the clean single-build
+evidence is session 5 alone — 47 of 59 under one binary with the
+earned read pinned at 0.62. Meanwhile the drift alarm — its own
+anytime-valid evidence family — LATCHED on real play when the owner
+started scrambling his turn timing to fight the read, and the
+between-round ratchet (an exact minimum cut over the situation cells'
+co-movement graph, `examples/drift_partition.rs`) named exactly which
+region of his game moved. His timing entropy went up; the side read
+held at 0.71; the CPU kept winning through the noise he was
+deliberately generating. That sentence is the product.
+
 ### The learning program: nine ways it studies you
 
 [ADR-021](docs/adrs/021-the-learning-program.md) turned "where else can
@@ -133,7 +159,11 @@ MOVING: the first player is measurably adapting to being read, which
 holds that door shut). Every aggressive consumer spends only
 round-boundary snapshots of family-gated evidence; everything else is
 narration. A committed golden brain file makes wiping a player's
-learning a test failure instead of an accident.
+learning a test failure instead of an accident. The full prose tour of
+every method lives in [docs/learning-methods.md](docs/learning-methods.md),
+and the post-round 📓 TELL ME MORE button now writes from the CPU's
+complete dossier — the round's events set against every round you have
+ever played, ledgers quoted by name.
 
 ### The turn book: reading the frames that decide games
 
@@ -174,6 +204,21 @@ online "predict their commonest move so far" rival — and significance is an
 disagreed. Against a very predictable player the two agree almost always, and
 thousands of frames can carry a dozen frames of real evidence. That gets
 reported honestly rather than as a large green number.
+
+### The slipstream
+
+Punch a hole in the arena wall and slip into the outer corridor and
+time itself takes sides: the corridor worm runs at 25% of original
+speed while the arena worm runs at 4× — with the reaction tax priced
+symmetrically, because a body moving 4× with a normal-rate mind rams
+trails exactly like a human would (the CPU re-decides at its normal
+wall-clock rate while accelerated, wall reflexes on, trails unseen).
+Bolts fly at full speed regardless: light does not slow down. The
+screen drops into a hyperspace field — streaks tearing outward from
+your worm, chromatic warp rings, a focus vignette — and every rule is
+symmetric: if the CPU takes the corridor, the same physics serve you.
+World rules are versioned (v1–v5) and every recorded ghost replays
+under the exact physics it was played on.
 
 ## Playing it
 
