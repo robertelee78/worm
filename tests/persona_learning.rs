@@ -596,11 +596,14 @@ fn a_read_player_who_changes_their_game_is_honestly_unlearned() {
     // Phase 2: fair-coin sides until the read releases. (Phase 1's
     // doubled evidence takes proportionally more dilution to fall under
     // the 1-sigma release: un-learning takes as long as the read was
-    // deep, which is the honest shape. The game count is a fixture
-    // re-baseline per ADR-022 — corridor-v6 trajectories shifted the
-    // dilution supply again. Receipt: monotone 0.71 -> .19/.11/.08/.05
-    // per dozen games, hard release (z<1) at ~game 116; 144 = margin.)
-    for gph2 in 0..144 {
+    // deep, which is the honest shape. Under v9 the diluted z was
+    // measured ASYMPTOTING just above the Schmitt release (residual
+    // ~0.02 plateau with wobble at 120..192 games — NOT monotone), so
+    // the release gained the DWELL rule (k3 v9 ruling 2b): a latched
+    // read whose SE-shrunk spend sits below the behavioral floor for
+    // K=5 consecutive round boundaries releases outright. Keyed to
+    // harm; this assertion stays == 0.0, never loosened.)
+    for gph2 in 0..192 {
         if gph2 % 12 == 0 {
             game.refresh_read_rate();
             println!(

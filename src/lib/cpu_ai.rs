@@ -1588,6 +1588,16 @@ pub struct CpuBrain {
     /// only survival basics are latched.
     #[serde(skip)]
     pub discipline_latched: bool,
+    /// DWELL RELEASE counter (k3 v9 ruling 2b): consecutive round
+    /// boundaries at which a latched read's SE-shrunk spend sat below
+    /// the behavioral floor. The Schmitt pair (open at the look bound,
+    /// release at z<1) has an unbounded dead zone between them — under
+    /// heavy dilution the diluted z can asymptote just above 1.0 and
+    /// the latch never releases while spending nothing. K consecutive
+    /// below-floor boundaries release it: keyed to HARM (a spend too
+    /// small to change behavior), never to a loosened assertion.
+    #[serde(skip)]
+    pub spend_dwell: u8,
     /// Round-boundary snapshots of the book's spendable evidence and
     /// projection authority (codex round 3): a latch that opens mid-round
     /// must not reshape projections or defensive trust before any
@@ -2472,6 +2482,7 @@ impl Default for CpuBrain {
             prev_pc_dist: 0,
             earned_snapshot: 0.0,
             discipline_latched: false,
+            spend_dwell: 0,
             book_spend_snapshot: 0.0,
             book_authority_snapshot: false,
             tactic_prefer_direct: false,
@@ -2492,6 +2503,13 @@ impl CpuBrain {
     /// individually latched under the shared family-wise anytime boundary
     /// and spending an SE-shrunk lift. The book half sits behind the
     /// book_spend attribution switch (codex D10).
+    /// Below this spend the read moves no behavior worth defending —
+    /// the dwell release's floor (k3 v9 ruling 2b).
+    pub const SPEND_DWELL_FLOOR: f32 = 0.05;
+    /// Consecutive below-floor round boundaries before a latched read
+    /// releases outright.
+    pub const SPEND_DWELL_ROUNDS: u8 = 5;
+
     pub fn family_earned_read(&self) -> f32 {
         let published = self.lifetime_read.earned_read();
         if crate::tuning::tuning().book_spend < 0.5 {
@@ -4525,6 +4543,17 @@ fn cell_threatened_by_projectile(game: &WormGame, x: u16, y: u16) -> bool {
 /// one-step threat check SUFFICIENT for the first time: you cannot route
 /// around a 441-cell region one step at a time, but "don't step in the ring"
 /// needs no pathfinding at all.
+/// World v9: an ENEMY flame patch is a step-in hazard (the burn
+/// schedule starts on contact); the CPU's own fire is harmless to it
+/// (ADR-023 owner immunity), exactly matching the physics.
+fn cell_threatened_by_flame(game: &WormGame, x: u16, y: u16) -> bool {
+    game.arena_version >= 9
+        && game
+            .flames
+            .iter()
+            .any(|f| f.owner != 1 && f.x == x && f.y == y)
+}
+
 fn cell_threatened_by_bomb(game: &WormGame, x: u16, y: u16, frames_ahead: u8) -> bool {
     let trigger = crate::game::MINE_TRIGGER_CELLS as i32;
     for b in &game.bombs {
@@ -5657,12 +5686,18 @@ pub fn should_fire(game: &mut WormGame, who: usize) -> bool {
             // trail sever), every opponent cell on a ray is a target — a shot
             // across their body is a sever even when their head is elsewhere.
             let (dx, dy) = game.cycles[who].direction.as_delta();
+            // World v9 NAPALM: bolts fly only 4 cells — an unlimited ray
+            // would fire at targets the fire can never reach (codex v6
+            // reject list). The napalm still pays past 4 via the burn
+            // patch, but the aim gate is the bolt's actual reach.
+            let max_reach: i16 = if game.arena_version >= 9 { 4 } else { i16::MAX };
             let on_a_ray = |px: u16, py: u16| -> bool {
                 let fdx = px as i16 - hx as i16;
                 let fdy = py as i16 - hy as i16;
                 let forward = dx * fdx + dy * fdy > 0;
                 let aligned = fdx == 0 || fdy == 0 || fdx.abs() == fdy.abs();
-                forward && aligned
+                let reach = fdx.abs().max(fdy.abs()) <= max_reach;
+                forward && aligned && reach
             };
             on_a_ray(ox, oy) || game.cycles[opp].positions.iter().any(|&(px, py)| on_a_ray(px, py))
         }
@@ -5888,7 +5923,10 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
         let (ddx, ddy) = d.as_delta();
         let nx = (cx as i16 + ddx).max(0).min((game.width - 1) as i16) as u16;
         let ny = (cy as i16 + ddy).max(0).min((game.height - 1) as i16) as u16;
-        if cell_threatened_by_projectile(game, nx, ny) || cell_threatened_by_bomb(game, nx, ny, 3) {
+        if cell_threatened_by_projectile(game, nx, ny)
+            || cell_threatened_by_bomb(game, nx, ny, 3)
+            || cell_threatened_by_flame(game, nx, ny)
+        {
             threatened_dirs.push(d);
         }
     }
@@ -7721,7 +7759,17 @@ mod tests {
             !should_fire(&mut game, 1),
             "bolts travel forward — a target behind the head is unhittable"
         );
-        game.cycles[0].head = (35, 20); // in front
+        game.cycles[0].head = (33, 20); // in front, within napalm reach
+        assert!(should_fire(&mut game, 1));
+        // World v9: a target past the 4-cell bolt reach is not a shot —
+        // firing at it would drop fire the target never touches.
+        game.cycles[0].head = (36, 20);
+        assert!(
+            !should_fire(&mut game, 1),
+            "the aim gate is the bolt's actual reach under napalm"
+        );
+        // Pre-v9 physics keep the unlimited ray.
+        game.set_world_version(8);
         assert!(should_fire(&mut game, 1));
     }
 

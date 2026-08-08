@@ -58,6 +58,11 @@ struct GameState {
     /// channel EXISTS only once the flash would reveal it anyway, so
     /// the browser cannot leak a pre-flash danger zone (ADR-022).
     bomb_flash: Vec<(u16, u16, u8)>,
+    /// World v9 napalm: live flame patches — (x, y, lifeFrac 0..100).
+    flames: Vec<(u16, u16, u8)>,
+    /// Per-cycle burning flags (body ember overlay while the sticky
+    /// schedule runs).
+    burning: [bool; 2],
     particles: Vec<(f32, f32, u8, u8, u8, u32)>,
     /// ADR-023 beam render layer: (cells, age). Age 0 = lethal core,
     /// 1-5 dimming afterimage, 6-20 embers. The cells are the SIM's own
@@ -415,6 +420,12 @@ impl GameState {
             // overlay would paint a target on every one of them. The field is
             // kept rather than removed so the wire shape stays stable.
             bombs: Vec::new(),
+            flames: game
+                .flames
+                .iter()
+                .map(|f| (f.x, f.y, ((f.life_ms.min(3_000) * 100) / 3_000) as u8))
+                .collect(),
+            burning: [game.burns[0].contact_ms > 0, game.burns[1].contact_ms > 0],
             bomb_flash: game
                 .bombs
                 .iter()
