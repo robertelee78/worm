@@ -3534,3 +3534,84 @@ fn test_v7_killing_beam_cools_after_game_over() {
     }
     assert!(game.beam_fx.is_empty(), "embers burn out; the layer empties");
 }
+
+/// codex v8 verify (blocking): a bomb sitting ON the owner's own trail
+/// still chain-detonates — owner-safety spares the trail cell, never
+/// the chain check.
+#[test]
+fn test_v8_bomb_on_owner_trail_still_chains() {
+    let mut game = v7_beam_board(); // fresh empty board at v8? board pins 7
+    game.set_world_version(8);
+    // CPU trail through (50,20); its own second mine sits on that cell.
+    game.cycles[1].head = (55, 20);
+    game.cycles[1].direction = worm::Direction::Right;
+    game.cycles[1].positions = (48..=55).rev().map(|x| (x as u16, 20u16)).collect();
+    for x in 48..=55 {
+        game.grid[20][x] = worm::CellType::CPU;
+    }
+    game.bombs.push(worm::game::Bomb {
+        x: 50, y: 20, fuse: 9_000, disguise: 3, armed_in: 0, owner: 1, tripped: false,
+    });
+    // A first mine at (46,20) tripped by the player's proximity: its
+    // blast cross covers (50,20).
+    game.bombs.push(worm::game::Bomb {
+        x: 46, y: 20, fuse: 9_000, disguise: 3, armed_in: 0, owner: 1, tripped: false,
+    });
+    game.cycles[0].head = (47, 20);
+    game.cycles[0].positions = vec![(47, 20)];
+    game.grid[20][47] = worm::CellType::Player;
+    game.tick_bombs();
+    assert!(
+        game.bombs.is_empty(),
+        "BOTH mines detonated — the chain reached the bomb sitting on the \
+         owner's trail (without the fix it survives the sweep untripped)"
+    );
+    // And the owner's trail cell survived the sweep (owner-safe).
+    assert_eq!(game.grid[20][50], worm::CellType::CPU);
+}
+
+/// codex v8 verify (blocking): sudden death actually closes ring 4
+/// first under v8 — asserted against a cell that is NOT already wall —
+/// and v7 replays keep the old base-2 schedule.
+#[test]
+fn test_v8_first_closure_is_ring_four_and_v7_keeps_ring_three() {
+    let mut game = WormGame::with_size(120, 38);
+    assert_eq!(game.sudden_death_base(), 3);
+    game.time = worm::game::SUDDEN_DEATH_START + worm::game::SUDDEN_DEATH_INTERVAL;
+    assert_eq!(game.grid[4][10], worm::CellType::Empty, "ring-4 lane open pre-close");
+    game.update();
+    assert_eq!(
+        game.grid[4][10],
+        worm::CellType::Wall,
+        "v8 level 1 seals offset 4 — one ring INSIDE the arena wall"
+    );
+    // v7 pin: the same schedule step seals offset 3 (the arena wall line),
+    // leaving ring 4 open.
+    let mut old = WormGame::with_size(120, 38);
+    old.set_world_version(7);
+    old.time = worm::game::SUDDEN_DEATH_START + worm::game::SUDDEN_DEATH_INTERVAL;
+    old.update();
+    assert_eq!(
+        old.grid[4][10],
+        worm::CellType::Empty,
+        "v7 replays keep the recorded base-2 schedule (ring 4 stays open)"
+    );
+}
+
+/// codex v8 verify: the flash channel on the wire — calm decoys ship
+/// ONLY inside the food list; flashing ones appear in bombFlash.
+#[test]
+fn test_v8_flash_wire_calm_absent_flashing_present() {
+    let mut game = WormGame::with_size(60, 30);
+    game.bombs.push(worm::game::Bomb {
+        x: 30, y: 15, fuse: 9_000, disguise: 4, armed_in: 0, owner: 1, tripped: false,
+    });
+    let s = worm::web_state::to_json(&game);
+    assert!(!s.contains("bombFlash\":[[30,15"), "calm decoy leaks nothing: {s:.0?}");
+    game.bombs[0].fuse = 1_500;
+    let s = worm::web_state::to_json(&game);
+    assert!(s.contains("\"bombFlash\":[[30,15,1]]"), "tier 1 appears on the wire");
+    game.bombs[0].fuse = 900;
+    let s = worm::web_state::to_json(&game);
+    assert!(s.contains("\"bombFlash\":[[30,15,2]]"), "tier 2 appears on the wire");
+}

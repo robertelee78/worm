@@ -137,8 +137,8 @@ consultants' recommendations; items marked OPEN are owner calls.
 
 | Interaction | Ruling |
 |---|---|
-| Fuse clock | Wall-clock frames from plant (global frame count), never `frame_delay` and never per-worm active frames — a freeze must not disarm a mine, and a speed change must not retune the telegraph. Flash tiers derive from fuse-remaining. |
-| Owner adjacent at expiry | Blast is owner-blind: standing next to your own expiring mine kills you. The counterplay is memory ("I planted that") — the same rule the doze already encodes. |
+| Fuse clock | Wall-clock MILLISECONDS drained by the current frame delay per GLOBAL frame (v8 as landed; both verifiers ruled this satisfies the intent — the original "never `frame_delay`" wording banned the spike's plant-time-vs-current-speed mismatch and per-worm active frames). A freeze cannot disarm a mine; the telegraph is exact wall-clock at any speed. Flash tiers derive from fuse-remaining ms. |
+| Owner adjacent at expiry | RESOLVED OPPOSITE at v8 with receipts: blasts are OWNER-SAFE, head AND trail — ADR-023's firer-immunity rule applied to bombs. The head was always excluded; the trail sever was measured scrapping the planting CPU through its own forgotten mines (four deaths in one arm at the first expiry wave). A bomb on the owner's own trail still chain-detonates. |
 | CPU parity with the flash telegraph | The flash is a visual channel; the CPU/personas get the programmatic equivalent (fuse-age query) — information parity, no asymmetric-by-accident features. The browser must NOT paint a danger zone before the first flash tier (it would reveal the decoy). |
 | Decoy vs. food spawner | Spawn exclusion: never place real food on a decoy cell or vice versa. |
 | Flame on a decoy | Fire cooks the bomb: early detonation. |

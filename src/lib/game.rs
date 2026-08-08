@@ -280,9 +280,10 @@ impl LightCycle {
 /// `Bomb::fuse` counts MILLISECONDS, drained by the current frame
 /// delay each global frame — true wall-clock, deterministic, and a
 /// slipstream freeze cannot disarm a mine (bombs tick globally). The
-/// blast still severs the owner's own trail: you must respect your own
-/// bomb, and the counterplay is memory ("I planted that") — the same
-/// rule the doze already encodes. Sudden death also starts closing one
+/// blast is OWNER-SAFE, trail included — ADR-023's firer-immunity rule
+/// applied to bombs (measured: the first expiry wave was severing the
+/// planting CPU to scrap through its own forgotten mines). Sudden
+/// death also starts closing one
 /// ring INSIDE the v6 arena wall (base 3) instead of the pre-v6 base 2
 /// it had kept out of replay caution.
 /// v7 (ADR-023, unanimous consult): LASER SIMULTANEITY — the beam
@@ -3529,14 +3530,19 @@ impl WormGame {
                         } else {
                             CellType::CPU
                         };
-                        if self.arena_version >= 8 && cell == owner_marker {
-                            continue;
-                        }
+                        let owner_safe =
+                            self.arena_version >= 8 && cell == owner_marker;
                         // A living head marker survives the sweep — head fates
                         // are decided by the radius check below, and erasing a
                         // survivor's marker would let the opponent drive onto
-                        // an occupied head cell without a collision.
-                        if !self.cycles.iter().any(|c| c.alive && c.head == (ux, uy)) {
+                        // an occupied head cell without a collision. NOTE the
+                        // owner-safety must not `continue` the CELL loop: the
+                        // chain check below runs for every swept cell, and a
+                        // bomb sitting on the owner's own trail still chains
+                        // (codex v8 verify, blocking).
+                        if !owner_safe
+                            && !self.cycles.iter().any(|c| c.alive && c.head == (ux, uy))
+                        {
                             self.grid[uy as usize][ux as usize] = CellType::Empty;
                             cleared.push((ux, uy));
                         }
