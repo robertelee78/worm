@@ -270,6 +270,20 @@ impl LightCycle {
 /// interior shrinks a cell per side. The owner's decoy-bomb and napalm
 /// specs are later versions: one physics change per version, each with
 /// its own replay pinning and benchmark receipts.
+/// v10 (owner bug report: "if I hit the arrow keys rapidly, the 2nd
+/// key is often not registered … we need to do a better job of
+/// collecting keys"): THE INPUT QUEUE. Player inputs — turns AND fires
+/// — are collected in a bounded ordered queue (cap 3, drop-newest) and
+/// consumed at the frame's player phase: at most one turn executes per
+/// frame, each validated against the heading the worm ACTUALLY moved
+/// last (a true 180 at its consumption moment is dropped and the next
+/// entry drains in the same frame); a fire executes when it reaches
+/// the queue head, so "turn then fire" discharges along the NEW
+/// heading one frame later — the aim the player set up, never the
+/// stale one (codex v10 consult, the turn-then-fire blocker). Ghost
+/// recording moves to consumption time: one accepted turn per frame by
+/// construction. Pre-v10 ghosts replay the old single-slot, press-time
+/// semantics through the old pump.
 /// v9 (owner spec; ADR-022): NAPALM. The tri-shot's bolts fly only 4
 /// cells, and wherever a bolt ENDS — wall-hit, 4-cell expiry, or worm
 /// contact — it ignites a flame patch that burns ~3 wall-clock seconds.
@@ -314,7 +328,15 @@ impl LightCycle {
 /// of the v3 bolt-ordering fix. Same-frame deaths are atomic (both
 /// dead = draw); the firer is immune to their own beam; a frozen worm
 /// enters nothing but remains hittable at discharge.
-pub const ARENA_VERSION: u8 = 9;
+pub const ARENA_VERSION: u8 = 10;
+
+/// A collected player input (world v10): consumed in order at the
+/// frame's player phase.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PlayerInput {
+    Turn(Direction),
+    Fire,
+}
 
 /// A napalm patch (world v9): ignited where a tri-shot bolt ends.
 /// Life counts wall-clock milliseconds, drained by the current frame
@@ -420,6 +442,8 @@ pub struct WormGame {
     pub arena_version: u8,
     /// Evidence-supply funnel receipts (diagnostic only).
     pub funnel: FunnelStats,
+    /// World v10: the player's collected inputs, in press order.
+    pub input_queue: std::collections::VecDeque<PlayerInput>,
     /// Live napalm patches (world v9).
     pub flames: Vec<Flame>,
     /// Per-cycle burn state (world v9).
@@ -763,6 +787,7 @@ impl WormGame {
         let mut game = Self {
             arena_version: ARENA_VERSION,
             funnel: FunnelStats::default(),
+            input_queue: std::collections::VecDeque::new(),
             flames: Vec::new(),
             burns: [BurnState::default(), BurnState::default()],
             pending_beams: Vec::new(),
@@ -1145,7 +1170,7 @@ impl WormGame {
         // their exact recorded order (turn-then-fire and fire-then-turn are
         // different weapons discharges) through the same public entry points
         // that recorded them.
-        if self.script.is_some() {
+        if self.script.is_some() && self.arena_version < 10 {
             let frame = self.frame_count;
             loop {
                 let next = self
@@ -1240,6 +1265,81 @@ impl WormGame {
         // transition block cannot contain this frame's label (no leakage).
         let player_ctx_pre =
             crate::cpu_ai::encode_player_context(self, &self.cpu_brain.player_tail);
+        // WORLD v10: consume the collected inputs — fires drain freely,
+        // at most ONE turn executes per frame, each validated against
+        // prev_direction (the heading actually moved) AT ITS MOMENT: a
+        // true 180 is dropped and the next entry drains this same frame
+        // (codex: [Left, Down] from Right executes Down now, not never).
+        // Ghost recording happens HERE, at consumption — one accepted
+        // turn per frame by construction; replayed v10 ghosts feed this
+        // same queue at their stamped frame.
+        if self.arena_version >= 10 {
+            if self.script.is_some() {
+                let frame = self.frame_count;
+                loop {
+                    let next = self
+                        .script
+                        .as_ref()
+                        .and_then(|script| script.next_is(frame, &[0, 1]));
+                    match next {
+                        Some((0, d)) => {
+                            if let Some(script) = self.script.as_mut() {
+                                script.cursor += 1;
+                            }
+                            self.input_queue.push_back(PlayerInput::Turn(match d {
+                                0 => Direction::Up,
+                                1 => Direction::Down,
+                                2 => Direction::Left,
+                                _ => Direction::Right,
+                            }));
+                        }
+                        Some((1, _)) => {
+                            if let Some(script) = self.script.as_mut() {
+                                script.cursor += 1;
+                            }
+                            self.input_queue.push_back(PlayerInput::Fire);
+                        }
+                        _ => break,
+                    }
+                }
+            }
+            let mut turned = false;
+            while let Some(&front) = self.input_queue.front() {
+                match front {
+                    PlayerInput::Fire => {
+                        self.input_queue.pop_front();
+                        if self.script.is_none() {
+                            self.replay.events.push((self.frame_count, 1, 0));
+                        }
+                        self.fire_powerup(self.player);
+                        if self.game_over {
+                            return false;
+                        }
+                    }
+                    PlayerInput::Turn(d) => {
+                        if turned {
+                            break;
+                        }
+                        self.input_queue.pop_front();
+                        let moved = self.cycles[self.player].prev_direction;
+                        let is_180 = matches!(
+                            (moved, d),
+                            (Direction::Up, Direction::Down)
+                                | (Direction::Down, Direction::Up)
+                                | (Direction::Left, Direction::Right)
+                                | (Direction::Right, Direction::Left)
+                        );
+                        if !is_180 {
+                            self.cycles[self.player].direction = d;
+                            turned = true;
+                            if self.script.is_none() {
+                                self.replay.events.push((self.frame_count, 0, d as u8));
+                            }
+                        }
+                    }
+                }
+            }
+        }
         let player_dir_this_frame = self.cycles[self.player].direction;
         // Was this frame INFORMATIVE about the human? Captured here, at frame
         // start, because it describes the board they chose on — after the move
@@ -2563,6 +2663,22 @@ impl WormGame {
         if self.game_over {
             return;
         }
+        // WORLD v10 (owner: "do a better job of collecting keys"): inputs
+        // are COLLECTED, not latched. Cheap dedup only; legality is
+        // decided at consumption against the heading actually moved.
+        // Cap 3, drop-newest (4+ directions in one frame gap carry no
+        // coherent intent worth preserving).
+        if self.arena_version >= 10 {
+            let dup = match self.input_queue.back() {
+                Some(PlayerInput::Turn(d)) => *d == new_dir,
+                _ => self.input_queue.is_empty()
+                    && new_dir == self.cycles[self.player].direction,
+            };
+            if !dup && self.input_queue.len() < 3 {
+                self.input_queue.push_back(PlayerInput::Turn(new_dir));
+            }
+            return;
+        }
         // Latch against the direction actually MOVED last tick
         // (prev_direction, snapshotted at the end of every update), not the
         // pending one: two quick inputs between ticks (Up then Left while
@@ -2582,6 +2698,25 @@ impl WormGame {
                     self.replay.events.push((self.frame_count, 0, new_dir as u8));
                 }
             }
+        }
+    }
+
+    /// The player's fire input. World v10: joins the ordered input
+    /// queue — "turn then fire" discharges along the NEW heading when
+    /// the fire reaches the queue head (codex v10 consult: the
+    /// turn-then-fire blocker, resolved by plumbing fire through the
+    /// same collected-input stream). Pre-v10: immediate discharge.
+    pub fn player_fire(&mut self) -> bool {
+        if self.game_over {
+            return false;
+        }
+        if self.arena_version >= 10 {
+            if self.input_queue.len() < 3 {
+                self.input_queue.push_back(PlayerInput::Fire);
+            }
+            true
+        } else {
+            self.fire_powerup(self.player)
         }
     }
 
@@ -2790,6 +2925,7 @@ impl WormGame {
         self.cpu_brain.pending_book = None;
         self.pending_beams.clear();
         self.beam_fx.clear();
+        self.input_queue.clear();
         self.flames.clear();
         self.burns = [BurnState::default(), BurnState::default()];
         self.cpu_brain.region_ring.clear();
@@ -2956,7 +3092,7 @@ impl WormGame {
         // replay. Kind 1 = player (between frames, stamped with the last
         // completed frame); kind 3 = CPU (inside update, stamped with the
         // current frame). The site is the phase.
-        if self.script.is_none() {
+        if self.script.is_none() && (who != self.player || self.arena_version < 10) {
             let kind = if who == self.player { 1 } else { 3 };
             self.replay.events.push((self.frame_count, kind, who as u8));
         }

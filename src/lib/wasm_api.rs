@@ -52,7 +52,7 @@ impl WasmGame {
     }
 
     pub fn fire(&mut self) -> bool {
-        self.game.fire_powerup(0)
+        self.game.player_fire()
     }
 
     /// Next game in the match (banks the session scoreboard, keeps the brain).

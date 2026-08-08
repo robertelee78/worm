@@ -436,6 +436,10 @@ fn test_displayed_wins_include_current_game() {
 #[test]
 fn test_prev_direction_snapshots_each_frame() {
     let mut game = WormGame::with_size(120, 38);
+    // v9 pin: press-time single-slot input semantics — recorded
+    // ghosts keep them; v10 collects inputs and consumes at the frame
+    // (see test_v10_input_queue_contracts for the successors).
+    game.set_world_version(9);
     game.update(); // player moves Right (initial heading)
     assert_eq!(game.cycles[0].prev_direction, worm::Direction::Right);
     game.change_direction(worm::Direction::Down); // legal from Right
@@ -1185,6 +1189,10 @@ fn test_no_180_via_two_quick_turns_in_one_tick() {
     // compares against the direction actually moved (prev_direction), so
     // Left — a net 180 into the neck cell — must be rejected while Up stands.
     let mut game = WormGame::with_size(120, 38);
+    // v9 pin: press-time single-slot input semantics — recorded
+    // ghosts keep them; v10 collects inputs and consumes at the frame
+    // (see test_v10_input_queue_contracts for the successors).
+    game.set_world_version(9);
     game.change_direction(worm::Direction::Up);
     game.change_direction(worm::Direction::Left);
     assert_eq!(game.cycles[0].direction, worm::Direction::Up);
@@ -2780,6 +2788,23 @@ fn the_fast_worm_pays_the_reaction_tax() {
 #[test]
 fn corridor_keypresses_are_not_eaten_and_reversals_stay_banned() {
     let mut game = worm::WormGame::with_size_seed(40, 30, 5);
+    // v9 pin: press-time single-slot input semantics — recorded
+    // ghosts keep them; v10 collects inputs and consumes at the frame
+    // (see test_v10_input_queue_contracts for the successors).
+    game.set_world_version(9);
+    // Board scrub: the pin's rebuild faithfully repaints the CONSTRUCTION
+    // worms; a test that then repositions them would leave orphaned
+    // markers (measured: the scripted CPU died on its own ghost spawn at
+    // (32,15) twelve cells into its walk — the exact set_world_version
+    // hazard codex flagged at the v6 verify round).
+    for row in &mut game.grid {
+        for cell in row.iter_mut() {
+            if *cell != worm::CellType::Wall {
+                *cell = worm::CellType::Empty;
+            }
+        }
+    }
+    game.food_items.clear();
     // Player descending the left corridor column with a real neck above,
     // and a punched hole beside them to legally turn into.
     game.cycles[0].head = (1, 4);
@@ -3949,5 +3974,130 @@ fn test_dwell_release_frees_a_dead_latch() {
     assert!(
         game.cpu_brain.family_earned_read() > 0.0,
         "a spend above the floor holds its latch indefinitely"
+    );
+}
+
+/// OWNER BUG (2026-08-08, live): "if I hit the arrow keys rapidly, the
+/// 2nd key is often not registered … it's why I'm increasingly running
+/// into walls." Reproduction: a fast corner (Up then Left while moving
+/// Right) pressed within one frame gap — the second press is eaten
+/// because the 180-ban anchors on the still-unexecuted current motion.
+#[test]
+fn repro_fast_corner_second_press_eaten() {
+    let mut game = WormGame::with_size(60, 30);
+    game.cpu_autopilot = false;
+    game.food_items.clear();
+    game.cycles[0].head = (30, 15);
+    game.cycles[0].direction = worm::Direction::Right;
+    game.cycles[0].positions = vec![(30, 15), (29, 15)];
+    game.grid[15][30] = worm::CellType::Player;
+    game.grid[15][29] = worm::CellType::Player;
+    game.cycles[0].prev_direction = worm::Direction::Right;
+    // Both presses land between frames — the fast corner.
+    game.change_direction(worm::Direction::Up);
+    game.change_direction(worm::Direction::Left);
+    game.update(); // should execute the Up
+    game.update(); // should execute the Left
+    let head = game.cycles[0].head;
+    assert_eq!(
+        head,
+        (29, 14),
+        "the corner is Up then Left: from (30,15) -> (30,14) -> (29,14); \
+         got {head:?} — the second press was eaten"
+    );
+}
+
+/// v10 contracts (codex consult): the drain rule, the dead 180-sneak,
+/// turn-then-fire along the NEW heading, overflow drop-newest, v9 pin.
+#[test]
+fn test_v10_input_queue_contracts() {
+    // Drain rule: [Left, Down] while moving Right — Left drops as an
+    // immediate 180, Down executes THE SAME frame.
+    let mut game = WormGame::with_size(60, 30);
+    game.cpu_autopilot = false;
+    game.food_items.clear();
+    game.cycles[0].head = (30, 15);
+    game.cycles[0].direction = worm::Direction::Right;
+    game.cycles[0].prev_direction = worm::Direction::Right;
+    game.cycles[0].positions = vec![(30, 15), (29, 15)];
+    game.grid[15][30] = worm::CellType::Player;
+    game.grid[15][29] = worm::CellType::Player;
+    game.change_direction(worm::Direction::Left);
+    game.change_direction(worm::Direction::Down);
+    game.update();
+    assert_eq!(
+        game.cycles[0].head,
+        (30, 16),
+        "Left (a true 180) drops; Down executes the same frame"
+    );
+
+    // The 180-sneak stays dead: [Up, Left] from Right is the legal
+    // two-frame corner (moves Up first), but a lone [Left] from Right
+    // is dropped and the worm continues Right.
+    let mut game = WormGame::with_size(60, 30);
+    game.cpu_autopilot = false;
+    game.food_items.clear();
+    game.cycles[0].head = (30, 15);
+    game.cycles[0].direction = worm::Direction::Right;
+    game.cycles[0].prev_direction = worm::Direction::Right;
+    game.cycles[0].positions = vec![(30, 15), (29, 15)];
+    game.grid[15][30] = worm::CellType::Player;
+    game.grid[15][29] = worm::CellType::Player;
+    game.change_direction(worm::Direction::Left);
+    game.update();
+    assert_eq!(game.cycles[0].head, (31, 15), "a lone 180 is dropped");
+
+    // Turn-then-fire: the discharge waits for its turn and fires along
+    // the NEW heading (a laser Up, not Right).
+    let mut game = WormGame::with_size(60, 30);
+    game.cpu_autopilot = false;
+    game.food_items.clear();
+    game.cycles[0].head = (30, 15);
+    game.cycles[0].direction = worm::Direction::Right;
+    game.cycles[0].prev_direction = worm::Direction::Right;
+    game.cycles[0].positions = vec![(30, 15), (29, 15)];
+    game.grid[15][30] = worm::CellType::Player;
+    game.grid[15][29] = worm::CellType::Player;
+    // CPU parked on the UP column, off the RIGHT row.
+    game.cycles[1].head = (30, 6);
+    game.cycles[1].direction = worm::Direction::Left;
+    game.cycles[1].positions = vec![(30, 6)];
+    game.grid[6][30] = worm::CellType::CPU;
+    game.cycles[0].held_powerup = Some(worm::game::PowerUpKind::Laser);
+    game.change_direction(worm::Direction::Up);
+    assert!(game.player_fire(), "fire joins the queue");
+    game.update();
+    assert!(
+        !game.cycles[1].alive || game.game_over,
+        "the beam fired along the NEW heading (Up) and found the CPU"
+    );
+
+    // Overflow: cap 3, drop-newest — the 4th input vanishes.
+    let mut game = WormGame::with_size(60, 30);
+    game.change_direction(worm::Direction::Up);
+    game.change_direction(worm::Direction::Left);
+    game.change_direction(worm::Direction::Down);
+    game.change_direction(worm::Direction::Right); // dropped
+    assert_eq!(game.input_queue.len(), 3);
+
+    // v9 pin: the old single-slot latch behavior survives for replays.
+    let mut game = WormGame::with_size(60, 30);
+    game.set_world_version(9);
+    game.cpu_autopilot = false;
+    game.food_items.clear();
+    game.cycles[0].head = (30, 15);
+    game.cycles[0].direction = worm::Direction::Right;
+    game.cycles[0].prev_direction = worm::Direction::Right;
+    game.cycles[0].positions = vec![(30, 15), (29, 15)];
+    game.grid[15][30] = worm::CellType::Player;
+    game.grid[15][29] = worm::CellType::Player;
+    game.change_direction(worm::Direction::Up);
+    game.change_direction(worm::Direction::Left); // eaten at v9
+    game.update();
+    game.update();
+    assert_eq!(
+        game.cycles[0].head,
+        (30, 13),
+        "pre-v10 ghosts keep the recorded single-slot semantics"
     );
 }
