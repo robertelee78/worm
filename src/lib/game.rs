@@ -260,11 +260,54 @@ impl LightCycle {
 /// the 180-ban's anchor within one held frame: changing your mind got
 /// keypresses eaten ("impossible to turn"), and a two-press sequence
 /// could sneak a true reversal past the ban into your own neck.
-pub const ARENA_VERSION: u8 = 5;
+/// v6 (owner spec; ADR-022 unbundling — corridor ONLY): the outer
+/// corridor is TWO lanes wide — the arena wall moves to ring 3, so
+/// turning and overtaking inside the ring become real maneuvers and the
+/// interior shrinks a cell per side. The owner's decoy-bomb and napalm
+/// specs are v7/v8: one physics change per version, each with its own
+/// replay pinning and benchmark receipts.
+pub const ARENA_VERSION: u8 = 6;
+
+/// Diagnostic event-supply funnel (codex v6 consult, Q2): cheap counters
+/// over the evidence-eligibility path, cumulative for the life of this
+/// WormGame. Never persisted, never read by play logic — receipts only.
+#[derive(Default, Clone, Copy)]
+pub struct FunnelStats {
+    /// Scored (moving, non-frozen) player frames.
+    pub moves: u32,
+    /// Frames where holding the line was legal.
+    pub straight_legal: u32,
+    /// ...and both laterals were also legal.
+    pub two_lat: u32,
+    /// Voluntary laterals taken (straight legal, turned anyway).
+    pub vol_lat: u32,
+    /// ...with both sides open — the side-evidence supply.
+    pub vol_two_sided: u32,
+    /// Pending book records consumed (matched or stale).
+    pub pend_taken: u32,
+    /// ...that matched their target frame.
+    pub pend_matched: u32,
+    /// Matched records that carried a side call.
+    pub side_declared: u32,
+    /// Pending records DROPPED unconsumed — overwritten by a later
+    /// producer frame (frozen-player frames produce but never consume)
+    /// or discarded by restart(). The take-side counters cannot see
+    /// these; without this the funnel overstates its own completeness.
+    pub pend_dropped: u32,
+    /// Lateral taken with BOTH laterals legal, straight legal or not — an
+    /// UPPER BOUND on the published lateral channel's feed: record() has
+    /// the same gate but only runs on frames that carried a forecast, so
+    /// silent-model frames count here without feeding lat_samples.
+    pub lat_supply: u32,
+    /// Forced breaks (straight illegal, lateral taken).
+    pub forced_break: u32,
+}
 
 pub struct WormGame {
     /// Arena geometry this game builds (replays pin their recorded one).
     pub arena_version: u8,
+    /// Evidence-supply funnel receipts (diagnostic only).
+    pub funnel: FunnelStats,
     /// Whether the current round's ledgers have been finalized (exactly-
     /// once discipline; see finalize_round_ledgers).
     pub ledgers_finalized: bool,
@@ -589,6 +632,7 @@ impl WormGame {
 
         let mut game = Self {
             arena_version: ARENA_VERSION,
+            funnel: FunnelStats::default(),
             ledgers_finalized: false,
             width,
             height,
@@ -698,7 +742,7 @@ impl WormGame {
     /// stage 2.1). Sloppy basics exist for the genuinely-unread phase
     /// ONLY; a CPU holding latched evidence has no business faceplanting.
     pub fn discipline_sharpness(&self) -> f32 {
-        if self.cpu_brain.earned_snapshot > 0.0 {
+        if self.cpu_brain.earned_snapshot > 0.0 || self.cpu_brain.discipline_latched {
             1.0
         } else {
             self.sharpness()
@@ -764,8 +808,11 @@ impl WormGame {
         for y in 0..height {
             for x in 0..width {
                 let frame = x == 0 || y == 0 || x == width - 1 || y == height - 1;
-                let on_ring2 =
-                    x == 2 || y == 2 || x == width - 3 || y == height - 3;
+                let ring = if arena >= 6 { 3 } else { 2 };
+                let on_ring2 = x == ring
+                    || y == ring
+                    || x == width - 1 - ring
+                    || y == height - 1 - ring;
                 // ARENA V2 (owner play report, 2026-08-06): v1 ran the
                 // arena-wall rows/columns all the way to the frame, so at
                 // every corner the wall's ends CROSSED the ring-1
@@ -775,10 +822,14 @@ impl WormGame {
                 // its own rectangle; the corridor turns the corners.
                 // V1 is kept verbatim: recorded ghosts replay on the
                 // geometry they were played on.
+                let ring = if arena >= 6 { 3 } else { 2 };
                 let arena_wall = corridor
                     && on_ring2
                     && (arena < 2
-                        || (x >= 2 && y >= 2 && x <= width - 3 && y <= height - 3));
+                        || (x >= ring
+                            && y >= ring
+                            && x <= width - 1 - ring
+                            && y <= height - 1 - ring));
                 if frame || arena_wall {
                     grid[y as usize][x as usize] = CellType::Wall;
                 }
@@ -800,8 +851,31 @@ impl WormGame {
     /// arena wall at all: beams stopped dead instead of bouncing or breaching,
     /// and bomb blasts silently stopped breaking walls. The endgame quietly
     /// played by different rules from the rest of the round.
+    /// Rebuild THIS game under a different world-rules version — TEST
+    /// FIXTURE ONLY (ADR-022: production version construction stays on
+    /// the recorded-round path; repainting worms across a changed grid
+    /// is only sound on boards the caller controls). Re-marks worms and
+    /// food onto the fresh grid.
+    #[doc(hidden)]
+    pub fn set_world_version(&mut self, v: u8) {
+        self.arena_version = v;
+        self.grid = Self::build_grid(self.width, self.height, v);
+        for (i, c) in self.cycles.iter().enumerate() {
+            let marker = if i == 0 { CellType::Player } else { CellType::CPU };
+            for &(x, y) in &c.positions {
+                self.grid[y as usize][x as usize] = marker;
+            }
+        }
+        for &(x, y, _) in &self.food_items {
+            if self.grid[y as usize][x as usize] == CellType::Empty {
+                self.grid[y as usize][x as usize] = CellType::Food;
+            }
+        }
+    }
+
     pub fn arena_wall_offset(&self) -> u16 {
-        2 + self.shrink_level
+        let base = if self.arena_version >= 6 { 3 } else { 2 };
+        base + self.shrink_level
     }
 
     pub fn is_arena_wall(&self, x: u16, y: u16) -> bool {
@@ -960,7 +1034,7 @@ impl WormGame {
         // own making, no decisions, no learning about it (a frozen frame
         // is not a choice). The other worm plays at full rate. Solid
         // while frozen: it can still be hit, shot, and sealed in.
-        let slip_hold = self.arena_version >= 4 && self.frame_count % 16 != 0;
+        let slip_hold = self.arena_version >= 4 && !self.frame_count.is_multiple_of(16);
         let player_frozen = slip_hold && self.cycle_in_corridor(self.player);
         let cpu_frozen = slip_hold && self.cycle_in_corridor(1);
 
@@ -1153,6 +1227,7 @@ impl WormGame {
             // have held the line, so WHEN and WHICH WAY were genuinely
             // theirs. Forced turns belong to the mask, not the books.
             {
+                self.funnel.moves += 1;
                 let straight_legal = legal_now.contains(&player_heading);
                 let both_laterals_legal = {
                     let mut l = 0;
@@ -1172,11 +1247,43 @@ impl WormGame {
                 );
                 // A stale record (round restart, frame skip) must never
                 // score against the wrong input.
+                let pend_any = self.cpu_brain.pending_book.is_some();
                 let pend_book = self
                     .cpu_brain
                     .pending_book
                     .take()
                     .filter(|p| p.target_frame == self.frame_count);
+                {
+                    let f = &mut self.funnel;
+                    let turned = turned_lateral;
+                    if straight_legal {
+                        f.straight_legal += 1;
+                        if both_laterals_legal {
+                            f.two_lat += 1;
+                        }
+                        if turned {
+                            f.vol_lat += 1;
+                            if both_laterals_legal {
+                                f.vol_two_sided += 1;
+                            }
+                        }
+                    }
+                    if turned && both_laterals_legal {
+                        f.lat_supply += 1;
+                    }
+                    if !straight_legal && turned {
+                        f.forced_break += 1;
+                    }
+                    if pend_any {
+                        f.pend_taken += 1;
+                    }
+                    if let Some(p) = &pend_book {
+                        f.pend_matched += 1;
+                        if p.side.is_some() {
+                            f.side_declared += 1;
+                        }
+                    }
+                }
                 if let Some(p) = pend_book {
                     if straight_legal && player_turn.is_some() {
                         self.cpu_brain.class_books.observe_hazard(p.cell, turned_lateral);
@@ -1615,6 +1722,11 @@ impl WormGame {
                     cpu_close,
                 );
                 let side = self.cpu_brain.class_books.side_pick(&masked, heading);
+                if self.cpu_brain.pending_book.is_some() {
+                    // A record the take-side never saw (frozen-player frames
+                    // produce without consuming) — receipt the loss.
+                    self.funnel.pend_dropped += 1;
+                }
                 self.cpu_brain.pending_book = Some(crate::cpu_ai::PendingBook {
                     target_frame: self.frame_count + 1,
                     cell,
@@ -1727,9 +1839,9 @@ impl WormGame {
             && ((self.cycles[0].alive && self.cycle_in_corridor(0))
                 || (self.cycles[1].alive && self.cycle_in_corridor(1)));
         let slip_lag =
-            slip_clock && !cpu_frozen && self.frame_count % 4 != 0;
+            slip_clock && !cpu_frozen && !self.frame_count.is_multiple_of(4);
         let cpu_dozing = self.cpu_autopilot
-            && ((open_k > 1 && self.frame_count % open_k != 0) || slip_lag)
+            && ((open_k > 1 && !self.frame_count.is_multiple_of(open_k)) || slip_lag)
             && {
             let cy = &self.cycles[1];
             let (dx, dy) = cy.direction.as_delta();
@@ -1740,7 +1852,21 @@ impl WormGame {
                 || nx >= self.width as i16
                 || ny >= self.height as i16
                 || self.grid[ny as usize][nx as usize] == CellType::Wall;
-            !wall_ahead && !crate::cpu_ai::ring_doomed_step(self, cy.head, cy.direction)
+            // OWN mine ahead wakes even a dozy driver — you always know
+            // where your own plant is (self-knowledge, not sharpness).
+            // ENEMY mines stay invisible to the doze: being fooled by a
+            // disguise is exactly what the doze is for. (v6's longer
+            // decoy fuse made own-mine doze deaths a measured warm-arm
+            // failure mode: BombBlast under held headings.)
+            let own_mine_ahead = nx >= 0
+                && ny >= 0
+                && self
+                    .bombs
+                    .iter()
+                    .any(|b| b.owner == 1 && b.x == nx as u16 && b.y == ny as u16);
+            !wall_ahead
+                && !own_mine_ahead
+                && !crate::cpu_ai::ring_doomed_step(self, cy.head, cy.direction)
         };
         let cpu_dir = if cpu_frozen {
             // Slipstream-frozen: no decision, no discharge — held heading.
@@ -2257,6 +2383,9 @@ impl WormGame {
         // hunts before a boundary check has seen it).
         let base = self.cpu_brain.family_earned_read();
         self.cpu_brain.earned_snapshot = base;
+        if base > 0.0 {
+            self.cpu_brain.discipline_latched = true;
+        }
         self.cpu_brain.book_spend_snapshot = self.cpu_brain.class_books.spendable();
         self.cpu_brain.book_authority_snapshot =
             self.cpu_brain.class_books.projection_authority();
@@ -2396,6 +2525,9 @@ impl WormGame {
         self.cpu_brain.gap_since_voluntary = 0;
         self.cpu_brain.frames_since_food = 99;
         self.cpu_brain.prev_pc_dist = 0;
+        if self.cpu_brain.pending_book.is_some() {
+            self.funnel.pend_dropped += 1;
+        }
         self.cpu_brain.pending_book = None;
         self.cpu_brain.region_ring.clear();
         self.cpu_brain.last_opp_prediction = None;
@@ -2473,8 +2605,23 @@ impl WormGame {
             return false;
         }
         let (x, y) = self.cycles[idx].head;
-        let ring1 = x == 1 || y == 1 || x == self.width - 2 || y == self.height - 2;
-        ring1 || self.grid[y as usize][x as usize] == CellType::Hole
+        self.pos_in_corridor(x, y)
+    }
+
+    /// Is this cell in the outer corridor (between the frame and the
+    /// arena wall — one lane pre-v6, two lanes from v6) or a punched
+    /// hole in the wall itself?
+    pub fn pos_in_corridor(&self, x: u16, y: u16) -> bool {
+        if !self.has_corridor() {
+            return false;
+        }
+        let ring = if self.arena_version >= 6 { 3 } else { 2 };
+        let in_ring = (x >= 1 && x < ring)
+            || (y >= 1 && y < ring)
+            || (x > self.width - 1 - ring && x <= self.width - 2)
+            || (y > self.height - 1 - ring && y <= self.height - 2);
+        (in_ring && self.grid[y as usize][x as usize] != CellType::Wall)
+            || self.grid[y as usize][x as usize] == CellType::Hole
     }
 
     pub fn player_in_corridor(&self) -> bool {
@@ -2642,6 +2789,7 @@ impl WormGame {
             PowerUpKind::TriShot => {
                 // Straight ahead plus the two forward diagonals.
                 let dirs = [(dx, dy), (dx + dy, dy + dx), (dx - dy, dy - dx)];
+
                 for (ddx, ddy) in dirs {
                     self.projectiles.push(Projectile {
                         x: hx,
@@ -2661,6 +2809,7 @@ impl WormGame {
                 // under a seed. NOTE: this consumes a draw at plant time, so
                 // seeded streams diverge from pre-mine builds — deliberate.
                 let disguise = self.rng_range(1..10) as u8;
+
                 self.bombs.push(Bomb {
                     x: hx,
                     y: hy,
@@ -2943,7 +3092,6 @@ impl WormGame {
         }
     }
 
-    /// Tick bomb fuses and detonate any at zero (chain reactions included).
     pub fn tick_bombs(&mut self) {
         for b in &mut self.bombs {
             b.armed_in = b.armed_in.saturating_sub(1);

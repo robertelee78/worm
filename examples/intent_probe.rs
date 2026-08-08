@@ -474,8 +474,8 @@ impl Shadow {
     fn forecast(&mut self, masked: &[Option<Direction>]) {
         let mut best = usize::MAX;
         let mut best_w = f32::NEG_INFINITY;
-        for i in 0..self.n {
-            if self.den[i] <= 0.0 || masked[i].is_none() {
+        for (i, m) in masked.iter().enumerate().take(self.n) {
+            if self.den[i] <= 0.0 || m.is_none() {
                 continue;
             }
             let mut w = self.w_fast[i] + self.w_slow[i];
@@ -1009,11 +1009,11 @@ fn play(p: Persona, games: u32, seed: u64, max_frames: u32) -> Run {
                 st.hunt_bfs_late_hit += 1;
             }
 
-            for i in 0..ENSEMBLE_MODELS {
-                match raw[i] {
+            for (i, r) in raw.iter().enumerate().take(ENSEMBLE_MODELS) {
+                match r {
                     Some(pred) => {
                         st.raw_n[i] += 1;
-                        if pred == actual {
+                        if *pred == actual {
                             st.raw_hits[i] += 1;
                         }
                     }
@@ -1116,12 +1116,12 @@ fn main() {
 
         println!("\n  model   select-share  drive-hit%  raw-skill%(n)      abstain%  masked-hit%  mean-w");
         let total_sel: u32 = st.src_count.iter().sum();
-        for i in 0..ENSEMBLE_MODELS {
+        for (i, name) in MODEL_NAMES.iter().enumerate().take(ENSEMBLE_MODELS) {
             let mark = if p.matching_model() == Some(i) { "*" } else { " " };
             println!(
                 " {}{:<6} {:>6.2}% ({:>5})  {:>7.1}%   {:>6.1}% ({:>5})  {:>6.1}%   {:>7.1}%  {:>6.3}",
                 mark,
-                MODEL_NAMES[i],
+                name,
                 pct(st.src_count[i], total_sel),
                 st.src_count[i],
                 pct(st.src_hits[i], st.src_count[i]),
@@ -1138,10 +1138,11 @@ fn main() {
         }
 
         println!("\n  real-ensemble read rate by frame class:");
-        for c in 0..4 {
+        for (c, cname) in C_NAMES.iter().enumerate() {
             if st.class_n[c] == 0 {
                 continue;
             }
+
             let mut idx: Vec<usize> = (0..ENSEMBLE_MODELS).collect();
             idx.sort_by_key(|&i| std::cmp::Reverse(st.class_src[c][i]));
             let top: Vec<String> = idx
@@ -1152,7 +1153,7 @@ fn main() {
                 .collect();
             println!(
                 "    {:<18} n={:<6} read={:>5.1}%   drivers: {}",
-                C_NAMES[c], st.class_n[c], pct(st.class_hits[c], st.class_n[c]), top.join("  ")
+                cname, st.class_n[c], pct(st.class_hits[c], st.class_n[c]), top.join("  ")
             );
         }
 
@@ -1167,11 +1168,12 @@ fn main() {
                 pct(st.traj_eq_actual, st.errand_n),
             );
         }
-        for c in 1..4 {
+        for (c, cname) in C_NAMES.iter().enumerate().skip(1) {
             if st.cls_n[c] == 0 { continue; }
+
             println!(
                 "      {:<16} n={:<6} greedy {:>5.1}%  BFS {:>5.1}%  hysteresis {:>5.1}%",
-                C_NAMES[c], st.cls_n[c],
+                cname, st.cls_n[c],
                 pct(st.cls_greedy[c], st.cls_n[c]),
                 pct(st.cls_bfs[c], st.cls_n[c]),
                 pct(st.cls_hyst[c], st.cls_n[c]),

@@ -54,8 +54,9 @@ fn stoer_wagner(mut w: Vec<Vec<f64>>) -> (f64, Vec<usize>) {
         // Merge last into prev.
         let moved = std::mem::take(&mut vertices[last]);
         vertices[prev].extend(moved);
-        for v in 0..n {
-            w[prev][v] += w[last][v];
+        let last_row = w[last].clone();
+        for (v, &wl) in last_row.iter().enumerate().take(n) {
+            w[prev][v] += wl;
             w[v][prev] += w[v][last];
         }
         active.retain(|&v| v != last);
@@ -68,7 +69,7 @@ fn selftest() {
     // two 48-node ring+chord clusters, one weight-1 bridge (10,58).
     let n = 96;
     let mut w = vec![vec![0.0; n]; n];
-    let mut add = |a: usize, b: usize, wt: f64, w: &mut Vec<Vec<f64>>| {
+    let add = |a: usize, b: usize, wt: f64, w: &mut Vec<Vec<f64>>| {
         w[a][b] += wt;
         w[b][a] += wt;
     };

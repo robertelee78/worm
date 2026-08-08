@@ -119,7 +119,7 @@ fn main() {
                         q.push_back((nx, ny));
                     }
                 }
-                let pocketed = !big && region <= 120 && throats >= 1 && throats <= 2;
+                let pocketed = !big && region <= 120 && (1..=2).contains(&throats);
                 if pocketed {
                     *pocket_frames += 1;
                     if !*pocket_flag && moments {

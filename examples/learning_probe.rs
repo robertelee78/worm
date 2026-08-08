@@ -228,7 +228,7 @@ fn main() {
         // cell shrinks toward with k=5 pseudo-mass — thin cells borrow
         // strength from "situations like this" instead of sitting at 0.5.
         let mut tb = vec![(0.0f32, 0.0f32); 8 * 12];
-        let mut tb_marg = vec![(0.0f32, 0.0f32); 8];
+        let mut tb_marg = [(0.0f32, 0.0f32); 8];
         let mut ll8 = 0f64;
         let mut ll16 = 0f64;
         let mut llb = 0f64;
