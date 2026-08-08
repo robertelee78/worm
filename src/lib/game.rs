@@ -469,6 +469,10 @@ pub struct WormGame {
     /// Forensic record of the LAST laser discharge (diagnostic only).
     #[doc(hidden)]
     pub laser_audit: Option<LaserAudit>,
+    /// The book's precommitted side call for the upcoming frame
+    /// (diagnostic only; corpus shootout).
+    #[doc(hidden)]
+    pub book_audit: Option<Direction>,
     /// Same, but never consumed (diagnostic only).
     #[doc(hidden)]
     pub laser_audit_last: Option<LaserAudit>,
@@ -806,6 +810,7 @@ impl WormGame {
             pending_beams: Vec::new(),
             beam_fx: Vec::new(),
             laser_audit: None,
+            book_audit: None,
             laser_audit_last: None,
             ledgers_finalized: false,
             width,
@@ -2007,6 +2012,9 @@ impl WormGame {
                     cpu_close,
                 );
                 let side = self.cpu_brain.class_books.side_pick(&masked, heading);
+                // Diagnostic tap (corpus shootout): the book's precommitted
+                // side call for the NEXT frame, exposed like laser_audit.
+                self.book_audit = side.map(|(_, d)| d);
                 if self.cpu_brain.pending_book.is_some() {
                     // A record the take-side never saw (frozen-player frames
                     // produce without consuming) — receipt the loss.

@@ -481,6 +481,26 @@ The standing policy, then:
   of proof sits on the challenger the way it sits on any candidate in
   the gauntlet: per change, with numbers — never permanently.
 
+**The first shootout ran** (2026-08-08, `examples/corpus_shootout.rs`,
+receipts in `docs/shootout-1-results.txt`; pre-registered protocol,
+both consultants ruling). 235 deduplicated rounds, 49,813 scored
+frames, 6,287 decisive. Verdict: **underpowered-leaning-positive; no
+promotion; the incumbent retains — and not by walkover.** A 3-way
+online softmax head collapsed to always-straight (the predicted
+failure — empirical support for ADR-020's class-conditional thesis: a
+global learner drowns in straight frames, which is exactly why the
+incumbent has specialists). Fairly paired on the decisive class, a
+~70-line decisive-only logistic head hit 71.8% against the KT book's
+70.5% — CI [−0.24, +3.01]pp — suggesting the book's edge lives in its
+*class structure* (knowing when to speak), not estimator
+sophistication. Two rulings followed: a coverage/operating-curve
+follow-up on the publication gate (the incumbent publishes only 9.6%
+hit-rate forecasts on frames where its own book holds 70.5% side
+skill — conservatism worth measuring, not a bug); and the
+pre-registered **hybrid** as the next experiment — the book's class
+structure and gate kept fixed, the learned head swapped in as its
+lateral estimator, evaluated on the next corpus tranche.
+
 ---
 
 ## 8. Ubiquitous language (glossary)

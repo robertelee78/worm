@@ -49,7 +49,7 @@ fn parse_round(rec: &serde_json::Value) -> Result<Round, String> {
     }
     let (w, h, frames) = (w64 as u16, h64 as u16, frames64 as u32);
     let arena64 = replay.get("arena").and_then(|v| v.as_u64()).unwrap_or(1);
-    if !(1..=8).contains(&arena64) {
+    if !(1..=worm::ARENA_VERSION as u64).contains(&arena64) {
         return Err("arena version out of range".into());
     }
     let arena = arena64 as u8;
