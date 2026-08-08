@@ -22,6 +22,11 @@
 //!   the human's moves were elicited by the old CPU's steering).
 //!
 //! Usage: cargo run --release --example corpus_shootout -- /opt/worm/data/rounds
+// Numeric kernels below index several parallel arrays in lockstep
+// (weights, squared-gradient accumulators, activations); explicit
+// indices are clearer than 3-way zips there.
+#![allow(clippy::needless_range_loop)]
+
 use worm::{Direction, WormGame};
 
 const DIM: usize = worm::cpu_ai::PLAYER_FEATURE_DIM;
@@ -341,7 +346,7 @@ fn main() {
         let mut game = WormGame::with_size_seed(w as u16, h as u16, 1);
         game.start_recorded_round(seed, w as u16, h as u16, arena, events);
         game.shadow_learning = true;
-        game.cpu_brain = brains.remove(&player).unwrap_or_else(worm::CpuBrain::new);
+        game.cpu_brain = brains.remove(&player).unwrap_or_default();
         game.refresh_read_rate();
 
         let mut steps = 0u32;
@@ -365,7 +370,7 @@ fn main() {
             game.update();
             // Score against what actually happened, on the incumbent's
             // scored frame (paired set) — and train prequentially.
-            if let Some(s) = game.cpu_telemetry.scored.clone() {
+            if let Some(s) = game.cpu_telemetry.scored {
                 let actual = s.actual;
                 let Some(y) = rel(heading, actual) else {
                     continue;
