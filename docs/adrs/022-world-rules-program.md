@@ -1,6 +1,12 @@
 # ADR-022: The World-Rules Program — Two-Lane Corridor, Timed Decoy, Napalm
 
 ## Status
+v8 (timed decoy) Implemented and LIVE (merge 9b6bda8, BUILD 25) —
+verified with two consult findings fixed (chain-through-owner-trail,
+ring-4 closure proofs) and the UNANIMOUS R1 ruling: warm-vs-cold
+non-inferiority scores expected points (draws count half in both arms).
+v7 (laser simultaneity, ADR-023) Implemented and LIVE earlier the same
+day. v9 (napalm) remains design-gated below.
 v6 (corridor) Implemented and LIVE — verified SOUND by both consultants
 (codex round 2; kimi-k3 round 2), merged as 72906d8, wasm rebuilt with
 `--features wasm` (the first build shipped a 366-byte stub; the browser
