@@ -884,7 +884,18 @@ impl WormGame {
         self.ledgers_finalized = true;
         match self.winner {
             Some(1) => {
-                self.cpu_brain.ledgers.resolve_player_death(self.frame_count);
+                // ADR-024: the Boxer credit rule needs the player's
+                // reachable space at death to test the realized choke
+                // against the episode's precommitted baseline. One flood,
+                // once per round end.
+                let (phx, phy) = self.cycles[0].head;
+                let space_at_death =
+                    crate::cpu_ai::count_open_space(self, phx, phy);
+                self.cpu_brain.ledgers.resolve_player_death(
+                    self.frame_count,
+                    self.death_cause,
+                    space_at_death,
+                );
                 if let Some(cause) = self.death_cause {
                     let kind = match cause {
                         DeathCause::Laser => Some(PowerUpKind::Laser),
@@ -2828,6 +2839,24 @@ impl WormGame {
                 s_d > s_c
             }
             _ => false,
+        };
+        // ADR-024: the Boxer perturbation's round-boundary gate. Suppress
+        // the choke only when its ledger is MATURE and materially worse
+        // than the best plain intercept — a yield, so it can only reduce
+        // aggression. Self-recovering: a suppressed arm's decayed attempt
+        // mass erodes below the maturity floor and the gate reopens.
+        self.cpu_brain.tactic_boxer_ok = {
+            let best_intercept = [
+                self.cpu_brain.ledgers.tactic_kill_rate(0),
+                self.cpu_brain.ledgers.tactic_kill_rate(1),
+            ]
+            .into_iter()
+            .flatten()
+            .fold(None::<f32>, |a, r| Some(a.map_or(r, |x| x.max(r))));
+            match (self.cpu_brain.ledgers.tactic_kill_rate(4), best_intercept) {
+                (Some(boxer), Some(intercept)) => boxer >= 0.5 * intercept,
+                _ => true,
+            }
         };
         // The active playstyle scales how hard the read is SPENT, never the
         // read itself: cautious plays under its evidence, relentless over it.

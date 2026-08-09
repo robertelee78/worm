@@ -195,6 +195,10 @@ pub enum CpuDecisionReason {
     DirectIntercept,
     SurvivalMemory,
     WallFollow,
+    /// ADR-024: space-denial choke — a perturbation of an already-funded
+    /// intercept that steers to shrink the player's reachable region
+    /// instead of closing distance.
+    Boxer,
 }
 
 impl CpuDecisionReason {
@@ -219,6 +223,7 @@ impl CpuDecisionReason {
             Self::DirectIntercept => "intercepting your predicted path",
             Self::SurvivalMemory => "reusing a surviving move",
             Self::WallFollow => "following the survival floor",
+            Self::Boxer => "boxing off your space",
         }
     }
 }
@@ -1624,6 +1629,13 @@ pub struct CpuBrain {
     /// order is the null; the gauntlet is the regression tripwire.
     #[serde(skip)]
     pub tactic_prefer_direct: bool,
+    /// ADR-024: round-boundary gate on the Boxer perturbation. Same
+    /// yield discipline as tactic_prefer_direct — suppressing the choke
+    /// can only make a frame LESS aggressive, and the decayed ledger
+    /// self-recovers: a suppressed arm stops accruing attempts, decay
+    /// erodes its mass below maturity, and the gate reopens.
+    #[serde(skip)]
+    pub tactic_boxer_ok: bool,
     /// Self-knowledge instrumentation (ADR-021 Kata 0). Persisted in its
     /// own sections; recording-only until later katas activate readers.
     #[serde(skip)]
@@ -1657,11 +1669,14 @@ pub struct PendingBook {
 
 /// Hunt-family tactics with STABLE semantic ids (never reorder — the wire
 /// stores these ids, not enum positions).
-pub const TACTIC_IDS: [(u8, CpuDecisionReason); 4] = [
+pub const TACTIC_IDS: [(u8, CpuDecisionReason); 5] = [
     (0, CpuDecisionReason::DirectIntercept),
     (1, CpuDecisionReason::CornerIntercept),
     (2, CpuDecisionReason::ItemPath),
     (3, CpuDecisionReason::WallFollow),
+    // ADR-024 Phase A. Ids 5 (Breach actuator telemetry) and 6 (SlipRun)
+    // are RESERVED for Phase B — never reuse them for anything else.
+    (4, CpuDecisionReason::Boxer),
 ];
 /// Frames an opened tactic attempt stays live for kill attribution. The
 /// window is PRECOMMITTED at decision time (codex: no post-hoc causal
@@ -1696,8 +1711,16 @@ pub struct LearningLedgers {
     /// Ring of per-round summaries for the drift alarm's family:
     /// (laterals, alternations, mean_gap_x10, frames). Capped at 64.
     pub round_summaries: std::collections::VecDeque<(u32, u32, u32, u32)>,
-    /// Transient: attempt window currently open (tactic id, opened frame).
-    pub open_attempt: Option<(u8, u32)>,
+    /// Transient: attempt window currently open — (tactic id, opened
+    /// frame, precommitted baseline). The baseline is the player's
+    /// reachable open space at window-open; 0.0 for every arm except
+    /// Boxer, whose kill credit requires a REALIZED choke against it
+    /// (ADR-024: the precommitted-window rule keeps the clock honest,
+    /// the baseline keeps the causal story honest).
+    pub open_attempt: Option<(u8, u32, f32)>,
+    /// Transient: staged by the Boxer decision site immediately before
+    /// choose!/note_tactic runs, consumed into the episode it opens.
+    pub pending_boxer_baseline: Option<f32>,
     /// Transient per-round tallies feeding the summary.
     pub rs_laterals: u32,
     pub rs_alternations: u32,
@@ -1746,12 +1769,21 @@ impl LearningLedgers {
             // ONE attempt — the old per-frame increment inflated the
             // denominator by the pursuit's length. A window closes by
             // kill, by expiry, or by a different tactic taking over.
-            if let Some((open_id, opened)) = self.open_attempt {
+            if let Some((open_id, opened, _)) = self.open_attempt {
                 if open_id == id && frame.saturating_sub(opened) <= ATTEMPT_HORIZON {
-                    return; // same episode, window stays as precommitted
+                    // Same episode, window stays as precommitted — the staged
+                    // baseline (if any) belongs to the episode already open.
+                    self.pending_boxer_baseline = None;
+                    return;
                 }
             }
-            self.open_attempt = Some((id, frame));
+            let baseline = if reason == CpuDecisionReason::Boxer {
+                self.pending_boxer_baseline.take().unwrap_or(0.0)
+            } else {
+                self.pending_boxer_baseline = None;
+                0.0
+            };
+            self.open_attempt = Some((id, frame, baseline));
             let e = match self.tactic_attempts.iter_mut().find(|e| e.0 == id) {
                 Some(e) => e,
                 None => {
@@ -1765,10 +1797,30 @@ impl LearningLedgers {
     }
 
     /// Player died: credit the open attempt iff its precommitted window
-    /// still covers this frame.
-    pub fn resolve_player_death(&mut self, frame: u32) {
-        if let Some((id, opened)) = self.open_attempt {
-            if frame.saturating_sub(opened) <= ATTEMPT_HORIZON {
+    /// still covers this frame — and, for Boxer (ADR-024), iff the choke
+    /// was REALIZED: a boxing-compatible death cause with the player's
+    /// reachable space at death collapsed to <=60% of the baseline the
+    /// episode precommitted at open. Both consultants ruled the same
+    /// way: the window stays 12 frames; the eligibility tightens.
+    pub fn resolve_player_death(
+        &mut self,
+        frame: u32,
+        cause: Option<crate::game::DeathCause>,
+        player_space_at_death: f32,
+    ) {
+        if let Some((id, opened, baseline)) = self.open_attempt {
+            let in_window = frame.saturating_sub(opened) <= ATTEMPT_HORIZON;
+            let eligible = if id == 4 {
+                use crate::game::DeathCause as DC;
+                let boxed_cause = matches!(
+                    cause,
+                    Some(DC::Wall) | Some(DC::OwnTrail) | Some(DC::EnemyTrail)
+                );
+                boxed_cause && baseline > 0.0 && player_space_at_death <= 0.6 * baseline
+            } else {
+                true
+            };
+            if in_window && eligible {
                 if let Some(e) = self.tactic_attempts.iter_mut().find(|e| e.0 == id) {
                     e.2 = e.2 * 0.999 + 1.0;
                     e.4 = e.4.saturating_add(1);
@@ -2486,6 +2538,7 @@ impl Default for CpuBrain {
             book_spend_snapshot: 0.0,
             book_authority_snapshot: false,
             tactic_prefer_direct: false,
+            tactic_boxer_ok: true,
             region_ring: std::collections::VecDeque::new(),
             ledgers: LearningLedgers::default(),
             pending_book: None,
@@ -4778,6 +4831,72 @@ fn predict_player_positions_book(
 /// corridor or a punched hole) from outside? Board knowledge: corridor
 /// entry costs 16× time under world v4+, and a hunting CPU that
 /// blunders in gets frozen while its prey flies.
+/// ADR-024 Phase A: the Boxer prospective-choke test. Given a FUNDED
+/// intercept's incumbent candidate, find the candidate that shrinks the
+/// player's reachable region materially harder than the incumbent would.
+/// Codex's ruling shapes the trigger: prospective ("does THIS move
+/// reduce their space?"), never static advantage ratios ("tactical
+/// advantage is not evidence of a reachable choke") — and the spike
+/// showed why: finished-condition windows exist on 0.25% of frames.
+/// Returns (choke direction, precommitted baseline) or None.
+fn boxer_choke_candidate(
+    game: &WormGame,
+    candidates: &[Direction],
+    incumbent: Direction,
+    hunt_cells: f32,
+) -> Option<(Direction, f32)> {
+    if !game.cpu_brain.tactic_boxer_ok {
+        return None;
+    }
+    let (phx, phy) = game.cycles[0].head;
+    let (cx, cy) = game.cycles[1].head;
+    // Cheap prune before any flood: choking is a contact sport.
+    if (phx as i16 - cx as i16).abs() + (phy as i16 - cy as i16).abs() > 14 {
+        return None;
+    }
+    let baseline = count_open_space(game, phx, phy);
+    // Already cornered: the funded intercept finishes fine on its own,
+    // and a near-zero baseline would make the 60%-collapse credit test
+    // vacuous.
+    if baseline <= 12.0 {
+        return None;
+    }
+    let next = |d: Direction| -> (u16, u16) {
+        let (dx, dy) = d.as_delta();
+        (
+            (cx as i16 + dx).clamp(0, (game.width - 1) as i16) as u16,
+            (cy as i16 + dy).clamp(0, (game.height - 1) as i16) as u16,
+        )
+    };
+    let (ix, iy) = next(incumbent);
+    let incumbent_after = count_open_space_excluding(game, phx, phy, &[(ix, iy)]);
+    let mut best: Option<(Direction, f32)> = None;
+    for &d in candidates {
+        if d == incumbent || step_enters_corridor(game, 1, d) {
+            continue;
+        }
+        let (nx, ny) = next(d);
+        // Survival floor: a choke that dives into a pocket is a suicide,
+        // not a tactic.
+        if count_open_space(game, nx, ny) < hunt_cells {
+            continue;
+        }
+        let after = count_open_space_excluding(game, phx, phy, &[(nx, ny)]);
+        if best.is_none_or(|(_, s)| after < s) {
+            best = Some((d, after));
+        }
+    }
+    let (bd, bs) = best?;
+    // Material: beat the incumbent's own denial by >=8 cells AND cut
+    // >=15% of the player's current region — both thresholds exist to
+    // stop noise-level "chokes" from stealing the intercept label.
+    if bs + 8.0 <= incumbent_after && bs <= 0.85 * baseline {
+        Some((bd, baseline))
+    } else {
+        None
+    }
+}
+
 pub fn step_enters_corridor(game: &WormGame, who: usize, d: Direction) -> bool {
     if game.arena_version < 4 || !game.has_corridor() || game.cycle_in_corridor(who) {
         return false;
@@ -6324,6 +6443,15 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
                 }
                 // Only take the chokepoint intercept if it's meaningfully better.
                 if best_dir != wall_dir && best_score > 5.0 {
+                    // ADR-024: a funded intercept may be perturbed into a
+                    // Boxer choke when one of its own candidates denies
+                    // the player materially more space.
+                    if let Some((choke_dir, baseline)) =
+                        boxer_choke_candidate(game, candidates, best_dir, hunt_cells)
+                    {
+                        game.cpu_brain.ledgers.pending_boxer_baseline = Some(baseline);
+                        choose!(choke_dir, CpuDecisionReason::Boxer);
+                    }
                     choose!(best_dir, CpuDecisionReason::CornerIntercept);
                 }
             }
@@ -6407,6 +6535,13 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
                 }
                 // Only take the intercept if it's meaningfully better than wall-follow.
                 if best_dir != wall_dir && best_score > 5.0 {
+                    // ADR-024: same Boxer perturbation as CornerIntercept.
+                    if let Some((choke_dir, baseline)) =
+                        boxer_choke_candidate(game, candidates, best_dir, hunt_cells)
+                    {
+                        game.cpu_brain.ledgers.pending_boxer_baseline = Some(baseline);
+                        choose!(choke_dir, CpuDecisionReason::Boxer);
+                    }
                     choose!(best_dir, CpuDecisionReason::DirectIntercept);
                 }
             }
@@ -7075,17 +7210,91 @@ mod tests {
         l.note_tactic(CpuDecisionReason::DirectIntercept, 11);
         let direct = l.tactic_attempts.iter().find(|e| e.0 == 0).unwrap();
         assert_eq!(direct.3, 2, "tactic switch opens a new episode");
-        l.resolve_player_death(12);
+        l.resolve_player_death(12, None, 0.0);
         let direct = l.tactic_attempts.iter().find(|e| e.0 == 0).unwrap();
         assert_eq!(direct.4, 1, "kill credited once");
-        l.resolve_player_death(13);
+        l.resolve_player_death(13, None, 0.0);
         let direct = l.tactic_attempts.iter().find(|e| e.0 == 0).unwrap();
         assert_eq!(direct.4, 1, "no open attempt, no double credit");
         // Expiry: an old window never gets the credit.
         l.note_tactic(CpuDecisionReason::DirectIntercept, 100);
-        l.resolve_player_death(100 + ATTEMPT_HORIZON + 1);
+        l.resolve_player_death(100 + ATTEMPT_HORIZON + 1, None, 0.0);
         let direct = l.tactic_attempts.iter().find(|e| e.0 == 0).unwrap();
         assert_eq!(direct.4, 1, "expired window earns nothing");
+    }
+
+    /// ADR-024: Boxer kill credit requires a REALIZED choke — a
+    /// boxing-compatible cause AND the player's space at death collapsed
+    /// to <=60% of the baseline precommitted when the episode opened.
+    #[test]
+    fn boxer_credit_requires_realized_choke() {
+        use crate::game::DeathCause as DC;
+        let boxer = |l: &LearningLedgers| l.tactic_attempts.iter().find(|e| e.0 == 4).cloned();
+
+        // Realized choke: eligible cause + collapse below 60% of baseline.
+        let mut l = LearningLedgers {
+            pending_boxer_baseline: Some(200.0),
+            ..Default::default()
+        };
+        l.note_tactic(CpuDecisionReason::Boxer, 10);
+        assert_eq!(l.open_attempt, Some((4, 10, 200.0)), "baseline precommitted at open");
+        l.resolve_player_death(15, Some(DC::OwnTrail), 100.0);
+        assert_eq!(boxer(&l).unwrap().4, 1, "collapsed choke credits");
+
+        // Space did NOT collapse: same cause, no credit.
+        let mut l = LearningLedgers {
+            pending_boxer_baseline: Some(200.0),
+            ..Default::default()
+        };
+        l.note_tactic(CpuDecisionReason::Boxer, 10);
+        l.resolve_player_death(15, Some(DC::OwnTrail), 150.0);
+        assert_eq!(boxer(&l).unwrap().4, 0, "no collapse, no credit");
+
+        // Incompatible cause (weapon kill during a boxer window): no credit.
+        let mut l = LearningLedgers {
+            pending_boxer_baseline: Some(200.0),
+            ..Default::default()
+        };
+        l.note_tactic(CpuDecisionReason::Boxer, 10);
+        l.resolve_player_death(15, Some(DC::Laser), 50.0);
+        assert_eq!(boxer(&l).unwrap().4, 0, "weapon deaths never credit the choke");
+
+        // Missing baseline (defensive): no credit even on collapse-shaped input.
+        let mut l = LearningLedgers::default();
+        l.note_tactic(CpuDecisionReason::Boxer, 10);
+        l.resolve_player_death(15, Some(DC::Wall), 0.0);
+        assert_eq!(boxer(&l).unwrap().4, 0, "no baseline, no causal story, no credit");
+
+        // Non-boxer arms are untouched by the eligibility tightening.
+        let mut l = LearningLedgers::default();
+        l.note_tactic(CpuDecisionReason::DirectIntercept, 10);
+        l.resolve_player_death(15, Some(DC::Laser), 999.0);
+        let direct = l.tactic_attempts.iter().find(|e| e.0 == 0).unwrap();
+        assert_eq!(direct.4, 1, "intercept credit rule unchanged");
+    }
+
+    /// ADR-024: the staged baseline binds to the episode it opens — a
+    /// same-episode re-note must not consume a newly staged value, and a
+    /// non-boxer open clears any stale staging.
+    #[test]
+    fn boxer_baseline_staging_is_episode_scoped() {
+        let mut l = LearningLedgers {
+            pending_boxer_baseline: Some(300.0),
+            ..Default::default()
+        };
+        l.note_tactic(CpuDecisionReason::Boxer, 10);
+        l.pending_boxer_baseline = Some(50.0); // staged mid-episode: discarded
+        l.note_tactic(CpuDecisionReason::Boxer, 12);
+        assert_eq!(l.open_attempt, Some((4, 10, 300.0)), "episode keeps its own baseline");
+        assert_eq!(l.pending_boxer_baseline, None, "mid-episode staging consumed away");
+
+        let mut l = LearningLedgers {
+            pending_boxer_baseline: Some(300.0),
+            ..Default::default()
+        };
+        l.note_tactic(CpuDecisionReason::DirectIntercept, 10);
+        assert_eq!(l.open_attempt, Some((0, 10, 0.0)), "non-boxer opens carry no baseline");
+        assert_eq!(l.pending_boxer_baseline, None, "stale staging cleared");
     }
 
     /// THE WIRE-SHAPE TRIPWIRE (owner data-loss incident, 2026-08-07):
@@ -7606,6 +7815,75 @@ mod tests {
     }
 
     /// Dying must never make the fatal direction *more* attractive. The k-NN
+    /// ADR-024 staged fixture: boxing IS available — the player sits in a
+    /// pocket whose two-cell mouth the CPU can seal with one move — and
+    /// the prospective-choke test finds exactly that move with the
+    /// baseline precommitted; an open field offers no material choke and
+    /// the round-boundary gate suppresses the perturbation entirely.
+    #[test]
+    fn boxer_finds_the_material_choke_and_only_that() {
+        use crate::game::CellType;
+        let stage = |with_pocket: bool| -> crate::game::WormGame {
+            let mut game = crate::game::WormGame::with_size(120, 38);
+            for row in &mut game.grid {
+                for cell in row.iter_mut() {
+                    if *cell != CellType::Wall {
+                        *cell = CellType::Empty;
+                    }
+                }
+            }
+            if with_pocket {
+                // Trail ring x,y in [6,14] with a two-cell mouth at
+                // (14,9)/(14,10); the exterior escape runs through
+                // (15,10) — the cell the choke move takes.
+                for x in 6..=14u16 {
+                    for y in 6..=14u16 {
+                        let boundary = x == 6 || x == 14 || y == 6 || y == 14;
+                        let mouth = x == 14 && (y == 9 || y == 10);
+                        if boundary && !mouth {
+                            game.grid[y as usize][x as usize] = CellType::CPU;
+                        }
+                    }
+                }
+            }
+            game.cycles[0].head = (10, 10);
+            game.cycles[0].positions = vec![(10, 10)];
+            game.grid[10][10] = CellType::Player;
+            game.cycles[1].head = (15, 9);
+            game.cycles[1].positions = vec![(15, 9)];
+            game.cycles[1].direction = Direction::Down;
+            game.grid[9][15] = CellType::CPU;
+            game
+        };
+
+        let game = stage(true);
+        let candidates = [Direction::Down, Direction::Up];
+        let got = boxer_choke_candidate(&game, &candidates, Direction::Up, 10.0);
+        let (dir, baseline) = got.expect("a sealable pocket is a material choke");
+        assert_eq!(dir, Direction::Down, "the choke is the mouth-sealing move");
+        assert!(
+            baseline > 100.0,
+            "baseline is the player's PRE-choke reachable region (got {baseline})"
+        );
+
+        // Open field: every move denies a cell; none is material.
+        let game = stage(false);
+        assert_eq!(
+            boxer_choke_candidate(&game, &candidates, Direction::Up, 10.0),
+            None,
+            "no pocket, no choke — the intercept label must not be stolen"
+        );
+
+        // Round-boundary gate: a suppressed arm never perturbs.
+        let mut game = stage(true);
+        game.cpu_brain.tactic_boxer_ok = false;
+        assert_eq!(
+            boxer_choke_candidate(&game, &candidates, Direction::Up, 10.0),
+            None,
+            "the yield gate silences the perturbation"
+        );
+    }
+
     /// vote already zero-weights crash episodes; the direction prior did not,
     /// and the prior is what carries the decision when memory confidence is
     /// low — exactly the situation a recent death describes.
