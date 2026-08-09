@@ -4,14 +4,14 @@
 // The ?v= must match BUILD below (and index.html's) — an unversioned glue
 // import could pair a cached old worm.js with a fresh wasm on the next
 // rebuild that changes the bindings.
-import init, { WasmGame } from './pkg/worm.js?v=29';
+import init, { WasmGame } from './pkg/worm.js?v=30';
 import { Sfx } from './audio.js';
 import { computeBoardLayout, VIEWPORT_BLOCK_GUTTER } from './layout.js';
 
 let CELL = 14; // recomputed by applyBoardLayout() to fit the measured stage
 // Bump together with the ?v= in index.html whenever the wasm bundle is
 // rebuilt — it keys the cache-busting query on the .wasm fetch.
-const BUILD = 29;
+const BUILD = 30;
 const MATCH_TARGET = 3;
 const STATE_SCHEMA_VERSION = 2;
 const ROUND_SCHEMA_VERSION = 1;
@@ -578,6 +578,14 @@ let last = performance.now();
 let acc = 0;
 let paused = false;
 
+// TOUCH PACING (owner, 2026-08-08): a phone player steers with taps on a
+// smaller arena — reaction-plus-input time is simply longer than arrows
+// on a keyboard, and the opening felt too fast. Coarse-pointer devices
+// get the same physics on a gentler wall clock (frames are what's
+// recorded, so ghosts and replays are untouched; the slipstream's 4x
+// ratio survives a multiplier by construction). One number to tune.
+const TOUCH_PACE = window.matchMedia && window.matchMedia('(pointer: coarse)').matches ? 1.35 : 1.0;
+
 function loop(now) {
   const dt = Math.min(now - last, 250);
   last = now;
@@ -586,7 +594,7 @@ function loop(now) {
   } else {
     acc += dt;
   }
-  let delay = Number(game.frame_delay_ms());
+  let delay = Number(game.frame_delay_ms()) * TOUCH_PACE;
   let steps = 0;
   // At most TWO game-steps per painted frame. The old cap of 8 meant a
   // phone hitch (GC, audio, tab switch) could resolve most of a second of
@@ -605,7 +613,7 @@ function loop(now) {
     }
     acc -= delay;
     steps++;
-    delay = Number(game.frame_delay_ms());
+    delay = Number(game.frame_delay_ms()) * TOUCH_PACE;
     if (steps === 2) acc = Math.min(acc, delay); // drop the backlog, don't teleport
     if (game.is_over() && !overHandled) {
       try {
