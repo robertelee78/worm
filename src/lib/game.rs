@@ -882,6 +882,14 @@ impl WormGame {
             return;
         }
         self.ledgers_finalized = true;
+        // RCA F2(a): a round ending any way but a credited player death
+        // must still close the open engagement row — 4 when the CPU died
+        // trying (the invisible class), 5 for draws/timeouts.
+        match self.winner {
+            Some(0) => self.cpu_brain.ledgers.close_engagement(4, self.frame_count),
+            None => self.cpu_brain.ledgers.close_engagement(5, self.frame_count),
+            _ => {}
+        }
         match self.winner {
             Some(1) => {
                 // ADR-024: the Boxer credit rule needs the player's
@@ -2851,11 +2859,18 @@ impl WormGame {
             }
             _ => false,
         };
-        // ADR-024: the Boxer perturbation's round-boundary gate. Suppress
-        // the choke only when its ledger is MATURE and materially worse
-        // than the best plain intercept — a yield, so it can only reduce
-        // aggression. Self-recovering: a suppressed arm's decayed attempt
-        // mass erodes below the maturity floor and the gate reopens.
+        // ADR-024 + RCA F3: the Boxer perturbation's round-boundary gate.
+        // Suppress the choke only when its ledger is MATURE and materially
+        // worse than the best plain intercept — a yield, so it can only
+        // reduce aggression. Recovery is the curiosity probe (one Boxer
+        // start per round while suppressed, boxer_probe_used below) — NOT
+        // ledger decay, which is frozen for a silent arm; the original
+        // "self-recovering" claim here was false (RCA 2026-08-09).
+        self.cpu_brain.boxer_probe_used = false;
+        self.cpu_brain.boxer_hold = 0;
+        self.cpu_brain.dwell_region = None;
+        self.cpu_brain.dwell_frames = 0;
+        self.cpu_brain.dwell_cooldown = 0;
         self.cpu_brain.tactic_boxer_ok = {
             let best_intercept = [
                 self.cpu_brain.ledgers.tactic_kill_rate(0),

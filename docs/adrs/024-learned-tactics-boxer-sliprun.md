@@ -1,9 +1,37 @@
 # ADR-024: Learned Tactics — Boxer, and the Breach→Slip-Run Ladder
 
 ## Status
-Accepted (owner directive 2026-08-08; two-consultant design review complete:
-k3 + codex, convergent). Phase A in progress. Phase B design-accepted,
-gated on Phase A receipts + the slip-run competence battery.
+Phase A IMPLEMENTED and amended by the 2026-08-09 intent RCA (below).
+Phase B design-accepted, gated on the slip-run competence battery.
+Original acceptance: owner directive 2026-08-08, k3+codex convergent.
+
+RCA AMENDMENTS (2026-08-09, k3+codex convergent; swarm audit receipts —
+120-game battery, Boxer 0 fires in 59k probe decisions but geometry
+failure modes land exactly in close human play):
+- FORWARD RELEVANCE: boxer_choke_candidate now requires the choke cell
+  to sit in the player's PREDICTED forward half-plane (the ensemble's
+  player_pred_dir, not the stale raw heading). The isotropic choke could
+  seal a room the player was leaving, mid-chase — the owner's "swerved
+  off the kill for no reason".
+- EPISODE HYSTERESIS: a fired Boxer episode holds K=3 frames — the
+  EPISODE, not a frozen direction; the safe choke is recomputed each
+  frame and the hold releases on lost relevance/materiality or any
+  floor veto. Higher ladder layers still preempt.
+- RECOVERY PROBE (implements the §3 curiosity-floor promise, which was
+  never landed): a suppressed arm keeps ONE Boxer start per round
+  (boxer_probe_used, reset at the round boundary). CORRECTION: the
+  previous "self-recovering via attempt-mass decay" claim was FALSE —
+  decayed mass only moves on the arm's own attempts, so a silenced arm
+  was frozen off forever. Recovery is earned by a realized choke via
+  the probe, never by clock magic.
+- ENGAGEMENT LEDGER (RCA F2a, transient, recording only): every tactic
+  episode now records entry distance, read at open, and an exit class
+  including the previously invisible "the CPU died trying" — the warm
+  inversion's blind spot (warm 68% vs cold 88% with accurate reads).
+  Conversion-gated hunting (F2c) stays OWNER-GATED pending this data.
+- DWELL BREAKER (RCA F2b, the ADR-012 §6 corner attractor): the memory
+  vote yields after 24 same-region votes, cooldown 48, releasing only
+  on material improvement (>=1.5x wall-follow) or a shrink change.
 
 ## Date
 2026-08-08

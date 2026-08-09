@@ -1631,11 +1631,35 @@ pub struct CpuBrain {
     pub tactic_prefer_direct: bool,
     /// ADR-024: round-boundary gate on the Boxer perturbation. Same
     /// yield discipline as tactic_prefer_direct — suppressing the choke
-    /// can only make a frame LESS aggressive, and the decayed ledger
-    /// self-recovers: a suppressed arm stops accruing attempts, decay
-    /// erodes its mass below maturity, and the gate reopens.
+    /// can only make a frame LESS aggressive. Recovery is the CURIOSITY
+    /// PROBE (RCA 2026-08-09): suppression does NOT self-recover by
+    /// decay (attempt mass only decays on the arm's own attempts, so a
+    /// silenced arm's ledger is frozen — the original comment here
+    /// claimed otherwise and was false); instead a suppressed arm keeps
+    /// one probe start per round, and reopens on a realized choke.
     #[serde(skip)]
     pub tactic_boxer_ok: bool,
+    /// RCA F3 hysteresis: frames remaining on the current Boxer episode
+    /// hold. Transient.
+    #[serde(skip)]
+    pub boxer_hold: u32,
+    /// RCA F3 recovery probe: whether this round's one suppressed-arm
+    /// Boxer start has been used. Reset at the round boundary.
+    #[serde(skip)]
+    pub boxer_probe_used: bool,
+    /// RCA F2(b) dwell breaker (the ADR-012 §6 corner-dwell pathology,
+    /// cold 15.1% vs warm 41.4% near-wall): region the memory vote keeps
+    /// re-entering, how long it has, cooldown remaining, and the shrink
+    /// level when the breaker tripped (a ring change releases it — late
+    /// game the corner is sometimes the only safe pocket). All transient.
+    #[serde(skip)]
+    pub dwell_region: Option<(u16, u16)>,
+    #[serde(skip)]
+    pub dwell_frames: u32,
+    #[serde(skip)]
+    pub dwell_cooldown: u32,
+    #[serde(skip)]
+    pub dwell_shrink: u16,
     /// Self-knowledge instrumentation (ADR-021 Kata 0). Persisted in its
     /// own sections; recording-only until later katas activate readers.
     #[serde(skip)]
@@ -1711,6 +1735,18 @@ pub struct LearningLedgers {
     /// Ring of per-round summaries for the drift alarm's family:
     /// (laterals, alternations, mean_gap_x10, frames). Capped at 64.
     pub round_summaries: std::collections::VecDeque<(u32, u32, u32, u32)>,
+    /// RCA F2(a) ENGAGEMENT LEDGER (transient, recording only): one row
+    /// per tactic episode — (tactic id, opened frame, entry distance,
+    /// read_rate x100 at open, exit class, closed frame). Exit classes:
+    /// 0 open, 1 credited kill, 2 died-without-credit (window expired or
+    /// eligibility failed), 3 replaced by another tactic, 4 the CPU DIED
+    /// during/after the episode, 5 round ended without a kill. The class
+    /// the old ledger could never see is 4 — died-trying was invisible,
+    /// which is exactly the warm-inversion blind spot (68% warm vs 88%
+    /// cold with accurate reads). Rolling cap 512; never persisted.
+    pub engagements: Vec<(u8, u32, u8, u8, u8, u32)>,
+    /// Transient: index into `engagements` of the currently open row.
+    pub engagement_open: Option<usize>,
     /// Transient: attempt window currently open — (tactic id, opened
     /// frame, precommitted baseline). The baseline is the player's
     /// reachable open space at window-open; 0.0 for every arm except
@@ -1770,7 +1806,14 @@ pub struct LearningLedgers {
 }
 
 impl LearningLedgers {
-    pub fn note_tactic(&mut self, reason: CpuDecisionReason, frame: u32, shrink: u16) {
+    pub fn note_tactic(
+        &mut self,
+        reason: CpuDecisionReason,
+        frame: u32,
+        shrink: u16,
+        entry_dist: u8,
+        read_x100: u8,
+    ) {
         if let Some(&(id, _)) = TACTIC_IDS.iter().find(|&&(_, r)| r == reason) {
             // EPISODIC attempts (codex: exactly-once closure): consecutive
             // frames of the same tactic inside one precommitted window are
@@ -1783,6 +1826,16 @@ impl LearningLedgers {
                     // baseline (if any) belongs to the episode already open.
                     self.pending_boxer_baseline = None;
                     return;
+                }
+            }
+            // Engagement ledger: a different tactic taking over closes
+            // the open row as REPLACED.
+            if let Some(i) = self.engagement_open.take() {
+                if let Some(r) = self.engagements.get_mut(i) {
+                    if r.4 == 0 {
+                        r.4 = 3;
+                        r.5 = frame;
+                    }
                 }
             }
             // Replacement of an in-horizon Boxer window: contested, not
@@ -1802,6 +1855,14 @@ impl LearningLedgers {
                 0.0
             };
             self.open_attempt = Some((id, frame, baseline, shrink));
+            if self.engagements.len() >= 512 {
+                self.engagements.remove(0);
+                if let Some(i) = self.engagement_open.as_mut() {
+                    *i = i.saturating_sub(1);
+                }
+            }
+            self.engagements.push((id, frame, entry_dist, read_x100, 0, 0));
+            self.engagement_open = Some(self.engagements.len() - 1);
             let e = match self.tactic_attempts.iter_mut().find(|e| e.0 == id) {
                 Some(e) => e,
                 None => {
@@ -1874,8 +1935,33 @@ impl LearningLedgers {
                 e.4 = e.4.saturating_add(1);
             }
         }
+        // Engagement ledger: the open row closes as a credited kill only
+        // if the credit went to ITS tactic; otherwise died-without-credit.
+        let open_id = self.open_attempt.map(|(id, ..)| id);
+        if let Some(i) = self.engagement_open.take() {
+            if let Some(r) = self.engagements.get_mut(i) {
+                if r.4 == 0 {
+                    r.4 = if credit_id.is_some() && credit_id == open_id { 1 } else { 2 };
+                    r.5 = frame;
+                }
+            }
+        }
         self.open_attempt = None;
         self.contested_boxer = None;
+    }
+
+    /// RCA F2(a): close any open engagement row with an outcome the
+    /// death-credit path never sees — 4 = the CPU died (the warm
+    /// inversion's invisible class), 5 = round ended without a kill.
+    pub fn close_engagement(&mut self, exit: u8, frame: u32) {
+        if let Some(i) = self.engagement_open.take() {
+            if let Some(r) = self.engagements.get_mut(i) {
+                if r.4 == 0 {
+                    r.4 = exit;
+                    r.5 = frame;
+                }
+            }
+        }
     }
 
     pub fn note_weapon(&mut self, kind: crate::game::PowerUpKind, gate_pass: bool, fired: bool) {
@@ -2587,6 +2673,12 @@ impl Default for CpuBrain {
             book_authority_snapshot: false,
             tactic_prefer_direct: false,
             tactic_boxer_ok: true,
+            boxer_hold: 0,
+            boxer_probe_used: false,
+            dwell_region: None,
+            dwell_frames: 0,
+            dwell_cooldown: 0,
+            dwell_shrink: 0,
             region_ring: std::collections::VecDeque::new(),
             ledgers: LearningLedgers::default(),
             pending_book: None,
@@ -4892,8 +4984,13 @@ fn boxer_choke_candidate(
     candidates: &[Direction],
     incumbent: Direction,
     hunt_cells: f32,
+    pred: Direction,
 ) -> Option<(Direction, f32)> {
-    if !game.cpu_brain.tactic_boxer_ok {
+    // RCA F3 recovery probe (implements the ADR-024 promise): while the
+    // round-boundary gate has the arm suppressed, ONE Boxer start per
+    // round is still allowed — a suppressed arm keeps measuring itself,
+    // and recovery is earned by a realized choke, not by clock magic.
+    if !game.cpu_brain.tactic_boxer_ok && game.cpu_brain.boxer_probe_used {
         return None;
     }
     let (phx, phy) = game.cycles[0].head;
@@ -4919,11 +5016,21 @@ fn boxer_choke_candidate(
     let (ix, iy) = next(incumbent);
     let incumbent_after = count_open_space_excluding(game, phx, phy, &[(ix, iy)]);
     let mut best: Option<(Direction, f32)> = None;
+    let (pdx, pdy) = pred.as_delta();
     for &d in candidates {
         if d == incumbent || step_enters_corridor(game, 1, d) {
             continue;
         }
         let (nx, ny) = next(d);
+        // RCA F3 forward relevance (k3+codex convergent): the choke cell
+        // must sit in the player's PREDICTED forward half-plane — the
+        // ensemble's read, not the stale raw heading. Sealing a room the
+        // player is leaving scored identically before this; that is the
+        // "swerved off the kill for no reason" the owner saw.
+        let rel_dot = (nx as i32 - phx as i32) * pdx as i32 + (ny as i32 - phy as i32) * pdy as i32;
+        if rel_dot < 0 {
+            continue;
+        }
         // Survival floor: a choke that dives into a pocket is a suicide,
         // not a tactic.
         if count_open_space(game, nx, ny) < hunt_cells {
@@ -4942,6 +5049,53 @@ fn boxer_choke_candidate(
         Some((bd, baseline))
     } else {
         None
+    }
+}
+
+/// RCA F2(b): the memory-vote dwell breaker. The self-deepening corner
+/// attractor (recall re-enters the same region every frame, each dwell
+/// frame recording a fresh episode that deepens the recall) is broken by
+/// a no-progress trip: the same quantized region voted for more than
+/// DWELL_TRIP_FRAMES arms a cooldown during which the vote yields to the
+/// base policy. Release comes ONLY from the two clauses both consultants
+/// ruled (k3 shape): the vote's destination materially beating
+/// wall-follow, or a shrink-level change — because late-game the corner
+/// is sometimes the only safe pocket, and a breaker without those
+/// releases trades "sit and spin" for "flees the last shelter".
+pub const DWELL_TRIP_FRAMES: u32 = 24;
+pub const DWELL_COOLDOWN_FRAMES: u32 = 48;
+pub const DWELL_RELEASE_RATIO: f32 = 1.5;
+
+impl CpuBrain {
+    pub fn dwell_breaker_allows(
+        &mut self,
+        region: (u16, u16),
+        vote_open: f32,
+        wall_open: f32,
+        shrink: u16,
+    ) -> bool {
+        if self.dwell_region == Some(region) {
+            self.dwell_frames += 1;
+        } else {
+            self.dwell_region = Some(region);
+            self.dwell_frames = 1;
+        }
+        if self.dwell_cooldown > 0 {
+            let materially_better = vote_open >= wall_open * DWELL_RELEASE_RATIO;
+            if materially_better || shrink != self.dwell_shrink {
+                self.dwell_cooldown = 0;
+                self.dwell_frames = 1;
+                return true;
+            }
+            self.dwell_cooldown -= 1;
+            return false;
+        }
+        if self.dwell_frames > DWELL_TRIP_FRAMES {
+            self.dwell_cooldown = DWELL_COOLDOWN_FRAMES;
+            self.dwell_shrink = shrink;
+            return false;
+        }
+        true
     }
 }
 
@@ -5940,7 +6094,19 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
             // ADR-021 Kata 0: hunt-family decisions open a precommitted
             // attempt window in the tactic ledger (recording only;
             // note_tactic ignores non-hunt reasons).
-            game.cpu_brain.ledgers.note_tactic($reason, game.frame_count, game.shrink_level);
+            let entry_dist = {
+                let (phx, phy) = game.cycles[0].head;
+                let (chx, chy) = game.cycles[1].head;
+                ((phx as i32 - chx as i32).abs() + (phy as i32 - chy as i32).abs()).min(255) as u8
+            };
+            let read_x100 = (game.read_rate.clamp(0.0, 1.0) * 100.0) as u8;
+            game.cpu_brain.ledgers.note_tactic(
+                $reason,
+                game.frame_count,
+                game.shrink_level,
+                entry_dist,
+                read_x100,
+            );
             return chosen;
         }};
     }
@@ -6440,6 +6606,23 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
     // so this cannot open before ~10 observed real choices regardless; the
     // hunt floor still vets every destination. Lowered to buy engagement
     // without touching a survival floor.
+    // RCA F3 episode hysteresis (k3: K in [3,4], <= the 12-frame credit
+    // window): once a Boxer episode opens, hold the EPISODE — recompute
+    // the safe choke each frame rather than freezing a direction — and
+    // release the moment no valid choke exists (lost forward relevance,
+    // lost materiality, or a floor veto). Higher ladder layers (threat
+    // dodge, escape floor) still preempt this block entirely.
+    if game.cpu_brain.boxer_hold > 0 {
+        game.cpu_brain.boxer_hold -= 1;
+        if let Some((choke_dir, baseline)) =
+            boxer_choke_candidate(game, candidates, wall_dir, hunt_cells, player_pred_dir)
+        {
+            game.cpu_brain.ledgers.pending_boxer_baseline = Some(baseline);
+            choose!(choke_dir, CpuDecisionReason::Boxer);
+        }
+        game.cpu_brain.boxer_hold = 0; // choke gone — release
+    }
+
     if !corner_yields && player_pred_conf >= crate::tuning::tuning().corner_gate {
         // Predict the corner the player will reach next.
         // Wall-followers turn right at corners. We predict their path to the next corner.
@@ -6508,9 +6691,13 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
                     // Boxer choke when one of its own candidates denies
                     // the player materially more space.
                     if let Some((choke_dir, baseline)) =
-                        boxer_choke_candidate(game, candidates, best_dir, hunt_cells)
+                        boxer_choke_candidate(game, candidates, best_dir, hunt_cells, player_pred_dir)
                     {
                         game.cpu_brain.ledgers.pending_boxer_baseline = Some(baseline);
+                        if !game.cpu_brain.tactic_boxer_ok {
+                            game.cpu_brain.boxer_probe_used = true;
+                        }
+                        game.cpu_brain.boxer_hold = 3;
                         choose!(choke_dir, CpuDecisionReason::Boxer);
                     }
                     choose!(best_dir, CpuDecisionReason::CornerIntercept);
@@ -6598,9 +6785,13 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
                 if best_dir != wall_dir && best_score > 5.0 {
                     // ADR-024: same Boxer perturbation as CornerIntercept.
                     if let Some((choke_dir, baseline)) =
-                        boxer_choke_candidate(game, candidates, best_dir, hunt_cells)
+                        boxer_choke_candidate(game, candidates, best_dir, hunt_cells, player_pred_dir)
                     {
                         game.cpu_brain.ledgers.pending_boxer_baseline = Some(baseline);
+                        if !game.cpu_brain.tactic_boxer_ok {
+                            game.cpu_brain.boxer_probe_used = true;
+                        }
+                        game.cpu_brain.boxer_hold = 3;
                         choose!(choke_dir, CpuDecisionReason::Boxer);
                     }
                     choose!(best_dir, CpuDecisionReason::DirectIntercept);
@@ -6672,7 +6863,17 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
                     && vote_open >= wall_open
                     && vote_open >= MEMORY_VOTE_MIN_OPEN
                 {
-                    choose!(sampled, CpuDecisionReason::SurvivalMemory);
+                    // RCA F2(b): the dwell breaker gets the last word —
+                    // a vote that keeps re-entering the same region is
+                    // the ADR-012 §6 attractor, not a preference.
+                    let region = (nx / 6, ny / 6);
+                    let shrink = game.shrink_level;
+                    if game
+                        .cpu_brain
+                        .dwell_breaker_allows(region, vote_open, wall_open, shrink)
+                    {
+                        choose!(sampled, CpuDecisionReason::SurvivalMemory);
+                    }
                 }
             }
         }
@@ -7264,11 +7465,11 @@ mod tests {
     fn tactic_attempts_are_episodes_not_frames() {
         let mut l = LearningLedgers::default();
         for f in 0..10 {
-            l.note_tactic(CpuDecisionReason::DirectIntercept, f, 0);
+            l.note_tactic(CpuDecisionReason::DirectIntercept, f, 0, 0, 0);
         }
         assert_eq!(l.tactic_attempts[0].3, 1, "one pursuit = one attempt");
-        l.note_tactic(CpuDecisionReason::CornerIntercept, 10, 0);
-        l.note_tactic(CpuDecisionReason::DirectIntercept, 11, 0);
+        l.note_tactic(CpuDecisionReason::CornerIntercept, 10, 0, 0, 0);
+        l.note_tactic(CpuDecisionReason::DirectIntercept, 11, 0, 0, 0);
         let direct = l.tactic_attempts.iter().find(|e| e.0 == 0).unwrap();
         assert_eq!(direct.3, 2, "tactic switch opens a new episode");
         l.resolve_player_death(12, None, 0.0, 0);
@@ -7278,7 +7479,7 @@ mod tests {
         let direct = l.tactic_attempts.iter().find(|e| e.0 == 0).unwrap();
         assert_eq!(direct.4, 1, "no open attempt, no double credit");
         // Expiry: an old window never gets the credit.
-        l.note_tactic(CpuDecisionReason::DirectIntercept, 100, 0);
+        l.note_tactic(CpuDecisionReason::DirectIntercept, 100, 0, 0, 0);
         l.resolve_player_death(100 + ATTEMPT_HORIZON + 1, None, 0.0, 0);
         let direct = l.tactic_attempts.iter().find(|e| e.0 == 0).unwrap();
         assert_eq!(direct.4, 1, "expired window earns nothing");
@@ -7297,7 +7498,7 @@ mod tests {
             pending_boxer_baseline: Some(200.0),
             ..Default::default()
         };
-        l.note_tactic(CpuDecisionReason::Boxer, 10, 0);
+        l.note_tactic(CpuDecisionReason::Boxer, 10, 0, 0, 0);
         assert_eq!(l.open_attempt, Some((4, 10, 200.0, 0)), "baseline precommitted at open");
         l.resolve_player_death(15, Some(DC::OwnTrail), 100.0, 0);
         assert_eq!(boxer(&l).unwrap().4, 1, "collapsed choke credits");
@@ -7307,7 +7508,7 @@ mod tests {
             pending_boxer_baseline: Some(200.0),
             ..Default::default()
         };
-        l.note_tactic(CpuDecisionReason::Boxer, 10, 0);
+        l.note_tactic(CpuDecisionReason::Boxer, 10, 0, 0, 0);
         l.resolve_player_death(15, Some(DC::OwnTrail), 150.0, 0);
         assert_eq!(boxer(&l).unwrap().4, 0, "no collapse, no credit");
 
@@ -7316,22 +7517,81 @@ mod tests {
             pending_boxer_baseline: Some(200.0),
             ..Default::default()
         };
-        l.note_tactic(CpuDecisionReason::Boxer, 10, 0);
+        l.note_tactic(CpuDecisionReason::Boxer, 10, 0, 0, 0);
         l.resolve_player_death(15, Some(DC::Laser), 50.0, 0);
         assert_eq!(boxer(&l).unwrap().4, 0, "weapon deaths never credit the choke");
 
         // Missing baseline (defensive): no credit even on collapse-shaped input.
         let mut l = LearningLedgers::default();
-        l.note_tactic(CpuDecisionReason::Boxer, 10, 0);
+        l.note_tactic(CpuDecisionReason::Boxer, 10, 0, 0, 0);
         l.resolve_player_death(15, Some(DC::Wall), 0.0, 0);
         assert_eq!(boxer(&l).unwrap().4, 0, "no baseline, no causal story, no credit");
 
         // Non-boxer arms are untouched by the eligibility tightening.
         let mut l = LearningLedgers::default();
-        l.note_tactic(CpuDecisionReason::DirectIntercept, 10, 0);
+        l.note_tactic(CpuDecisionReason::DirectIntercept, 10, 0, 0, 0);
         l.resolve_player_death(15, Some(DC::Laser), 999.0, 0);
         let direct = l.tactic_attempts.iter().find(|e| e.0 == 0).unwrap();
         assert_eq!(direct.4, 1, "intercept credit rule unchanged");
+    }
+
+    /// RCA F2(b): the dwell breaker trips on region re-entry, holds
+    /// through the cooldown, and releases ONLY on material improvement
+    /// or a shrink change — the two ruled clauses.
+    #[test]
+    fn dwell_breaker_trips_holds_and_releases_on_the_ruled_clauses() {
+        let mut b = CpuBrain::new();
+        // Same region for TRIP frames: allowed throughout...
+        for _ in 0..DWELL_TRIP_FRAMES {
+            assert!(b.dwell_breaker_allows((3, 3), 0.10, 0.10, 0));
+        }
+        // ...then the breaker trips and suppresses.
+        assert!(!b.dwell_breaker_allows((3, 3), 0.10, 0.10, 0), "trip");
+        assert!(!b.dwell_breaker_allows((3, 3), 0.10, 0.10, 0), "cooldown holds");
+        // Not released by a marginal improvement...
+        assert!(!b.dwell_breaker_allows((3, 3), 0.12, 0.10, 0));
+        // ...but released by MATERIAL improvement (>= 1.5x wall-follow).
+        assert!(b.dwell_breaker_allows((3, 3), 0.16, 0.10, 0), "material release");
+        // Trip again, then release on a shrink-level change.
+        for _ in 0..=DWELL_TRIP_FRAMES {
+            b.dwell_breaker_allows((3, 3), 0.10, 0.10, 0);
+        }
+        assert!(!b.dwell_breaker_allows((3, 3), 0.10, 0.10, 0), "re-tripped");
+        assert!(b.dwell_breaker_allows((3, 3), 0.10, 0.10, 1), "ring change releases");
+        // A region change resets the count entirely.
+        let mut b = CpuBrain::new();
+        for _ in 0..DWELL_TRIP_FRAMES {
+            assert!(b.dwell_breaker_allows((3, 3), 0.10, 0.10, 0));
+        }
+        assert!(b.dwell_breaker_allows((9, 9), 0.10, 0.10, 0), "new region, fresh count");
+    }
+
+    /// RCA F2(a): the engagement ledger records what the kill ledger
+    /// never could — died-trying — and classes every exit exactly once.
+    #[test]
+    fn engagement_ledger_classes_every_exit_once() {
+        use crate::game::DeathCause as DC;
+        // kill: open -> credited.
+        let mut l = LearningLedgers::default();
+        l.note_tactic(CpuDecisionReason::DirectIntercept, 10, 0, 7, 42);
+        l.resolve_player_death(15, Some(DC::EnemyTrail), 50.0, 0);
+        assert_eq!(l.engagements.last().unwrap().4, 1, "credited kill");
+        assert_eq!(l.engagements.last().unwrap().2, 7, "entry distance kept");
+
+        // replaced -> then the CPU dies: two rows, classes 3 then 4.
+        let mut l = LearningLedgers::default();
+        l.note_tactic(CpuDecisionReason::DirectIntercept, 10, 0, 9, 10);
+        l.note_tactic(CpuDecisionReason::CornerIntercept, 14, 0, 6, 10);
+        l.close_engagement(4, 30);
+        assert_eq!(l.engagements[0].4, 3, "first episode replaced");
+        assert_eq!(l.engagements[1].4, 4, "second episode: the CPU died trying");
+        assert_eq!(l.engagements[1].5, 30);
+
+        // window expired at death: died-without-credit, class 2.
+        let mut l = LearningLedgers::default();
+        l.note_tactic(CpuDecisionReason::DirectIntercept, 10, 0, 12, 0);
+        l.resolve_player_death(10 + ATTEMPT_HORIZON + 5, Some(DC::Wall), 50.0, 0);
+        assert_eq!(l.engagements[0].4, 2, "expired window is not a credited kill");
     }
 
     /// ADR-024 + k3 verify G1: sudden-death ring closures collapse the
@@ -7344,7 +7604,7 @@ mod tests {
             pending_boxer_baseline: Some(200.0),
             ..Default::default()
         };
-        l.note_tactic(CpuDecisionReason::Boxer, 10, 0);
+        l.note_tactic(CpuDecisionReason::Boxer, 10, 0, 0, 0);
         l.resolve_player_death(15, Some(DC::Wall), 40.0, 1); // ring advanced
         let boxer = l.tactic_attempts.iter().find(|e| e.0 == 4).unwrap();
         assert_eq!(boxer.4, 0, "the ring's collapse is not the boxer's kill");
@@ -7361,8 +7621,8 @@ mod tests {
             pending_boxer_baseline: Some(200.0),
             ..Default::default()
         };
-        l.note_tactic(CpuDecisionReason::Boxer, 10, 0);
-        l.note_tactic(CpuDecisionReason::DirectIntercept, 14, 0); // terminal replacement
+        l.note_tactic(CpuDecisionReason::Boxer, 10, 0, 0, 0);
+        l.note_tactic(CpuDecisionReason::DirectIntercept, 14, 0, 0, 0); // terminal replacement
         l.resolve_player_death(18, Some(DC::OwnTrail), 80.0, 0);
         let boxer = l.tactic_attempts.iter().find(|e| e.0 == 4).unwrap();
         let direct = l.tactic_attempts.iter().find(|e| e.0 == 0).unwrap();
@@ -7374,8 +7634,8 @@ mod tests {
             pending_boxer_baseline: Some(200.0),
             ..Default::default()
         };
-        l.note_tactic(CpuDecisionReason::Boxer, 10, 0);
-        l.note_tactic(CpuDecisionReason::DirectIntercept, 14, 0);
+        l.note_tactic(CpuDecisionReason::Boxer, 10, 0, 0, 0);
+        l.note_tactic(CpuDecisionReason::DirectIntercept, 14, 0, 0, 0);
         l.resolve_player_death(18, Some(DC::OwnTrail), 180.0, 0); // no collapse
         let boxer = l.tactic_attempts.iter().find(|e| e.0 == 4).unwrap();
         let direct = l.tactic_attempts.iter().find(|e| e.0 == 0).unwrap();
@@ -7387,8 +7647,8 @@ mod tests {
             pending_boxer_baseline: Some(200.0),
             ..Default::default()
         };
-        l.note_tactic(CpuDecisionReason::Boxer, 10, 0);
-        l.note_tactic(CpuDecisionReason::DirectIntercept, 14, 0);
+        l.note_tactic(CpuDecisionReason::Boxer, 10, 0, 0, 0);
+        l.note_tactic(CpuDecisionReason::DirectIntercept, 14, 0, 0, 0);
         l.resolve_player_death(18, Some(DC::Wall), 40.0, 1); // ring advanced
         let boxer = l.tactic_attempts.iter().find(|e| e.0 == 4).unwrap();
         assert_eq!(boxer.4, 0, "the ring voids a contested claim exactly as an open one");
@@ -7403,9 +7663,9 @@ mod tests {
             pending_boxer_baseline: Some(300.0),
             ..Default::default()
         };
-        l.note_tactic(CpuDecisionReason::Boxer, 10, 0);
+        l.note_tactic(CpuDecisionReason::Boxer, 10, 0, 0, 0);
         l.pending_boxer_baseline = Some(50.0); // staged mid-episode: discarded
-        l.note_tactic(CpuDecisionReason::Boxer, 12, 0);
+        l.note_tactic(CpuDecisionReason::Boxer, 12, 0, 0, 0);
         assert_eq!(l.open_attempt, Some((4, 10, 300.0, 0)), "episode keeps its own baseline");
         assert_eq!(l.pending_boxer_baseline, None, "mid-episode staging consumed away");
 
@@ -7413,7 +7673,7 @@ mod tests {
             pending_boxer_baseline: Some(300.0),
             ..Default::default()
         };
-        l.note_tactic(CpuDecisionReason::DirectIntercept, 10, 0);
+        l.note_tactic(CpuDecisionReason::DirectIntercept, 10, 0, 0, 0);
         assert_eq!(l.open_attempt, Some((0, 10, 0.0, 0)), "non-boxer opens carry no baseline");
         assert_eq!(l.pending_boxer_baseline, None, "stale staging cleared");
     }
@@ -7977,9 +8237,12 @@ mod tests {
             game
         };
 
+        // The player at (10,10) inside the pocket; the mouth exit runs
+        // rightward — a prediction TOWARD the mouth (Right) makes the
+        // seal relevant; a prediction away (Left) makes it irrelevant.
         let game = stage(true);
         let candidates = [Direction::Down, Direction::Up];
-        let got = boxer_choke_candidate(&game, &candidates, Direction::Up, 10.0);
+        let got = boxer_choke_candidate(&game, &candidates, Direction::Up, 10.0, Direction::Right);
         let (dir, baseline) = got.expect("a sealable pocket is a material choke");
         assert_eq!(dir, Direction::Down, "the choke is the mouth-sealing move");
         assert!(
@@ -7987,21 +8250,36 @@ mod tests {
             "baseline is the player's PRE-choke reachable region (got {baseline})"
         );
 
+        // RCA F3 forward relevance: the same geometry with the player
+        // predicted to move AWAY from the seal cell earns nothing.
+        assert_eq!(
+            boxer_choke_candidate(&game, &candidates, Direction::Up, 10.0, Direction::Left),
+            None,
+            "sealing a room the player is leaving is not a choke"
+        );
+
         // Open field: every move denies a cell; none is material.
         let game = stage(false);
         assert_eq!(
-            boxer_choke_candidate(&game, &candidates, Direction::Up, 10.0),
+            boxer_choke_candidate(&game, &candidates, Direction::Up, 10.0, Direction::Right),
             None,
             "no pocket, no choke — the intercept label must not be stolen"
         );
 
-        // Round-boundary gate: a suppressed arm never perturbs.
+        // Round-boundary gate: a suppressed arm probes ONCE per round
+        // (the ADR-024 curiosity floor, implemented at last), then
+        // silences until the boundary resets it.
         let mut game = stage(true);
         game.cpu_brain.tactic_boxer_ok = false;
+        assert!(
+            boxer_choke_candidate(&game, &candidates, Direction::Up, 10.0, Direction::Right).is_some(),
+            "a suppressed arm still earns its one probe start"
+        );
+        game.cpu_brain.boxer_probe_used = true;
         assert_eq!(
-            boxer_choke_candidate(&game, &candidates, Direction::Up, 10.0),
+            boxer_choke_candidate(&game, &candidates, Direction::Up, 10.0, Direction::Right),
             None,
-            "the yield gate silences the perturbation"
+            "after the probe, the yield gate silences the perturbation"
         );
     }
 
