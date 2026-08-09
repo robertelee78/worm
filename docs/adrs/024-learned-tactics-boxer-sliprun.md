@@ -1,0 +1,142 @@
+# ADR-024: Learned Tactics — Boxer, and the Breach→Slip-Run Ladder
+
+## Status
+Accepted (owner directive 2026-08-08; two-consultant design review complete:
+k3 + codex, convergent). Phase A in progress. Phase B design-accepted,
+gated on Phase A receipts + the slip-run competence battery.
+
+## Date
+2026-08-08
+
+## Context
+
+The owner watched the recorded Claude-vs-CPU session and named the gap:
+"space-denial boxing isn't visibly in its repertoire — how can we ensure
+it LEARNS this? I also want it to learn how to blow up holes in the
+arena and enter the slip." The tactic ledger (ADR-021 Kata 0/4) has four
+hunt arms; boxing, breaching, and corridor play are not among them.
+
+A pre-consult spike over the frozen corpus (235 rounds / 52,173 frames,
+examples/tactic_opportunity_spike.rs, receipts in
+docs/spike-24-tactic-opportunity.txt) established:
+
+- Natural boxer windows barely exist: tight setups on 0.25% of frames,
+  in 4/235 rounds. An opportunistic arm would starve — boxing must
+  CREATE its advantage, not await it.
+- Zero of 116 player Wall/OwnTrail deaths had boxing geometry in the
+  prior 10 frames: the incumbent tactics cannot produce these deaths,
+  so any kill a boxer arm claims is net-new, clean attribution.
+- The escape breach (should_fire, cpu_enveloped gate) has NEVER been
+  eligible in real play: 5,816 CPU laser-held frames, zero enveloped.
+  Humans slipstreamed 2,578 frames; the CPU has never entered the
+  corridor. Any corridor tactic gated on envelopment inherits a gate
+  that provably never opens.
+
+## Consult record (both grounded in the repo, answers convergent)
+
+Agreed: setup belongs INSIDE the boxer arm (shared setup state would
+contaminate every arm's attribution); the 12-frame precommitted
+attribution window stays — no 40/60-frame kill windows ("a long window
+is a false-credit machine"); breach is an ACTUATOR inside slip-run, not
+a standalone learned arm (the escape reflex stays as-is); slip-run
+competence must be engineered and proven before the bandit may judge
+it; choke and offensive slip are aggression spends funded only from
+earned_snapshot (never the unread opening's bold_drive), and ADR-018's
+novice fixture must be re-run; flood fills need caching and browser-wasm
+p99 receipts; static flood space mis-values corridor cells (ignores the
+16x movement cost).
+
+Divergence resolved (trigger): k3 proposed static preconditions
+(length + 1.2x space ratio); codex rejected the static ratio —
+"tactical advantage is not evidence of a reachable choke" — and ruled
+for a PROSPECTIVE test: a short rollout showing the candidate move
+reduces the player's reachable space materially versus the incumbent
+move. Decision: k3's perturbation shape + codex's prospective test.
+
+Divergence resolved (slip-run v1): k3 said escape-only; codex said
+deterministic/shadow planner first with a competence battery. Decision:
+codex's ladder — an envelopment-gated tactic would never fire (spike),
+and shadow planning builds receipts before risk.
+
+Landmines recorded by the consultants, all binding on implementation:
+1. The current "bandit" is a Thompson rerank of Direct-vs-Corner at
+   round boundaries (game.rs ~2806) — appending ids does not create a
+   multi-arm chooser; arms have different availability and reward
+   semantics, so flat kill-rate comparison is selection-biased.
+2. open_attempt = (id, opened_frame) cannot represent phases or causal
+   baselines — an explicit episode record is prerequisite.
+3. Holes are passable in EVERY flood consumer already; adding corridor
+   tactics requires a corridor-leakage audit of count_open_space
+   consumers or the bandit learns from entries it never chose.
+4. Breach firing happens outside movement selection (should_fire, not
+   cpu_decide) — weapon actions get separate telemetry, never a
+   CpuDecisionReason move label.
+5. The laser cannot punch an arbitrary hole: breach cell is determined
+   by heading and the fifth wall strike; existing holes terminate
+   beams. A breach is also a 10-frame telegraphed commitment
+   (LASER_TELEGRAPH_FRAMES) — a boxable posture the plan must price.
+6. Extending TACTIC_IDS runs the poisoned-wire sanitizer + golden brain
+   fixture ritual (WRM2 discipline, ADR-021).
+
+## Decision
+
+### Phase A (this arc): Boxer + causal episode instrumentation
+
+1. EPISODE RECORD: replace open_attempt with an explicit episode
+   struct: tactic id, opened frame, phase (Setup|Choke), the
+   PRECOMMITTED baseline (player reachable space at episode open), and
+   close reason (kill|rebound|replaced|abort|deadline|weapon). Wire
+   extension via the sanitizer + golden fixture ritual; old saves load.
+2. BOXER (stable tactic id 4, CpuDecisionReason::Boxer): a conditional
+   perturbation of an already-funded hunt. Trigger: an intercept-family
+   hunt is active under earned authority AND a one-step rollout with
+   the per-frame cached player flood shows the boxer candidate reduces
+   player reachable space materially vs the incumbent candidate AND the
+   CPU stays above its survival floor. Setup phase capped at 40 frames;
+   choke phase minimizes the player's cached reachable space.
+3. CREDIT: a realized choke (space collapse vs the precommitted
+   baseline, still holding at death) opens the STANDARD 12-frame
+   window; death cause must be Wall/OwnTrail/EnemyTrail; attribution
+   exclusive; episode closes on rebound/replacement/abort/deadline.
+   One curiosity-floor boxer start per eligible round.
+4. IDS 5/6 RESERVED on the wire now (Breach actuator telemetry,
+   SlipRun) — reserved, not active.
+5. BUDGET: player flood computed once per frame and reused; candidate
+   pruning before any flood; browser-wasm p99 receipt required.
+
+### Phase B (gated): Slip-run ladder
+
+SlipRun lands first as a deterministic SHADOW planner over existing
+holes: plans logged with full predicates (two usable holes, legal
+one-way corridor path under 16x time dilation, shrink ETA margin,
+post-exit route above the escape floor, pursuit/beam/bomb/flame vetoes,
+earliest-safe-forward-exit abort semantics), no behavior change.
+Competence battery before ANY live entry: >=500 eligible geometries
+replayed; zero entry-without-exit; zero planner-caused collision when
+assumptions hold; >=95% planned re-entry; paired survival non-inferior
+to staying in the arena; wasm p99 in budget. Live activation scores on
+completed re-entry + relative survival, NOT kills alone; down-weighting
+allowed only after 24 genuine entries; pre-entry aborts are opportunity
+misses, not attempts. Offensive Breach becomes a slip-run setup action
+(separate weapon telemetry) only after the battery passes. The
+corridor-leakage audit of every count_open_space consumer is a Phase B
+entry criterion.
+
+## Proof obligations (Phase A)
+
+- Episode/ledger unit tests incl. baseline precommitment and every
+  close reason; poisoned-wire sanitizer + golden brain fixture green.
+- A staged fixture where boxing IS available must produce Boxer
+  episodes with realized-choke credit; the S2 result (0 accidental
+  boxing) is the null control.
+- ADR-018 novice fixture re-run: the beatable opening survives.
+- Five-seed paired expected-score instrument: no regression.
+- Browser-wasm p99 frame time within budget with the boxer layer on.
+- Zero-warning build + clippy; bit-identical replay battery (v1..v11).
+
+## Consequences
+
+The CPU gains its first tactic that manufactures geometry instead of
+exploiting found geometry, with attribution that cannot lie about it;
+the corridor program gets an honest ladder instead of a dead gate; and
+the tactic ledger gains the episode vocabulary every future arm needs.
