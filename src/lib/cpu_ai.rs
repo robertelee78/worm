@@ -5694,13 +5694,20 @@ pub fn should_fire(game: &mut WormGame, who: usize) -> bool {
             } else {
                 i16::MAX
             };
-            let on_a_ray = |px: u16, py: u16| -> bool {
+            let sweep = game.trishot_corner_sweep();
+            let on_a_ray = move |px: u16, py: u16| -> bool {
                 let fdx = px as i16 - hx as i16;
                 let fdy = py as i16 - hy as i16;
                 let forward = dx * fdx + dy * fdy > 0;
                 let aligned = fdx == 0 || fdy == 0 || fdx.abs() == fdy.abs();
+                // World v12: the supercover sweep makes corner-brush
+                // lines (one off a diagonal) genuinely hittable — the
+                // aim gate is "the bolt's ACTUAL reach per world
+                // version", so it moves with the physics or the CPU
+                // refuses exactly the shots the fix creates.
+                let brush = sweep && fdx != 0 && fdy != 0 && (fdx.abs() - fdy.abs()).abs() == 1;
                 let reach = fdx.abs().max(fdy.abs()) <= max_reach;
-                forward && aligned && reach
+                forward && (aligned || brush) && reach
             };
             on_a_ray(ox, oy) || game.cycles[opp].positions.iter().any(|&(px, py)| on_a_ray(px, py))
         }

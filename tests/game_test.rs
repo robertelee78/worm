@@ -4195,3 +4195,226 @@ fn test_v11_crossing_swap_ignites_not_kills() {
     let (alive10, _, _) = run(10);
     assert!(!alive10, "v10 ghosts keep the recorded instant swap kill");
 }
+
+/// v12 SUPERCOVER (ADR-022; owner: "no flame effect, no tail shrink"):
+/// a diagonal bolt brushes the two corner cells it passes between — the
+/// corner-crossed body that tunneled at v11 now catches, and the v11
+/// pin proves the gate (not a refactor) is what changed behavior.
+#[test]
+fn test_v12_diagonal_corner_brush_catches_and_v11_pin_tunnels() {
+    let run = |version: u8| -> (bool, u32, Vec<(u16, u16)>) {
+        let mut game = WormGame::with_size(120, 38);
+        game.set_world_version(version);
+        game.cpu_autopilot = false;
+        game.food_items.clear();
+        // Victim runs down column x=17; the bolt flies up-right from
+        // (16,10) toward (17,9): corners (17,10) [victim body] and (16,9).
+        game.cycles[1].head = (17, 12);
+        game.cycles[1].direction = worm::Direction::Down;
+        game.cycles[1].positions = vec![(17, 12), (17, 11), (17, 10)];
+        for &(x, y) in &[(17u16, 12u16), (17, 11), (17, 10)] {
+            game.grid[y as usize][x as usize] = worm::CellType::CPU;
+        }
+        game.projectiles.push(worm::Projectile {
+            x: 16,
+            y: 10,
+            dx: 1,
+            dy: -1,
+            steps_left: 200,
+            from: 0,
+        });
+        game.advance_projectiles();
+        let flame_cells = game.flames.iter().map(|f| (f.x, f.y)).collect();
+        (game.projectiles.is_empty(), game.burns[1].contact_ms, flame_cells)
+    };
+    let (consumed12, caught12, flames12) = run(12);
+    assert!(consumed12, "v12: the brush consumes the bolt");
+    assert!(caught12 > 0, "v12: the brush catches the victim directly");
+    assert_eq!(flames12, vec![(17, 10)], "v12: ignite ONCE, at the victim corner");
+    let (consumed11, caught11, flames11) = run(11);
+    assert!(!consumed11, "v11 pin: the same geometry tunnels straight through");
+    assert_eq!(caught11, 0, "v11 pin: no catch");
+    assert!(flames11.is_empty(), "v11 pin: no fire");
+}
+
+/// v12: when both corners hold the victim, the impact cell is
+/// deterministic — the head corner wins; otherwise fixed corner order.
+#[test]
+fn test_v12_corner_brush_impact_cell_is_deterministic() {
+    let mut game = WormGame::with_size(120, 38);
+    game.set_world_version(12);
+    game.cpu_autopilot = false;
+    game.food_items.clear();
+    // Victim HEAD on corner c2=(16,9), body L-ing through the bolt's own
+    // origin cell to corner c1=(17,10) — both corners victim, the
+    // destination (17,9) empty, so only the brush can resolve this.
+    game.cycles[1].head = (16, 9);
+    game.cycles[1].direction = worm::Direction::Up;
+    game.cycles[1].positions = vec![(16, 9), (16, 10), (17, 10)];
+    for &(x, y) in &[(16u16, 9u16), (16, 10), (17, 10)] {
+        game.grid[y as usize][x as usize] = worm::CellType::CPU;
+    }
+    game.projectiles.push(worm::Projectile {
+        x: 16,
+        y: 10,
+        dx: 1,
+        dy: -1,
+        steps_left: 200,
+        from: 0,
+    });
+    game.advance_projectiles();
+    assert_eq!(
+        game.flames.iter().map(|f| (f.x, f.y)).collect::<Vec<_>>(),
+        vec![(16, 9)],
+        "head corner wins the impact cell"
+    );
+    assert!(game.burns[1].contact_ms > 0);
+}
+
+/// v12: a checkerboard wall pinch stops the bolt (fire on its last open
+/// cell); a SINGLE wall corner grazes — wall-tip threading stays (k3
+/// ruling; codex's either-wall-stop divergence recorded in ADR-022).
+#[test]
+fn test_v12_wall_pinch_stops_and_single_wall_grazes() {
+    let stage = |walls: &[(u16, u16)]| -> WormGame {
+        let mut game = WormGame::with_size(120, 38);
+        game.set_world_version(12);
+        game.cpu_autopilot = false;
+        game.food_items.clear();
+        game.cycles[1].head = (60, 30);
+        game.cycles[1].positions = vec![(60, 30)];
+        game.grid[30][60] = worm::CellType::CPU;
+        for &(x, y) in walls {
+            game.grid[y as usize][x as usize] = worm::CellType::Wall;
+        }
+        game.projectiles.push(worm::Projectile {
+            x: 16,
+            y: 10,
+            dx: 1,
+            dy: -1,
+            steps_left: 200,
+            from: 0,
+        });
+        game
+    };
+    // Both corners wall: pinch — bolt dies on (16,10).
+    let mut game = stage(&[(17, 10), (16, 9)]);
+    game.advance_projectiles();
+    assert!(game.projectiles.is_empty(), "pinch consumes the bolt");
+    assert_eq!(
+        game.flames.iter().map(|f| (f.x, f.y)).collect::<Vec<_>>(),
+        vec![(16, 10)],
+        "pinch fire lands on the last open cell (v9 wall-death rule)"
+    );
+    // One wall corner: graze through, bolt survives, no fire.
+    let mut game = stage(&[(17, 10)]);
+    game.advance_projectiles();
+    assert!(!game.projectiles.is_empty(), "single wall corner grazes");
+    assert!(game.flames.is_empty());
+}
+
+/// v12: one corner wall, the other corner victim — the touch happened;
+/// the victim catches (a diagonal brush is not "through cover").
+#[test]
+fn test_v12_wall_victim_corner_tie_catches_the_victim() {
+    let mut game = WormGame::with_size(120, 38);
+    game.set_world_version(12);
+    game.cpu_autopilot = false;
+    game.food_items.clear();
+    game.grid[10][17] = worm::CellType::Wall; // c1 wall
+    game.cycles[1].head = (16, 8);
+    game.cycles[1].direction = worm::Direction::Up;
+    game.cycles[1].positions = vec![(16, 8), (16, 9)]; // c2=(16,9) body
+    game.grid[8][16] = worm::CellType::CPU;
+    game.grid[9][16] = worm::CellType::CPU;
+    game.projectiles.push(worm::Projectile {
+        x: 16,
+        y: 10,
+        dx: 1,
+        dy: -1,
+        steps_left: 200,
+        from: 0,
+    });
+    game.advance_projectiles();
+    assert!(game.burns[1].contact_ms > 0, "the brush catches despite the wall corner");
+    assert_eq!(game.flames.iter().map(|f| (f.x, f.y)).collect::<Vec<_>>(), vec![(16, 9)]);
+}
+
+/// v12: destination contact still wins over the corner brush (the bolt
+/// lands its real cell), and a bolt's FINAL substep can still brush
+/// (brush precedes range-exhaustion fire).
+#[test]
+fn test_v12_dest_contact_beats_brush_and_final_step_brushes() {
+    // Dest (17,9) AND corner (17,10) both victim body: fire at dest.
+    let mut game = WormGame::with_size(120, 38);
+    game.set_world_version(12);
+    game.cpu_autopilot = false;
+    game.food_items.clear();
+    game.cycles[1].head = (17, 8);
+    game.cycles[1].direction = worm::Direction::Up;
+    game.cycles[1].positions = vec![(17, 8), (17, 9), (17, 10)];
+    for &(x, y) in &[(17u16, 8u16), (17, 9), (17, 10)] {
+        game.grid[y as usize][x as usize] = worm::CellType::CPU;
+    }
+    game.projectiles.push(worm::Projectile {
+        x: 16,
+        y: 10,
+        dx: 1,
+        dy: -1,
+        steps_left: 200,
+        from: 0,
+    });
+    game.advance_projectiles();
+    assert_eq!(
+        game.flames.iter().map(|f| (f.x, f.y)).collect::<Vec<_>>(),
+        vec![(17, 9)],
+        "destination contact wins the impact cell"
+    );
+    // Final substep (steps_left = 1): the brush still fires.
+    let mut game = WormGame::with_size(120, 38);
+    game.set_world_version(12);
+    game.cpu_autopilot = false;
+    game.food_items.clear();
+    game.cycles[1].head = (17, 12);
+    game.cycles[1].direction = worm::Direction::Down;
+    game.cycles[1].positions = vec![(17, 12), (17, 11), (17, 10)];
+    for &(x, y) in &[(17u16, 12u16), (17, 11), (17, 10)] {
+        game.grid[y as usize][x as usize] = worm::CellType::CPU;
+    }
+    game.projectiles.push(worm::Projectile {
+        x: 16,
+        y: 10,
+        dx: 1,
+        dy: -1,
+        steps_left: 1,
+        from: 0,
+    });
+    game.advance_projectiles();
+    assert!(game.burns[1].contact_ms > 0, "the last step of a bolt's life still brushes");
+    assert_eq!(game.flames.iter().map(|f| (f.x, f.y)).collect::<Vec<_>>(), vec![(17, 10)]);
+}
+
+/// v12: the CPU's aim gate counts corner-brush lines as hittable —
+/// "the bolt's ACTUAL reach per world version" — and refuses them at v11.
+#[test]
+fn test_v12_aim_gate_counts_brush_lines() {
+    let run = |version: u8| -> bool {
+        let mut game = WormGame::with_size(120, 38);
+        game.set_world_version(version);
+        game.cpu_autopilot = false;
+        game.food_items.clear();
+        game.cycles[1].head = (10, 10);
+        game.cycles[1].direction = worm::Direction::Right;
+        game.cycles[1].positions = vec![(10, 10)];
+        game.grid[10][10] = worm::CellType::CPU;
+        game.cycles[1].held_powerup = Some(worm::game::PowerUpKind::TriShot);
+        // Player head at (14,7): fdx=4, fdy=-3 — one off the (1,-1)
+        // diagonal, a pure corner-brush line, never a v11 ray.
+        game.cycles[0].head = (14, 7);
+        game.cycles[0].positions = vec![(14, 7)];
+        game.grid[7][14] = worm::CellType::Player;
+        worm::cpu_ai::should_fire(&mut game, 1)
+    };
+    assert!(run(12), "v12: brush lines are real shots — take them");
+    assert!(!run(11), "v11 pin: the gate matches the old physics");
+}

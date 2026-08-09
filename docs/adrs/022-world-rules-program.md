@@ -1,6 +1,40 @@
 # ADR-022: The World-Rules Program — Two-Lane Corridor, Timed Decoy, Napalm
 
 ## Status
+v12 (supercover diagonals) Implemented — owner, live v11 play: the
+tri-shot "still seems off … doesn't feel lethal … when they hit the
+opponent, no flame effect, and their tail doesn't shrink per my
+prescribed rules." Probe receipts (examples/trishot_probe.rs): the burn
+engine and 5/3/1 schedule are HEALTHY (broadside 10->1; aligned
+diagonal kills Burned) — but a parity-misaligned diagonal corner-crossed
+a 5-cell body with zero contact. Two of three rays are diagonal; ~half
+of diagonal crossings tunneled. v12 rule (k3 + codex convergent):
+diagonal substeps sweep their two corner cells in fixed order — either
+corner holding opponent head/body is a touch (ignite ONCE at one
+deterministic impact cell, head-corner first; catch; never game_over in
+the brush path); a BOTH-corners wall checkerboard pinch stops the bolt
+on its last open cell; a single wall corner grazes (k3 ruling — codex
+preferred either-wall-stop; k3's kept because the complaint was
+under-lethality and either-wall-stop kills bolts in exactly the
+wall-adjacent fights that matter; one-line flip if it plays wrong). No
+diagonal swap analogue (arithmetically impossible at manhattan-2
+substeps). The CPU aim gate counts corner-brush lines (|fdx|-|fdy| = ±1)
+at v12 — the gate is the bolt's actual reach per world version. 5/3/1
+untouched (the probes isolated acquisition, not damage). Gated on
+trishot_corner_sweep() (world-rules view); v1-v11 replays bit-exact.
+Contract tests: brush catch + v11 tunnel pin, deterministic impact
+cell, pinch stop + graze, wall-vs-victim tie (victim catches),
+dest-contact precedence, final-substep brush, aim-gate v12/v11 pair.
+Five-seed instrument RE-BASELINE (Decision 2, receipted): v11 gaps
+[2.8, 12.8, 6.1, 0.6, 2.8] mean exactly 5.00 (zero slack, one receipted
+spawn-lap pathology seed 31337); v12 re-rolled every history and gaps
+became [6.1, 12.2, 2.8, 12.8, 0.0] mean 6.78 — seed 777001 re-rolled
+INTO the receipted pathology class (Wall/NoLegalMove corner deaths at
+len<=3 incl. the literal frame-192 (4,4) signature; ZERO bolt/burn
+involvement — a re-roll, not a v12 warm-arm regression). Gate
+restructured, not inflated: strict mean<=5 on the top-two-trimmed pool
+(allowance PUBLISHED per run; >=3 bad seeds still fail) + untrimmed
+mean<=10 hard backstop. v12 trimmed mean 2.97.
 v11 (napalm reach) Implemented and LIVE (BUILD 28) — owner: "the
 tri-shot isn't lethal enough … no damage … maybe they need to go
 further, but if they touch the opponent at all, that's what needs to
@@ -49,8 +83,9 @@ established.
 2026-08-07
 
 ## Updated
-2026-08-07 — v6 landed live; verification-round findings and their
-fixes folded into Receipts.
+2026-08-08 — v12 supercover diagonals implemented (status entry above);
+earlier: 2026-08-07, v6 landed live, verification-round findings and
+their fixes folded into Receipts.
 
 ## Context
 

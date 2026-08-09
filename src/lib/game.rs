@@ -341,7 +341,7 @@ impl LightCycle {
 /// of the v3 bolt-ordering fix. Same-frame deaths are atomic (both
 /// dead = draw); the firer is immune to their own beam; a frozen worm
 /// enters nothing but remains hittable at discharge.
-pub const ARENA_VERSION: u8 = 11;
+pub const ARENA_VERSION: u8 = 12;
 
 /// A collected player input (world v10): consumed in order at the
 /// frame's player phase.
@@ -1035,6 +1035,16 @@ impl WormGame {
     /// made the first "closure" the arena wall itself; v8 corrects it.
     pub fn sudden_death_base(&self) -> u16 {
         if self.arena_version >= 8 { 3 } else { 2 }
+    }
+
+    /// World v12: diagonal bolts sweep the two corner cells they pass
+    /// between (supercover). Pre-v12 a diagonal ray corner-crossed a
+    /// one-cell body — or a checkerboard wall pinch — without ever
+    /// sharing a cell: the owner's "no flame, no shrink" tri-shot
+    /// (probe receipt: a corner-crossed diagonal left a 5-cell worm
+    /// untouched while the aligned-parity twin killed it).
+    pub fn trishot_corner_sweep(&self) -> bool {
+        self.arena_version >= 12
     }
 
     /// Whether this terminal is big enough for an outer corridor around the arena wall.
@@ -3641,6 +3651,38 @@ impl WormGame {
             let (pdx, pdy) = (self.projectiles[i].dx, self.projectiles[i].dy);
             let opp = (1 - from) as usize;
 
+            // World v12 SUPERCOVER (owner: "no flame, no shrink"): a
+            // diagonal substep passes between two corner cells; pre-v12
+            // it could cross a one-cell body — or a checkerboard wall
+            // pinch — without sharing a cell. Corner order is FIXED
+            // ((ox+dx,oy) then (ox,oy+dy)) for replay determinism.
+            // Precedence, pinned by contract tests: dest wall/off-board
+            // death (above) → both-wall pinch stop → swap → dest
+            // contact → corner brush → move. A single wall corner
+            // GRAZES (k3: wall-tip threading stays; divergence from
+            // codex's either-wall-stop recorded in ADR-022 — the owner's
+            // complaint was under-lethality, and either-wall-stop kills
+            // bolts in exactly the wall-adjacent fights that matter).
+            let diagonal = pdx != 0 && pdy != 0;
+            let corners = if diagonal && self.trishot_corner_sweep() {
+                Some([(ux, oy), (ox, uy)])
+            } else {
+                None
+            };
+            if let Some([c1, c2]) = corners {
+                let is_wall = |c: (u16, u16)| {
+                    self.grid[c.1 as usize][c.0 as usize] == CellType::Wall
+                };
+                if is_wall(c1) && is_wall(c2) {
+                    // Checkerboard pinch: flying through a solid corner is
+                    // the wall form of the same tunneling bug. The bolt
+                    // dies on the last open cell it occupied (v9 rule).
+                    self.ignite(ox, oy, from);
+                    self.projectiles.remove(i);
+                    continue 'bolts;
+                }
+            }
+
             // Crossing swap: heads move before bolts each frame, so an
             // odd-gap head-on approach exchanges cells with the bolt in a
             // single frame — comparing post-move cells alone tunneled
@@ -3710,6 +3752,35 @@ impl WormGame {
                 }
                 self.projectiles.remove(i);
                 continue 'bolts;
+            }
+            // Corner BRUSH (v12): either corner cell holding opponent
+            // head or body is a touch — ignite ONCE at one deterministic
+            // impact cell (head-corner first, else fixed corner order)
+            // and catch. Never sets game_over here: the burn schedule
+            // does the killing in tick_flames, draw logic single-sited
+            // (codex landmine). Own trail: bolts overfly it, unchanged.
+            if let Some([c1, c2]) = corners {
+                if self.cycles[opp].alive {
+                    let holds_opp = |c: (u16, u16)| {
+                        self.cycles[opp].head == c
+                            || self.grid[c.1 as usize][c.0 as usize] == opp_marker
+                    };
+                    let impact = if self.cycles[opp].head == c1 || self.cycles[opp].head == c2 {
+                        Some(self.cycles[opp].head)
+                    } else if holds_opp(c1) {
+                        Some(c1)
+                    } else if holds_opp(c2) {
+                        Some(c2)
+                    } else {
+                        None
+                    };
+                    if let Some((bx, by)) = impact {
+                        self.ignite(bx, by, from);
+                        self.catch_on_touch(opp, from);
+                        self.projectiles.remove(i);
+                        continue 'bolts;
+                    }
+                }
             }
             let p = &mut self.projectiles[i];
             p.x = ux;
