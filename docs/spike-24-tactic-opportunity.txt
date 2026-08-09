@@ -1,0 +1,7 @@
+== tactic opportunity spike (task #24) ==
+rounds replayed: 235   frames: 52173
+S1 boxer windows: loose 2.49%  mid 0.25%  tight 0.25%  (of all frames)
+S1 rounds with >=1 tight window: 4/235 (1.7%)
+S2 player Wall/OwnTrail deaths: 116  with mid-window in last 10 frames: 0 (0.0%)
+S3 cpu laser-held frames: 5816  enveloped (current breach gate): 0 (0.0%)  offensive headroom: 5816
+S3 corridor frames: player 2578  cpu 0   rounds with >=1 hole: 59/235  holes(max)/round avg: 0.43
