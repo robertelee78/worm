@@ -61,6 +61,14 @@ def build_prompt(rec):
     facts = {
         "outcome": {0: "the player won", 1: "the CPU won"}.get(rec.get("winner"), "a draw"),
         "cause": rec.get("cause") or "unknown",
+        # The cause string describes HOW THE LOSER DIED. Without this
+        # field the model glued 'you' onto the CPU's own-trail death and
+        # told a winning player they had crashed (owner report,
+        # 2026-08-09) — attribution must be data, not inference.
+        "causeDescribes": {
+            0: "the CPU's death — the PLAYER did NOT die this round",
+            1: "the player's death",
+        }.get(rec.get("winner"), "the shared ending (draw)"),
         "frames": rec.get("frames"),
         "foodEaten": rec.get("foodEaten"),
         "predictionRate": rec.get("accuracy", {}).get("rate"),
@@ -125,7 +133,10 @@ def build_prompt(rec):
         "situations it has never seen them in (mapUnseen/mapThin); and "
         "driftZ/playStyleDriftDetected.\n\n"
         "HARD RULES: use ONLY the measurements below — never invent a number, "
-        "event, or read that is not here. If a field is missing or small, say "
+        "event, or read that is not here. The `cause` field describes how the "
+        "LOSER died — attribute it strictly per `causeDescribes`; when the "
+        "player won, the cause is the CPU's death and must be narrated as "
+        "'it', never as 'you'. If a field is missing or small, say "
         "less rather than guessing. Speak to the player as 'you'. The CPU is "
         "'it'. 110-170 words, plain prose, no lists, no headers. Structure: "
         "what happened THIS round; then set it against the relationship — "
