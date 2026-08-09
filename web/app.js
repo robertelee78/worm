@@ -4,14 +4,14 @@
 // The ?v= must match BUILD below (and index.html's) — an unversioned glue
 // import could pair a cached old worm.js with a fresh wasm on the next
 // rebuild that changes the bindings.
-import init, { WasmGame } from './pkg/worm.js?v=33';
+import init, { WasmGame } from './pkg/worm.js?v=34';
 import { Sfx } from './audio.js';
 import { computeBoardLayout, VIEWPORT_BLOCK_GUTTER } from './layout.js';
 
 let CELL = 14; // recomputed by applyBoardLayout() to fit the measured stage
 // Bump together with the ?v= in index.html whenever the wasm bundle is
 // rebuilt — it keys the cache-busting query on the .wasm fetch.
-const BUILD = 33;
+const BUILD = 34;
 const MATCH_TARGET = 3;
 const STATE_SCHEMA_VERSION = 2;
 const ROUND_SCHEMA_VERSION = 1;
@@ -578,20 +578,20 @@ let last = performance.now();
 let acc = 0;
 let paused = false;
 
-// TOUCH PACING (owner, 2026-08-08): a phone player steers with taps on a
-// smaller arena — reaction-plus-input time is simply longer than arrows
-// on a keyboard, and the OPENING is where it hurt. Coarse-pointer
-// devices get the same physics on a gentler wall clock, weighted toward
-// the start: 1.5x at the relaxed 115ms opening tapering to 1.15x at the
-// 35ms floor, so the early tap-steering era is calm and the earned
-// late-game keeps its heat. Frames are what's recorded, so ghosts and
-// replays are untouched; the slipstream's 4x ratio survives by
-// construction (it's applied inside the engine before this).
+// OPENING PACING (owner, 2026-08-08, twice): the opening is too fast
+// EVERYWHERE — "even the speed for the web browser game starts off too
+// fast" — and worse on phones, where taps on a smaller arena cannot
+// match arrow keys. Same physics, gentler wall clock, weighted toward
+// the start: desktop 1.25x at the relaxed 115ms opening tapering to
+// exactly 1.0 at the 35ms floor (max speed untouched); coarse-pointer
+// devices 1.5x tapering to 1.15x. Frames are what's recorded, so
+// ghosts and replays are untouched; the slipstream's 4x ratio survives
+// by construction (applied inside the engine before this).
 const TOUCH = window.matchMedia && window.matchMedia('(pointer: coarse)').matches;
 function touchPace(delayMs) {
-  if (!TOUCH) return delayMs;
   const t = Math.max(0, Math.min(1, (delayMs - 35) / 80)); // 1 at opening, 0 at floor
-  return delayMs * (1.15 + 0.35 * t);
+  const [floor, opening] = TOUCH ? [1.15, 1.5] : [1.0, 1.25];
+  return delayMs * (floor + (opening - floor) * t);
 }
 
 function loop(now) {
