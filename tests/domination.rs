@@ -79,7 +79,55 @@ fn habitual(game: &WormGame, rng: &mut Rng) -> Direction {
         worm::count_open_space(game, nx, ny) >= own_len * 3.0 + 8.0
     };
 
-    // Hold the line while that is genuinely safe.
+    // PASSIVE-READING FIXTURE, model-grounded (fifth iteration,
+    // receipts in scratchpad/funnel_*.txt): the lateral channel scores
+    // turn frames against uniform chance THROUGH the ensemble's model
+    // classes — a persona is readable only if its turn-generating
+    // process lives in that model space (wall-reader: last-moment wall
+    // breaks; food-seeker: turns toward food; habit tracker: a side
+    // bias at ties). Poisson timing (z -80), pure coins (base
+    // unbeatable), and 4-early wall breaks (z -47) are all OUTSIDE the
+    // space and anti-score by construction. This persona turns the way
+    // the models expect a human to: it CHASES FOOD (frequent,
+    // food-predictable turns), breaks at walls last-moment (the
+    // wall-reader class that historically latched), and favors its
+    // habit side 85/15 at ties. Assertions untouched.
+    if let Some(&(fx, fy, _)) = game
+        .food_items
+        .iter()
+        .min_by_key(|(fx, fy, _)| {
+            (*fx as i32 - game.cycles[0].head.0 as i32).abs()
+                + (*fy as i32 - game.cycles[0].head.1 as i32).abs()
+        })
+    {
+        let (hx, hy) = game.cycles[0].head;
+        let dx = fx as i32 - hx as i32;
+        let dy = fy as i32 - hy as i32;
+        let toward_x = if dx > 0 { Some(Direction::Right) } else if dx < 0 { Some(Direction::Left) } else { None };
+        let toward_y = if dy > 0 { Some(Direction::Down) } else if dy < 0 { Some(Direction::Up) } else { None };
+        // Prefer the axis with the larger gap; the habit side breaks ties.
+        let prefs: [Option<Direction>; 2] = if dx.abs() > dy.abs() {
+            [toward_x, toward_y]
+        } else if dy.abs() > dx.abs() {
+            [toward_y, toward_x]
+        } else if rng.next_f32() < 0.85 {
+            if toward_x == Some(l) || toward_y == Some(l) { [Some(l), if toward_x == Some(l) { toward_y } else { toward_x }] } else { [toward_x, toward_y] }
+        } else {
+            [toward_y, toward_x]
+        };
+        for pref in prefs.into_iter().flatten() {
+            // Food tunnel-vision, the human-true weakness (the mine
+            // ledger is its receipt): holding the line toward food
+            // checks legality only — chasing players do not flood-fill
+            // every straight step. Turns keep the full survival gate.
+            if pref == cur && can_step(game, cur) {
+                return cur;
+            }
+            if (pref == l || pref == r) && survivable(pref) {
+                return pref;
+            }
+        }
+    }
     if survivable(cur) {
         return cur;
     }
@@ -445,4 +493,28 @@ fn v10_v11_weapon_receipt() {
             rec.win_rate() * 100.0, lift
         );
     }
+}
+
+/// RCA funnel A/B (k3 prescription): where does the read latch die under
+/// the priced tri-shot gate? Run twice — WORM_BISECT_OLD_TRISHOT=1 and
+/// unset — and compare the evidence-supply funnel and the lateral
+/// channel's raw receipts. The persona is bolt-blind, so if supply is
+/// equal and the latch still differs, the pathway runs through the
+/// CPU's own post-fire movement, not provoked dodges.
+#[test]
+#[ignore]
+fn rca_read_funnel_ab() {
+    let ((rec, lift), funnel, fam_peak, (z, lat_samples, latched)) =
+        play_vz(90, 20260805, true, worm::ARENA_VERSION);
+    println!(
+        "gate={}  cpu {}/{}/{} win {:.0}%  lift {:.0}%  fam_peak {:.2}",
+        if std::env::var("WORM_BISECT_OLD_TRISHOT").is_ok() { "OLD" } else { "NEW" },
+        rec.cpu, rec.player, rec.draw, rec.win_rate() * 100.0, lift * 100.0, fam_peak
+    );
+    println!(
+        "funnel: moves {} straight_legal {} two_lat {} vol_lat {} vol_two_sided {} pend_taken {} pend_dropped {}",
+        funnel.moves, funnel.straight_legal, funnel.two_lat, funnel.vol_lat,
+        funnel.vol_two_sided, funnel.pend_taken, funnel.pend_dropped
+    );
+    println!("lateral channel: z {z:.2}  samples {lat_samples}  latched {latched}");
 }
