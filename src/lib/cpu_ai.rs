@@ -6883,9 +6883,14 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
                     let region = (nx / 6, ny / 6);
                     let shrink = game.shrink_level;
                     let pressured = {
+                        // Pressure = within the engine's own boxing-
+                        // relevance radius (the Manhattan-14 prune in
+                        // boxer_choke_candidate): a box is being BUILT
+                        // from that range, and take-7's receipts showed
+                        // sieges forming at 11-14 with the breaker armed.
                         let (phx, phy) = game.cycles[0].head;
                         game.cycles[0].alive
-                            && (phx as i32 - cx as i32).abs() + (phy as i32 - cy as i32).abs() <= 10
+                            && (phx as i32 - cx as i32).abs() + (phy as i32 - cy as i32).abs() <= 14
                     };
                     if game
                         .cpu_brain
