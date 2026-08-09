@@ -1717,10 +1717,18 @@ pub struct LearningLedgers {
     /// Boxer, whose kill credit requires a REALIZED choke against it
     /// (ADR-024: the precommitted-window rule keeps the clock honest,
     /// the baseline keeps the causal story honest).
-    pub open_attempt: Option<(u8, u32, f32)>,
+    pub open_attempt: Option<(u8, u32, f32, u16)>,
     /// Transient: staged by the Boxer decision site immediately before
     /// choose!/note_tactic runs, consumed into the episode it opens.
     pub pending_boxer_baseline: Option<f32>,
+    /// Transient: a Boxer window closed by tactic REPLACEMENT while
+    /// still inside its horizon — the choke's terminal phase often
+    /// hands the label back to the intercept precisely because it
+    /// worked (k3 verify, finding B). At death the contested window is
+    /// re-tested against its own baseline and WINS the credit iff the
+    /// choke realized; otherwise the replacement keeps it. (opened,
+    /// baseline, shrink_level at open.)
+    pub contested_boxer: Option<(u32, f32, u16)>,
     /// Transient per-round tallies feeding the summary.
     pub rs_laterals: u32,
     pub rs_alternations: u32,
@@ -1762,14 +1770,14 @@ pub struct LearningLedgers {
 }
 
 impl LearningLedgers {
-    pub fn note_tactic(&mut self, reason: CpuDecisionReason, frame: u32) {
+    pub fn note_tactic(&mut self, reason: CpuDecisionReason, frame: u32, shrink: u16) {
         if let Some(&(id, _)) = TACTIC_IDS.iter().find(|&&(_, r)| r == reason) {
             // EPISODIC attempts (codex: exactly-once closure): consecutive
             // frames of the same tactic inside one precommitted window are
             // ONE attempt — the old per-frame increment inflated the
             // denominator by the pursuit's length. A window closes by
             // kill, by expiry, or by a different tactic taking over.
-            if let Some((open_id, opened, _)) = self.open_attempt {
+            if let Some((open_id, opened, _, _)) = self.open_attempt {
                 if open_id == id && frame.saturating_sub(opened) <= ATTEMPT_HORIZON {
                     // Same episode, window stays as precommitted — the staged
                     // baseline (if any) belongs to the episode already open.
@@ -1777,13 +1785,23 @@ impl LearningLedgers {
                     return;
                 }
             }
+            // Replacement of an in-horizon Boxer window: contested, not
+            // forgotten (k3 verify, finding B — the terminal phase of a
+            // WORKING choke hands the label back to the intercept).
+            if let Some((4, opened, baseline, eshrink)) = self.open_attempt {
+                if frame.saturating_sub(opened) <= ATTEMPT_HORIZON && baseline > 0.0 {
+                    self.contested_boxer = Some((opened, baseline, eshrink));
+                }
+            }
             let baseline = if reason == CpuDecisionReason::Boxer {
+                // A fresh Boxer window supersedes any contested remnant.
+                self.contested_boxer = None;
                 self.pending_boxer_baseline.take().unwrap_or(0.0)
             } else {
                 self.pending_boxer_baseline = None;
                 0.0
             };
-            self.open_attempt = Some((id, frame, baseline));
+            self.open_attempt = Some((id, frame, baseline, shrink));
             let e = match self.tactic_attempts.iter_mut().find(|e| e.0 == id) {
                 Some(e) => e,
                 None => {
@@ -1807,27 +1825,57 @@ impl LearningLedgers {
         frame: u32,
         cause: Option<crate::game::DeathCause>,
         player_space_at_death: f32,
+        shrink_now: u16,
     ) {
-        if let Some((id, opened, baseline)) = self.open_attempt {
+        use crate::game::DeathCause as DC;
+        let boxed_cause = matches!(
+            cause,
+            Some(DC::Wall) | Some(DC::OwnTrail) | Some(DC::EnemyTrail)
+        );
+        // The realized-choke test, shared by the open window and the
+        // contested one. The shrink guard voids credit when sudden death
+        // advanced during the window — close_ring collapses the player's
+        // space MECHANICALLY and kills with DeathCause::Wall, a
+        // lie-shaped hole in "a credit rule that cannot lie" (k3 verify,
+        // finding B/G1).
+        let realized = |baseline: f32, eshrink: u16| {
+            boxed_cause
+                && baseline > 0.0
+                && player_space_at_death <= 0.6 * baseline
+                && shrink_now == eshrink
+        };
+        // Contested arbitration (k3 G2): a Boxer window that was closed
+        // by replacement inside its horizon wins the credit over its
+        // replacement iff ITS choke realized — exclusive, never both.
+        let contested_wins = self
+            .contested_boxer
+            .map(|(opened, baseline, eshrink)| {
+                frame.saturating_sub(opened) <= ATTEMPT_HORIZON && realized(baseline, eshrink)
+            })
+            .unwrap_or(false);
+        let credit_id = if let Some((id, opened, baseline, eshrink)) = self.open_attempt {
             let in_window = frame.saturating_sub(opened) <= ATTEMPT_HORIZON;
-            let eligible = if id == 4 {
-                use crate::game::DeathCause as DC;
-                let boxed_cause = matches!(
-                    cause,
-                    Some(DC::Wall) | Some(DC::OwnTrail) | Some(DC::EnemyTrail)
-                );
-                boxed_cause && baseline > 0.0 && player_space_at_death <= 0.6 * baseline
-            } else {
-                true
-            };
+            let eligible = if id == 4 { realized(baseline, eshrink) } else { true };
             if in_window && eligible {
-                if let Some(e) = self.tactic_attempts.iter_mut().find(|e| e.0 == id) {
-                    e.2 = e.2 * 0.999 + 1.0;
-                    e.4 = e.4.saturating_add(1);
-                }
+                if contested_wins && id != 4 { Some(4) } else { Some(id) }
+            } else if contested_wins {
+                Some(4)
+            } else {
+                None
+            }
+        } else if contested_wins {
+            Some(4)
+        } else {
+            None
+        };
+        if let Some(id) = credit_id {
+            if let Some(e) = self.tactic_attempts.iter_mut().find(|e| e.0 == id) {
+                e.2 = e.2 * 0.999 + 1.0;
+                e.4 = e.4.saturating_add(1);
             }
         }
         self.open_attempt = None;
+        self.contested_boxer = None;
     }
 
     pub fn note_weapon(&mut self, kind: crate::game::PowerUpKind, gate_pass: bool, fired: bool) {
@@ -5879,7 +5927,7 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
             // ADR-021 Kata 0: hunt-family decisions open a precommitted
             // attempt window in the tactic ledger (recording only;
             // note_tactic ignores non-hunt reasons).
-            game.cpu_brain.ledgers.note_tactic($reason, game.frame_count);
+            game.cpu_brain.ledgers.note_tactic($reason, game.frame_count, game.shrink_level);
             return chosen;
         }};
     }
@@ -7203,22 +7251,22 @@ mod tests {
     fn tactic_attempts_are_episodes_not_frames() {
         let mut l = LearningLedgers::default();
         for f in 0..10 {
-            l.note_tactic(CpuDecisionReason::DirectIntercept, f);
+            l.note_tactic(CpuDecisionReason::DirectIntercept, f, 0);
         }
         assert_eq!(l.tactic_attempts[0].3, 1, "one pursuit = one attempt");
-        l.note_tactic(CpuDecisionReason::CornerIntercept, 10);
-        l.note_tactic(CpuDecisionReason::DirectIntercept, 11);
+        l.note_tactic(CpuDecisionReason::CornerIntercept, 10, 0);
+        l.note_tactic(CpuDecisionReason::DirectIntercept, 11, 0);
         let direct = l.tactic_attempts.iter().find(|e| e.0 == 0).unwrap();
         assert_eq!(direct.3, 2, "tactic switch opens a new episode");
-        l.resolve_player_death(12, None, 0.0);
+        l.resolve_player_death(12, None, 0.0, 0);
         let direct = l.tactic_attempts.iter().find(|e| e.0 == 0).unwrap();
         assert_eq!(direct.4, 1, "kill credited once");
-        l.resolve_player_death(13, None, 0.0);
+        l.resolve_player_death(13, None, 0.0, 0);
         let direct = l.tactic_attempts.iter().find(|e| e.0 == 0).unwrap();
         assert_eq!(direct.4, 1, "no open attempt, no double credit");
         // Expiry: an old window never gets the credit.
-        l.note_tactic(CpuDecisionReason::DirectIntercept, 100);
-        l.resolve_player_death(100 + ATTEMPT_HORIZON + 1, None, 0.0);
+        l.note_tactic(CpuDecisionReason::DirectIntercept, 100, 0);
+        l.resolve_player_death(100 + ATTEMPT_HORIZON + 1, None, 0.0, 0);
         let direct = l.tactic_attempts.iter().find(|e| e.0 == 0).unwrap();
         assert_eq!(direct.4, 1, "expired window earns nothing");
     }
@@ -7236,9 +7284,9 @@ mod tests {
             pending_boxer_baseline: Some(200.0),
             ..Default::default()
         };
-        l.note_tactic(CpuDecisionReason::Boxer, 10);
-        assert_eq!(l.open_attempt, Some((4, 10, 200.0)), "baseline precommitted at open");
-        l.resolve_player_death(15, Some(DC::OwnTrail), 100.0);
+        l.note_tactic(CpuDecisionReason::Boxer, 10, 0);
+        assert_eq!(l.open_attempt, Some((4, 10, 200.0, 0)), "baseline precommitted at open");
+        l.resolve_player_death(15, Some(DC::OwnTrail), 100.0, 0);
         assert_eq!(boxer(&l).unwrap().4, 1, "collapsed choke credits");
 
         // Space did NOT collapse: same cause, no credit.
@@ -7246,8 +7294,8 @@ mod tests {
             pending_boxer_baseline: Some(200.0),
             ..Default::default()
         };
-        l.note_tactic(CpuDecisionReason::Boxer, 10);
-        l.resolve_player_death(15, Some(DC::OwnTrail), 150.0);
+        l.note_tactic(CpuDecisionReason::Boxer, 10, 0);
+        l.resolve_player_death(15, Some(DC::OwnTrail), 150.0, 0);
         assert_eq!(boxer(&l).unwrap().4, 0, "no collapse, no credit");
 
         // Incompatible cause (weapon kill during a boxer window): no credit.
@@ -7255,22 +7303,82 @@ mod tests {
             pending_boxer_baseline: Some(200.0),
             ..Default::default()
         };
-        l.note_tactic(CpuDecisionReason::Boxer, 10);
-        l.resolve_player_death(15, Some(DC::Laser), 50.0);
+        l.note_tactic(CpuDecisionReason::Boxer, 10, 0);
+        l.resolve_player_death(15, Some(DC::Laser), 50.0, 0);
         assert_eq!(boxer(&l).unwrap().4, 0, "weapon deaths never credit the choke");
 
         // Missing baseline (defensive): no credit even on collapse-shaped input.
         let mut l = LearningLedgers::default();
-        l.note_tactic(CpuDecisionReason::Boxer, 10);
-        l.resolve_player_death(15, Some(DC::Wall), 0.0);
+        l.note_tactic(CpuDecisionReason::Boxer, 10, 0);
+        l.resolve_player_death(15, Some(DC::Wall), 0.0, 0);
         assert_eq!(boxer(&l).unwrap().4, 0, "no baseline, no causal story, no credit");
 
         // Non-boxer arms are untouched by the eligibility tightening.
         let mut l = LearningLedgers::default();
-        l.note_tactic(CpuDecisionReason::DirectIntercept, 10);
-        l.resolve_player_death(15, Some(DC::Laser), 999.0);
+        l.note_tactic(CpuDecisionReason::DirectIntercept, 10, 0);
+        l.resolve_player_death(15, Some(DC::Laser), 999.0, 0);
         let direct = l.tactic_attempts.iter().find(|e| e.0 == 0).unwrap();
         assert_eq!(direct.4, 1, "intercept credit rule unchanged");
+    }
+
+    /// ADR-024 + k3 verify G1: sudden-death ring closures collapse the
+    /// player's space MECHANICALLY and kill with DeathCause::Wall — a
+    /// Boxer window straddling a shrink must earn nothing.
+    #[test]
+    fn boxer_credit_voided_when_the_ring_did_the_boxing() {
+        use crate::game::DeathCause as DC;
+        let mut l = LearningLedgers {
+            pending_boxer_baseline: Some(200.0),
+            ..Default::default()
+        };
+        l.note_tactic(CpuDecisionReason::Boxer, 10, 0);
+        l.resolve_player_death(15, Some(DC::Wall), 40.0, 1); // ring advanced
+        let boxer = l.tactic_attempts.iter().find(|e| e.0 == 4).unwrap();
+        assert_eq!(boxer.4, 0, "the ring's collapse is not the boxer's kill");
+    }
+
+    /// ADR-024 + k3 verify G2: a Boxer window closed by tactic
+    /// replacement inside its horizon wins the credit over the
+    /// replacement iff ITS choke realized — exclusive, never both.
+    #[test]
+    fn contested_boxer_window_wins_credit_iff_realized() {
+        use crate::game::DeathCause as DC;
+        // Realized: the boxed death credits Boxer, not the intercept.
+        let mut l = LearningLedgers {
+            pending_boxer_baseline: Some(200.0),
+            ..Default::default()
+        };
+        l.note_tactic(CpuDecisionReason::Boxer, 10, 0);
+        l.note_tactic(CpuDecisionReason::DirectIntercept, 14, 0); // terminal replacement
+        l.resolve_player_death(18, Some(DC::OwnTrail), 80.0, 0);
+        let boxer = l.tactic_attempts.iter().find(|e| e.0 == 4).unwrap();
+        let direct = l.tactic_attempts.iter().find(|e| e.0 == 0).unwrap();
+        assert_eq!(boxer.4, 1, "the realized choke keeps its kill through replacement");
+        assert_eq!(direct.4, 0, "credit is exclusive — the replacement earns nothing");
+
+        // Not realized: the replacement keeps the credit.
+        let mut l = LearningLedgers {
+            pending_boxer_baseline: Some(200.0),
+            ..Default::default()
+        };
+        l.note_tactic(CpuDecisionReason::Boxer, 10, 0);
+        l.note_tactic(CpuDecisionReason::DirectIntercept, 14, 0);
+        l.resolve_player_death(18, Some(DC::OwnTrail), 180.0, 0); // no collapse
+        let boxer = l.tactic_attempts.iter().find(|e| e.0 == 4).unwrap();
+        let direct = l.tactic_attempts.iter().find(|e| e.0 == 0).unwrap();
+        assert_eq!(boxer.4, 0, "an unrealized contested window earns nothing");
+        assert_eq!(direct.4, 1, "the replacement keeps an ordinary kill");
+
+        // Ring guard applies to contested windows too.
+        let mut l = LearningLedgers {
+            pending_boxer_baseline: Some(200.0),
+            ..Default::default()
+        };
+        l.note_tactic(CpuDecisionReason::Boxer, 10, 0);
+        l.note_tactic(CpuDecisionReason::DirectIntercept, 14, 0);
+        l.resolve_player_death(18, Some(DC::Wall), 40.0, 1); // ring advanced
+        let boxer = l.tactic_attempts.iter().find(|e| e.0 == 4).unwrap();
+        assert_eq!(boxer.4, 0, "the ring voids a contested claim exactly as an open one");
     }
 
     /// ADR-024: the staged baseline binds to the episode it opens — a
@@ -7282,18 +7390,18 @@ mod tests {
             pending_boxer_baseline: Some(300.0),
             ..Default::default()
         };
-        l.note_tactic(CpuDecisionReason::Boxer, 10);
+        l.note_tactic(CpuDecisionReason::Boxer, 10, 0);
         l.pending_boxer_baseline = Some(50.0); // staged mid-episode: discarded
-        l.note_tactic(CpuDecisionReason::Boxer, 12);
-        assert_eq!(l.open_attempt, Some((4, 10, 300.0)), "episode keeps its own baseline");
+        l.note_tactic(CpuDecisionReason::Boxer, 12, 0);
+        assert_eq!(l.open_attempt, Some((4, 10, 300.0, 0)), "episode keeps its own baseline");
         assert_eq!(l.pending_boxer_baseline, None, "mid-episode staging consumed away");
 
         let mut l = LearningLedgers {
             pending_boxer_baseline: Some(300.0),
             ..Default::default()
         };
-        l.note_tactic(CpuDecisionReason::DirectIntercept, 10);
-        assert_eq!(l.open_attempt, Some((0, 10, 0.0)), "non-boxer opens carry no baseline");
+        l.note_tactic(CpuDecisionReason::DirectIntercept, 10, 0);
+        assert_eq!(l.open_attempt, Some((0, 10, 0.0, 0)), "non-boxer opens carry no baseline");
         assert_eq!(l.pending_boxer_baseline, None, "stale staging cleared");
     }
 

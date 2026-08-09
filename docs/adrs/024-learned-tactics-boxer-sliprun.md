@@ -82,11 +82,25 @@ Landmines recorded by the consultants, all binding on implementation:
 
 ### Phase A (this arc): Boxer + causal episode instrumentation
 
-1. EPISODE RECORD: replace open_attempt with an explicit episode
-   struct: tactic id, opened frame, phase (Setup|Choke), the
-   PRECOMMITTED baseline (player reachable space at episode open), and
-   close reason (kill|rebound|replaced|abort|deadline|weapon). Wire
-   extension via the sanitizer + golden fixture ritual; old saves load.
+1. EPISODE RECORD (as implemented — narrowed from the original text
+   after the k3 implementation verify; the full phase/close-reason
+   struct is DEFERRED to Phase B, which actually needs it): the open
+   window carries (tactic id, opened frame, precommitted baseline =
+   player reachable space at open, shrink_level at open), all
+   transient — the persisted wire shape is unchanged. Two credit
+   guards landed from the verify: the SHRINK GUARD (a sudden-death
+   ring closure collapses space mechanically and kills with
+   DeathCause::Wall; a window straddling a shrink earns nothing) and
+   the CONTESTED-CREDIT rule (a Boxer window closed by tactic
+   replacement inside its horizon is re-tested at death against its
+   own baseline and wins the credit over its replacement iff the
+   choke realized — exclusive, never both; without this the terminal
+   phase of a WORKING choke hands the kill label back to the
+   intercept precisely because it worked). The 40-frame setup cap,
+   per-round curiosity throttle, and per-frame flood cache from the
+   consult text are likewise Phase B machinery, not implemented in
+   Phase A — the prospective trigger's pruning made them unnecessary
+   at current cost (wasm p99 receipt below).
 2. BOXER (stable tactic id 4, CpuDecisionReason::Boxer): a conditional
    perturbation of an already-funded hunt. Trigger: an intercept-family
    hunt is active under earned authority AND a one-step rollout with
@@ -140,3 +154,15 @@ The CPU gains its first tactic that manufactures geometry instead of
 exploiting found geometry, with attribution that cannot lie about it;
 the corridor program gets an honest ladder instead of a dead gate; and
 the tactic ledger gains the episode vocabulary every future arm needs.
+
+WRM2 note (k3 verify, finding F): the persisted tactic section now
+carries id 4 rows. An OLD binary loading a NEW save drops the ENTIRE
+tactic section (ids 0-3 learning included) via the sanitizer's
+unknown-id rule — the standing WRM2 subset discipline, recorded here
+so a future downgrade surprise has a name.
+
+Verification: k3 adversarial verify of the implementation returned
+SOUND-WITH-FIXES (claims 1-7 confirmed with line receipts; full suite
+independently reproduced; novice fixture intact at 8W/22L/10D). All
+three mandated fixes landed before merge: shrink guard, contested
+credit, and this ADR reconciliation.

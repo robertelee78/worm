@@ -895,6 +895,7 @@ impl WormGame {
                     self.frame_count,
                     self.death_cause,
                     space_at_death,
+                    self.shrink_level,
                 );
                 if let Some(cause) = self.death_cause {
                     let kind = match cause {
