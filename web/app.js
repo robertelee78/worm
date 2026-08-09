@@ -4,14 +4,14 @@
 // The ?v= must match BUILD below (and index.html's) — an unversioned glue
 // import could pair a cached old worm.js with a fresh wasm on the next
 // rebuild that changes the bindings.
-import init, { WasmGame } from './pkg/worm.js?v=28';
+import init, { WasmGame } from './pkg/worm.js?v=29';
 import { Sfx } from './audio.js';
 import { computeBoardLayout, VIEWPORT_BLOCK_GUTTER } from './layout.js';
 
 let CELL = 14; // recomputed by applyBoardLayout() to fit the measured stage
 // Bump together with the ?v= in index.html whenever the wasm bundle is
 // rebuilt — it keys the cache-busting query on the .wasm fetch.
-const BUILD = 28;
+const BUILD = 29;
 const MATCH_TARGET = 3;
 const STATE_SCHEMA_VERSION = 2;
 const ROUND_SCHEMA_VERSION = 1;
@@ -1372,15 +1372,10 @@ function render(s) {
     if (!s.bombs.some(([bx, by]) => `${bx},${by}` === key)) bombMaxFuse.delete(key);
   }
 
-  // The path is owned by this frame's decision, never by the separately
-  // computed next-frame forecast.
-  const decisionPath = s.brain.decision?.projection?.path || [];
-  for (let i = 0; i < decisionPath.length; i++) {
-    const [x, y] = decisionPath[i];
-    const alpha = Math.max(0.1, 0.34 - i * 0.045);
-    offCtx.fillStyle = `rgba(0, 255, 255, ${alpha})`;
-    offCtx.fillRect(x * CELL + CELL * 0.28, y * CELL + CELL * 0.28, CELL * 0.44, CELL * 0.44);
-  }
+  // The decision projection is deliberately NOT drawn on the board
+  // (owner, 2026-08-08: the predictive squares ahead of the worm read
+  // as noise). The HUD panel still narrates the projection; the arena
+  // shows only what physically exists.
 
   // NAPALM (world v9): flame patches — three flickering layers whose
   // alpha tracks remaining life; drawn under worms so a body crossing
