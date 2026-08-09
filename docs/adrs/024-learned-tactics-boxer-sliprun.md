@@ -29,16 +29,17 @@ failure modes land exactly in close human play):
   including the previously invisible "the CPU died trying" — the warm
   inversion's blind spot (warm 68% vs cold 88% with accurate reads).
   Conversion-gated hunting (F2c) stays OWNER-GATED pending this data.
-- DWELL BREAKER (RCA F2b, the ADR-012 §6 corner attractor): the memory
-  vote yields after 24 same-region votes, cooldown 48, releasing only
-  on material improvement (>=1.5x wall-follow) or a shrink change.
-  SIEGE EXEMPTION (same day, A/B receipted): pressure (player within
-  10 cells) suspends the breaker and releases an armed cooldown — a
-  boxed worm hammering its one escape region is fighting, not
-  dwelling; with the breaker armed under siege an adversarial bot went
-  14-0-1 with instant trail kills, with it suspended the CPU won 3
-  rounds on its learned bait. The passive orbit the breaker targets
-  only occurs unpressured.
+- DWELL BREAKER (RCA F2b): WITHDRAWN same day on adversarial
+  receipts. Built from the audit's single 315-frame dwell anecdote,
+  every variant (always-armed, siege-exempt <=10, siege-exempt <=14)
+  zeroed the CPU against an adversarial goal-driven bot — pooled 1 CPU
+  win in 45 rounds armed vs 3-in-15 with the breaker off, the off-arm
+  matching pre-RCA form (its bait-mine wins). A memory vote hammering
+  one region is indistinguishable from a fight for survival at this
+  layer, and the benefit was never demonstrated live. The ADR-012 §6
+  passive-orbit pathology returns to the backlog gated on engagement-
+  ledger instrumentation (which can now measure real dwell episodes
+  before any future behavior change).
 
 ## Date
 2026-08-08

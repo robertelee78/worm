@@ -1647,19 +1647,6 @@ pub struct CpuBrain {
     /// Boxer start has been used. Reset at the round boundary.
     #[serde(skip)]
     pub boxer_probe_used: bool,
-    /// RCA F2(b) dwell breaker (the ADR-012 §6 corner-dwell pathology,
-    /// cold 15.1% vs warm 41.4% near-wall): region the memory vote keeps
-    /// re-entering, how long it has, cooldown remaining, and the shrink
-    /// level when the breaker tripped (a ring change releases it — late
-    /// game the corner is sometimes the only safe pocket). All transient.
-    #[serde(skip)]
-    pub dwell_region: Option<(u16, u16)>,
-    #[serde(skip)]
-    pub dwell_frames: u32,
-    #[serde(skip)]
-    pub dwell_cooldown: u32,
-    #[serde(skip)]
-    pub dwell_shrink: u16,
     /// Self-knowledge instrumentation (ADR-021 Kata 0). Persisted in its
     /// own sections; recording-only until later katas activate readers.
     #[serde(skip)]
@@ -2675,10 +2662,6 @@ impl Default for CpuBrain {
             tactic_boxer_ok: true,
             boxer_hold: 0,
             boxer_probe_used: false,
-            dwell_region: None,
-            dwell_frames: 0,
-            dwell_cooldown: 0,
-            dwell_shrink: 0,
             region_ring: std::collections::VecDeque::new(),
             ledgers: LearningLedgers::default(),
             pending_book: None,
@@ -5052,67 +5035,6 @@ fn boxer_choke_candidate(
     }
 }
 
-/// RCA F2(b): the memory-vote dwell breaker. The self-deepening corner
-/// attractor (recall re-enters the same region every frame, each dwell
-/// frame recording a fresh episode that deepens the recall) is broken by
-/// a no-progress trip: the same quantized region voted for more than
-/// DWELL_TRIP_FRAMES arms a cooldown during which the vote yields to the
-/// base policy. Release comes ONLY from the two clauses both consultants
-/// ruled (k3 shape): the vote's destination materially beating
-/// wall-follow, or a shrink-level change — because late-game the corner
-/// is sometimes the only safe pocket, and a breaker without those
-/// releases trades "sit and spin" for "flees the last shelter".
-pub const DWELL_TRIP_FRAMES: u32 = 24;
-pub const DWELL_COOLDOWN_FRAMES: u32 = 48;
-pub const DWELL_RELEASE_RATIO: f32 = 1.5;
-
-impl CpuBrain {
-    pub fn dwell_breaker_allows(
-        &mut self,
-        region: (u16, u16),
-        vote_open: f32,
-        wall_open: f32,
-        shrink: u16,
-        pressured: bool,
-    ) -> bool {
-        // SIEGE EXEMPTION (A/B receipt, 2026-08-09): a boxed worm
-        // hammering its one escape region is FIGHTING, not dwelling —
-        // with the breaker armed under pressure the adversarial bot went
-        // 14-0-1 with instant trail kills; with it suspended the CPU won
-        // 3 rounds on its learned bait and my kills had to become laser
-        // shots. The ADR-012 §6 pathology this breaker targets is the
-        // PASSIVE warm near-wall orbit, which only happens unpressured.
-        if pressured {
-            self.dwell_cooldown = 0;
-            self.dwell_frames = 0;
-            self.dwell_region = None;
-            return true;
-        }
-        if self.dwell_region == Some(region) {
-            self.dwell_frames += 1;
-        } else {
-            self.dwell_region = Some(region);
-            self.dwell_frames = 1;
-        }
-        if self.dwell_cooldown > 0 {
-            let materially_better = vote_open >= wall_open * DWELL_RELEASE_RATIO;
-            if materially_better || shrink != self.dwell_shrink {
-                self.dwell_cooldown = 0;
-                self.dwell_frames = 1;
-                return true;
-            }
-            self.dwell_cooldown -= 1;
-            return false;
-        }
-        if self.dwell_frames > DWELL_TRIP_FRAMES {
-            self.dwell_cooldown = DWELL_COOLDOWN_FRAMES;
-            self.dwell_shrink = shrink;
-            return false;
-        }
-        true
-    }
-}
-
 pub fn step_enters_corridor(game: &WormGame, who: usize, d: Direction) -> bool {
     if game.arena_version < 4 || !game.has_corridor() || game.cycle_in_corridor(who) {
         return false;
@@ -6877,27 +6799,7 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
                     && vote_open >= wall_open
                     && vote_open >= MEMORY_VOTE_MIN_OPEN
                 {
-                    // RCA F2(b): the dwell breaker gets the last word —
-                    // a vote that keeps re-entering the same region is
-                    // the ADR-012 §6 attractor, not a preference.
-                    let region = (nx / 6, ny / 6);
-                    let shrink = game.shrink_level;
-                    let pressured = {
-                        // Pressure = within the engine's own boxing-
-                        // relevance radius (the Manhattan-14 prune in
-                        // boxer_choke_candidate): a box is being BUILT
-                        // from that range, and take-7's receipts showed
-                        // sieges forming at 11-14 with the breaker armed.
-                        let (phx, phy) = game.cycles[0].head;
-                        game.cycles[0].alive
-                            && (phx as i32 - cx as i32).abs() + (phy as i32 - cy as i32).abs() <= 14
-                    };
-                    if game
-                        .cpu_brain
-                        .dwell_breaker_allows(region, vote_open, wall_open, shrink, pressured)
-                    {
-                        choose!(sampled, CpuDecisionReason::SurvivalMemory);
-                    }
+                    choose!(sampled, CpuDecisionReason::SurvivalMemory);
                 }
             }
         }
@@ -7557,46 +7459,6 @@ mod tests {
         l.resolve_player_death(15, Some(DC::Laser), 999.0, 0);
         let direct = l.tactic_attempts.iter().find(|e| e.0 == 0).unwrap();
         assert_eq!(direct.4, 1, "intercept credit rule unchanged");
-    }
-
-    /// RCA F2(b): the dwell breaker trips on region re-entry, holds
-    /// through the cooldown, and releases ONLY on material improvement
-    /// or a shrink change — the two ruled clauses.
-    #[test]
-    fn dwell_breaker_trips_holds_and_releases_on_the_ruled_clauses() {
-        let mut b = CpuBrain::new();
-        // Same region for TRIP frames: allowed throughout...
-        for _ in 0..DWELL_TRIP_FRAMES {
-            assert!(b.dwell_breaker_allows((3, 3), 0.10, 0.10, 0, false));
-        }
-        // ...then the breaker trips and suppresses.
-        assert!(!b.dwell_breaker_allows((3, 3), 0.10, 0.10, 0, false), "trip");
-        assert!(!b.dwell_breaker_allows((3, 3), 0.10, 0.10, 0, false), "cooldown holds");
-        // Not released by a marginal improvement...
-        assert!(!b.dwell_breaker_allows((3, 3), 0.12, 0.10, 0, false));
-        // ...but released by MATERIAL improvement (>= 1.5x wall-follow).
-        assert!(b.dwell_breaker_allows((3, 3), 0.16, 0.10, 0, false), "material release");
-        // Trip again, then release on a shrink-level change.
-        for _ in 0..=DWELL_TRIP_FRAMES {
-            b.dwell_breaker_allows((3, 3), 0.10, 0.10, 0, false);
-        }
-        assert!(!b.dwell_breaker_allows((3, 3), 0.10, 0.10, 0, false), "re-tripped");
-        assert!(b.dwell_breaker_allows((3, 3), 0.10, 0.10, 1, false), "ring change releases");
-        // A region change resets the count entirely.
-        let mut b = CpuBrain::new();
-        for _ in 0..DWELL_TRIP_FRAMES {
-            assert!(b.dwell_breaker_allows((3, 3), 0.10, 0.10, 0, false));
-        }
-        assert!(b.dwell_breaker_allows((9, 9), 0.10, 0.10, 0, false), "new region, fresh count");
-        // SIEGE EXEMPTION: pressure suspends the breaker AND releases an
-        // armed cooldown — a besieged worm keeps its memory.
-        let mut b = CpuBrain::new();
-        for _ in 0..=DWELL_TRIP_FRAMES {
-            b.dwell_breaker_allows((3, 3), 0.10, 0.10, 0, false);
-        }
-        assert!(!b.dwell_breaker_allows((3, 3), 0.10, 0.10, 0, false), "tripped unpressured");
-        assert!(b.dwell_breaker_allows((3, 3), 0.10, 0.10, 0, true), "siege releases instantly");
-        assert!(b.dwell_breaker_allows((3, 3), 0.10, 0.10, 0, true), "and stays released under pressure");
     }
 
     /// RCA F2(a): the engagement ledger records what the kill ledger
