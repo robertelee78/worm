@@ -32,6 +32,13 @@ failure modes land exactly in close human play):
 - DWELL BREAKER (RCA F2b, the ADR-012 §6 corner attractor): the memory
   vote yields after 24 same-region votes, cooldown 48, releasing only
   on material improvement (>=1.5x wall-follow) or a shrink change.
+  SIEGE EXEMPTION (same day, A/B receipted): pressure (player within
+  10 cells) suspends the breaker and releases an armed cooldown — a
+  boxed worm hammering its one escape region is fighting, not
+  dwelling; with the breaker armed under siege an adversarial bot went
+  14-0-1 with instant trail kills, with it suspended the CPU won 3
+  rounds on its learned bait. The passive orbit the breaker targets
+  only occurs unpressured.
 
 ## Date
 2026-08-08

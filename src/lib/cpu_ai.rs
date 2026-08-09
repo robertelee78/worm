@@ -5073,7 +5073,21 @@ impl CpuBrain {
         vote_open: f32,
         wall_open: f32,
         shrink: u16,
+        pressured: bool,
     ) -> bool {
+        // SIEGE EXEMPTION (A/B receipt, 2026-08-09): a boxed worm
+        // hammering its one escape region is FIGHTING, not dwelling —
+        // with the breaker armed under pressure the adversarial bot went
+        // 14-0-1 with instant trail kills; with it suspended the CPU won
+        // 3 rounds on its learned bait and my kills had to become laser
+        // shots. The ADR-012 §6 pathology this breaker targets is the
+        // PASSIVE warm near-wall orbit, which only happens unpressured.
+        if pressured {
+            self.dwell_cooldown = 0;
+            self.dwell_frames = 0;
+            self.dwell_region = None;
+            return true;
+        }
         if self.dwell_region == Some(region) {
             self.dwell_frames += 1;
         } else {
@@ -6868,9 +6882,14 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
                     // the ADR-012 §6 attractor, not a preference.
                     let region = (nx / 6, ny / 6);
                     let shrink = game.shrink_level;
+                    let pressured = {
+                        let (phx, phy) = game.cycles[0].head;
+                        game.cycles[0].alive
+                            && (phx as i32 - cx as i32).abs() + (phy as i32 - cy as i32).abs() <= 10
+                    };
                     if game
                         .cpu_brain
-                        .dwell_breaker_allows(region, vote_open, wall_open, shrink)
+                        .dwell_breaker_allows(region, vote_open, wall_open, shrink, pressured)
                     {
                         choose!(sampled, CpuDecisionReason::SurvivalMemory);
                     }
@@ -7543,27 +7562,36 @@ mod tests {
         let mut b = CpuBrain::new();
         // Same region for TRIP frames: allowed throughout...
         for _ in 0..DWELL_TRIP_FRAMES {
-            assert!(b.dwell_breaker_allows((3, 3), 0.10, 0.10, 0));
+            assert!(b.dwell_breaker_allows((3, 3), 0.10, 0.10, 0, false));
         }
         // ...then the breaker trips and suppresses.
-        assert!(!b.dwell_breaker_allows((3, 3), 0.10, 0.10, 0), "trip");
-        assert!(!b.dwell_breaker_allows((3, 3), 0.10, 0.10, 0), "cooldown holds");
+        assert!(!b.dwell_breaker_allows((3, 3), 0.10, 0.10, 0, false), "trip");
+        assert!(!b.dwell_breaker_allows((3, 3), 0.10, 0.10, 0, false), "cooldown holds");
         // Not released by a marginal improvement...
-        assert!(!b.dwell_breaker_allows((3, 3), 0.12, 0.10, 0));
+        assert!(!b.dwell_breaker_allows((3, 3), 0.12, 0.10, 0, false));
         // ...but released by MATERIAL improvement (>= 1.5x wall-follow).
-        assert!(b.dwell_breaker_allows((3, 3), 0.16, 0.10, 0), "material release");
+        assert!(b.dwell_breaker_allows((3, 3), 0.16, 0.10, 0, false), "material release");
         // Trip again, then release on a shrink-level change.
         for _ in 0..=DWELL_TRIP_FRAMES {
-            b.dwell_breaker_allows((3, 3), 0.10, 0.10, 0);
+            b.dwell_breaker_allows((3, 3), 0.10, 0.10, 0, false);
         }
-        assert!(!b.dwell_breaker_allows((3, 3), 0.10, 0.10, 0), "re-tripped");
-        assert!(b.dwell_breaker_allows((3, 3), 0.10, 0.10, 1), "ring change releases");
+        assert!(!b.dwell_breaker_allows((3, 3), 0.10, 0.10, 0, false), "re-tripped");
+        assert!(b.dwell_breaker_allows((3, 3), 0.10, 0.10, 1, false), "ring change releases");
         // A region change resets the count entirely.
         let mut b = CpuBrain::new();
         for _ in 0..DWELL_TRIP_FRAMES {
-            assert!(b.dwell_breaker_allows((3, 3), 0.10, 0.10, 0));
+            assert!(b.dwell_breaker_allows((3, 3), 0.10, 0.10, 0, false));
         }
-        assert!(b.dwell_breaker_allows((9, 9), 0.10, 0.10, 0), "new region, fresh count");
+        assert!(b.dwell_breaker_allows((9, 9), 0.10, 0.10, 0, false), "new region, fresh count");
+        // SIEGE EXEMPTION: pressure suspends the breaker AND releases an
+        // armed cooldown — a besieged worm keeps its memory.
+        let mut b = CpuBrain::new();
+        for _ in 0..=DWELL_TRIP_FRAMES {
+            b.dwell_breaker_allows((3, 3), 0.10, 0.10, 0, false);
+        }
+        assert!(!b.dwell_breaker_allows((3, 3), 0.10, 0.10, 0, false), "tripped unpressured");
+        assert!(b.dwell_breaker_allows((3, 3), 0.10, 0.10, 0, true), "siege releases instantly");
+        assert!(b.dwell_breaker_allows((3, 3), 0.10, 0.10, 0, true), "and stays released under pressure");
     }
 
     /// RCA F2(a): the engagement ledger records what the kill ledger
