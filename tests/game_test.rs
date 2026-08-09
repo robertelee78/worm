@@ -88,7 +88,9 @@ fn test_food_items_are_on_grid() {
 
 #[test]
 fn test_tail_retracts_without_food() {
-    let mut game = WormGame::with_size(120, 38);
+    // Seeded: the unseeded fixture let random food spawn in the player's
+    // path and grow the tail — a longstanding flake, surfaced 2026-08-09.
+    let mut game = WormGame::with_size_seed(120, 38, 7);
     let head = game.cycles[0].head;
     game.cycles[0].positions.clear();
     game.cycles[0].positions.push(head);
@@ -4417,4 +4419,56 @@ fn test_v12_aim_gate_counts_brush_lines() {
     };
     assert!(run(12), "v12: brush lines are real shots — take them");
     assert!(!run(11), "v11 pin: the gate matches the old physics");
+}
+
+/// RCA F1 (2026-08-09, k3+codex convergent): the tri-shot aim gate
+/// prices the shot — head targets keep full reach and gain v12 brush
+/// lines; trail targets are strict-ray only and reach-capped at 10 in
+/// the sweep era. The audit receipt behind this: 47 fires, all
+/// first-eligible-frame discharges at distant tail cells, 0 lethal.
+#[test]
+fn test_rca_trishot_gate_prices_the_shot() {
+    let stage = |version: u8, head: (u16, u16), trail: Vec<(u16, u16)>| -> bool {
+        let mut game = WormGame::with_size(120, 38);
+        game.set_world_version(version);
+        game.cpu_autopilot = false;
+        game.food_items.clear();
+        game.cycles[1].head = (10, 10);
+        game.cycles[1].direction = worm::Direction::Right;
+        game.cycles[1].positions = vec![(10, 10)];
+        game.grid[10][10] = worm::CellType::CPU;
+        game.cycles[1].held_powerup = Some(worm::game::PowerUpKind::TriShot);
+        game.cycles[0].head = head;
+        let mut pos = vec![head];
+        pos.extend(trail.iter().copied());
+        game.cycles[0].positions = pos.clone();
+        for &(x, y) in &pos {
+            game.grid[y as usize][x as usize] = worm::CellType::Player;
+        }
+        worm::cpu_ai::should_fire(&mut game, 1)
+    };
+
+    // Head on a brush line (fdx=4, fdy=-3): fires at v12.
+    assert!(stage(12, (14, 7), vec![]), "head brush is a real v12 shot");
+    // TRAIL cell on the same brush line, head far off any ray: no fire.
+    assert!(
+        !stage(12, (60, 30), vec![(14, 7)]),
+        "trail cells never earn a brush shot"
+    );
+    // Trail on a strict diagonal ray within the 10-cell band: fires.
+    assert!(
+        stage(12, (60, 30), vec![(16, 4)]),
+        "close strict-ray trail sever is legitimate pressure"
+    );
+    // Same strict diagonal ray ((1,1) from (10,10)), 25 cells out:
+    // refused in the sweep era.
+    assert!(
+        !stage(12, (60, 30), vec![(35, 35)]),
+        "a sever 25 cells away targets a tail that will not exist"
+    );
+    // v11 pin: the old unbounded trail ray still fires (policy history).
+    assert!(
+        stage(11, (60, 30), vec![(35, 35)]),
+        "v11 gate unchanged for its era"
+    );
 }

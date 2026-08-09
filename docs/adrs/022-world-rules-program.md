@@ -19,7 +19,17 @@ under-lethality and either-wall-stop kills bolts in exactly the
 wall-adjacent fights that matter; one-line flip if it plays wrong). No
 diagonal swap analogue (arithmetically impossible at manhattan-2
 substeps). The CPU aim gate counts corner-brush lines (|fdx|-|fdy| = ±1)
-at v12 — the gate is the bolt's actual reach per world version. 5/3/1
+at v12 — the gate is the bolt's actual reach per world version.
+AIM-POLICY AMENDMENT (2026-08-09 RCA, k3+codex convergent; audit
+receipt 47 fires / 0 lethal, all first-eligible-frame discharges at
+distant tail cells): the gate now PRICES the shot — brush lines count
+only the player's HEAD (a head brush is a genuine kill shot; head
+reach stays unbounded per the v11 owner directive), trail cells are
+strict-ray only and reach-capped at 10 in the sweep era (a distant
+sever targets a tail that has retracted before the bolt arrives). No
+version/replay guard: ghost replays consume recorded fire events and
+never re-run should_fire (verified at the replay pump). v11 aim
+behavior pinned unchanged for its era. 5/3/1
 untouched (the probes isolated acquisition, not damage). Gated on
 trishot_corner_sweep() (world-rules view); v1-v11 replays bit-exact.
 Contract tests: brush catch + v11 tunnel pin, deterministic impact

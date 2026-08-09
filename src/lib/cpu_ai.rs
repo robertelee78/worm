@@ -5844,14 +5844,18 @@ pub fn should_fire(game: &mut WormGame, who: usize) -> bool {
             // forward diagonals — so alignment, not distance, decides whether
             // a shot can land.
             //
-            // The old test was `manhattan <= TRI_SHOT_RANGE && forward`, an
-            // ARC. Most of the arc is unhittable, and now that bolts fly until
-            // a wall a distance gate would also refuse exactly the long
-            // straight shots that make the unbounded bolt worth having.
-            //
-            // Since a bolt bursts on ANY part of the opponent (head kill,
-            // trail sever), every opponent cell on a ray is a target — a shot
-            // across their body is a sever even when their head is elsewhere.
+            // SHOT SELECTION (RCA 2026-08-09, k3+codex convergent): the
+            // audit's 47-fires-0-kills receipt exposed two stacked
+            // generosities — any trail cell at unbounded reach (v11) plus
+            // the v12 brush widening applied to trails — that made the CPU
+            // dump its shot at distant tail cells that retract before the
+            // bolt arrives. The gate now prices the shot:
+            //  - HEAD targets: full reach, aligned OR corner-brush lines
+            //    (a head brush is a genuine v12 kill shot, and unbounded
+            //    head reach is the owner's v11 "go further" directive).
+            //  - TRAIL targets: strict aligned rays only, and in the sweep
+            //    era capped at 10 cells (the DirectIntercept contact band)
+            //    — a sever 40 cells away hits a tail that no longer exists.
             let (dx, dy) = game.cycles[who].direction.as_delta();
             // The aim gate is the bolt's ACTUAL reach per world version:
             // v9/v10 napalm flew 4 cells; v11 restored the full ray at
@@ -5862,21 +5866,23 @@ pub fn should_fire(game: &mut WormGame, who: usize) -> bool {
                 i16::MAX
             };
             let sweep = game.trishot_corner_sweep();
-            let on_a_ray = move |px: u16, py: u16| -> bool {
+            let trail_reach: i16 = if sweep { max_reach.min(10) } else { max_reach };
+            let on_a_ray = move |px: u16, py: u16, is_head: bool| -> bool {
                 let fdx = px as i16 - hx as i16;
                 let fdy = py as i16 - hy as i16;
                 let forward = dx * fdx + dy * fdy > 0;
                 let aligned = fdx == 0 || fdy == 0 || fdx.abs() == fdy.abs();
-                // World v12: the supercover sweep makes corner-brush
-                // lines (one off a diagonal) genuinely hittable — the
-                // aim gate is "the bolt's ACTUAL reach per world
-                // version", so it moves with the physics or the CPU
-                // refuses exactly the shots the fix creates.
-                let brush = sweep && fdx != 0 && fdy != 0 && (fdx.abs() - fdy.abs()).abs() == 1;
-                let reach = fdx.abs().max(fdy.abs()) <= max_reach;
+                // World v12: the supercover sweep makes corner-brush lines
+                // (one off a diagonal) genuinely hittable — but only the
+                // HEAD is worth a brush shot (see the selection note above).
+                let brush =
+                    is_head && sweep && fdx != 0 && fdy != 0 && (fdx.abs() - fdy.abs()).abs() == 1;
+                let reach_cap = if is_head { max_reach } else { trail_reach };
+                let reach = fdx.abs().max(fdy.abs()) <= reach_cap;
                 forward && (aligned || brush) && reach
             };
-            on_a_ray(ox, oy) || game.cycles[opp].positions.iter().any(|&(px, py)| on_a_ray(px, py))
+            on_a_ray(ox, oy, true)
+                || game.cycles[opp].positions.iter().skip(1).any(|&(px, py)| on_a_ray(px, py, false))
         }
         crate::game::PowerUpKind::Bomb => {
             // A mine is PLACED, not aimed, so proximity is the wrong question.
