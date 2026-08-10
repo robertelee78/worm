@@ -179,6 +179,7 @@ body {
 .bp-accfill { height: 100%; width: 0%; background: var(--green); box-shadow: 0 0 8px var(--green); transition: width 0.2s; }
 .bp-driver { margin-bottom: 10px; font-size: 18px; }
 .bp-action { margin: -6px 0 10px; color: var(--amber); font-size: 16px; }
+.bp-exploit { margin: -4px 0 10px; color: #ff5d5d; font-size: 15px; font-weight: bold; }
 .bp-driver-wrap.flash { animation: drvflash 0.7s; }
 @keyframes drvflash {
   0% { color: var(--amber); text-shadow: 0 0 14px var(--amber); }

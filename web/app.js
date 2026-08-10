@@ -4,14 +4,14 @@
 // The ?v= must match BUILD below (and index.html's) — an unversioned glue
 // import could pair a cached old worm.js with a fresh wasm on the next
 // rebuild that changes the bindings.
-import init, { WasmGame } from './pkg/worm.js?v=45';
+import init, { WasmGame } from './pkg/worm.js?v=46';
 import { Sfx } from './audio.js';
 import { computeBoardLayout, VIEWPORT_BLOCK_GUTTER } from './layout.js';
 
 let CELL = 14; // recomputed by applyBoardLayout() to fit the measured stage
 // Bump together with the ?v= in index.html whenever the wasm bundle is
 // rebuilt — it keys the cache-busting query on the .wasm fetch.
-const BUILD = 45;
+const BUILD = 46;
 const MATCH_TARGET = 3;
 const STATE_SCHEMA_VERSION = 2;
 const ROUND_SCHEMA_VERSION = 1;
@@ -888,6 +888,21 @@ function hud(s) {
   document.getElementById('bp-action').textContent = displayedDecision
     ? `${decisionAge}${displayedDecision.reason} ${DIR_GLYPH[displayedDecision.heading]}${decisionEvidence}`
     : 'no CPU decision this frame';
+
+  // F3 LearnedExploit receipt (ADR-026): the signature punish, narrated
+  // AFTER the action — what it knew, what it bet, what it did. Held on
+  // screen ~6s so the causality lands.
+  {
+    const ex = state.brain.learnedExploit;
+    const el = document.getElementById('bp-exploit');
+    if (el) {
+      const fresh = ex && state.brain.frame - ex.frame < 180;
+      el.classList.toggle('hidden', !fresh);
+      if (fresh) {
+        el.textContent = `⚡ it read you: ${ex.cue} — you ${ex.prediction} — ${ex.counter}`;
+      }
+    }
+  }
 
   // Per-model forecast, effective selection score, and current-round hit rate.
   for (let i = 0; i < modelRows.length; i++) {

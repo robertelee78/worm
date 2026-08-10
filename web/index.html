@@ -12,7 +12,7 @@
      upgrades to VT323 if/when the font arrives. -->
 <link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
 <noscript><link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet"></noscript>
-<link rel="stylesheet" href="styles.css">
+<link rel="stylesheet" href="styles.css?v=46">
 </head>
 <body>
 
@@ -89,6 +89,7 @@
       <div class="bp-bar"><div class="bp-confill" id="bp-conf"></div></div>
       <div class="bp-driver" id="bp-driver-wrap">Next forecast source: <span id="bp-driver">—</span></div>
       <div class="bp-action">CPU action: <span id="bp-action">opening scan</span></div>
+      <div id="bp-exploit" class="bp-exploit hidden"></div>
       <div class="bp-models" id="bp-models"></div>
       <div class="bp-warm" id="bp-warm"></div>
       <div class="bp-mem" id="bp-mem"></div>
@@ -123,6 +124,6 @@
   <span class="dim">device <span id="device-id">…</span> — your CPU brain lives in this browser (IndexedDB), it only learns <em>you</em>. Finished rounds (your moves + the board seed, nothing else) are sent to the arcade owner to make the CPU smarter.</span>
 </footer>
 
-<script type="module" src="app.js?v=45"></script>
+<script type="module" src="app.js?v=46"></script>
 </body>
 </html>
