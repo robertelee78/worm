@@ -6956,11 +6956,77 @@ pub fn wall_follow_decide(game: &WormGame, cpu: &LightCycle) -> Direction {
         .map(|(_, b)| *b)
         .unwrap_or(current_dir);
 
+    // ANTI-SPIRAL (2026-08-09; coil-probe receipts: under menace pressure
+    // 2.7% of frames are spent hugging its OWN TRAIL and 4 of 30 rounds
+    // ended as self-trail deaths; the owner watched it "go around and
+    // around"): right-hand following is correct along WALLS, but when
+    // the hand rests on the CPU's own trail the same rule winds it
+    // inward around its own body. When hugging itself, take the legal
+    // option with the MOST open space instead — the outside of a coil
+    // always has more room than the inside, so this unwinds; along real
+    // walls the hand cell is Wall, not trail, and nothing changes.
+    // Either hand counts: a right-preferring follower winds CLOCKWISE
+    // with its previous lap on its LEFT hand (the center it is spiraling
+    // toward sits to the right) — checking only the trailing hand missed
+    // every coil in the probe.
+    let hugging_self = [right_dir, left_dir].iter().any(|d| {
+        let (dx, dy) = d.as_delta();
+        let hand = (head.0 as i16 + dx, head.1 as i16 + dy);
+        cpu.positions
+            .iter()
+            .skip(2)
+            .any(|&(x, y)| (x as i16, y as i16) == hand)
+    });
+    if hugging_self {
+        let mut best: Option<Direction> = None;
+        let mut best_open = -1.0f32;
+        for dir in [right_dir, current_dir, left_dir] {
+            if free_step(game, head.0, head.1, dir) {
+                let (dx, dy) = dir.as_delta();
+                let nx = (head.0 as i16 + dx) as u16;
+                let ny = (head.1 as i16 + dy) as u16;
+                let open = count_open_space(game, nx, ny);
+                if open > best_open {
+                    best_open = open;
+                    best = Some(dir);
+                }
+            }
+        }
+        if let Some(d) = best {
+            return d;
+        }
+    }
+
+    // CORNER TRACKING (2026-08-09; loop-probe receipt: 13.8% of ALL
+    // frames were spent circling inside an 8x8 box, 3741 of them under
+    // this function's label — a "wall follower" that turns right
+    // whenever right is FREE is, in open space, just a circler). The
+    // right-hand rule turns right only when actually ROUNDING A CORNER:
+    // the cell diagonally right-behind is solid (the wall the hand was
+    // on). In free space the preference is straight — drive until a
+    // wall exists, then follow it.
+    let rounding_corner = {
+        let (rdx, rdy) = right_dir.as_delta();
+        let (bdx, bdy) = back_dir.as_delta();
+        let x = head.0 as i16 + rdx + bdx;
+        let y = head.1 as i16 + rdy + bdy;
+        x < 0
+            || y < 0
+            || x >= game.width as i16
+            || y >= game.height as i16
+            || !game.passable(x as u16, y as u16)
+    };
+    let order = if rounding_corner {
+        [right_dir, current_dir, left_dir, back_dir]
+    } else {
+        [current_dir, right_dir, left_dir, back_dir]
+    };
+
     // Use the same legality predicate as physics (passable via free_step):
     // the old Empty-only check refused to step onto food, punched holes and
     // power-ups, and its coordinate clamping aliased out-of-bounds steps to
     // the head's own cell.
-    for dir in [right_dir, current_dir, left_dir, back_dir] {
+    for dir in order {
         if free_step(game, head.0, head.1, dir) {
             return dir;
         }
