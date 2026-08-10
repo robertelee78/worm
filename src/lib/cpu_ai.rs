@@ -5916,6 +5916,19 @@ pub fn should_fire(game: &mut WormGame, who: usize) -> bool {
     if !game.cycles[opp].alive {
         return false;
     }
+    // ADR-018 amendment 2026-08-10 (boldness reallocation): an UNREAD CPU
+    // holds its weapons. With trail blindness gone the beatable opening
+    // must live in unread restraint, and the novice probe measured 13/40
+    // first-timer deaths to CPU lasers and mines. Trigger DISCIPLINE
+    // scales with the read (precedent: dozed frames never fire); aiming
+    // skill is untouched (owner R3: "aiming is a basic") — once sharp,
+    // every shot below is exactly as lethal as before. The doze cadence
+    // (open_k > 1) is the same wits gate the doze itself uses. The
+    // ESCAPE BREACH stays available at any sharpness — an enveloped worm
+    // cutting itself an exit is survival basics, not aggression.
+    if who == 1 && game.discipline_sharpness() < 0.5 && !game.cpu_enveloped() {
+        return false;
+    }
     let (hx, hy) = game.cycles[who].head;
     let (ox, oy) = game.cycles[opp].head;
 
@@ -6520,7 +6533,21 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
             // layer declined and the k-NN below wandered off instead.
             // Honesty is preserved by labelling the coincidence, not by
             // forfeiting the food.
-            if food_open >= escape_cells {
+            // ADR-018 amendment 2026-08-10 (boldness reallocation): UNREAD
+            // GREED. While unsharp, the CPU eats like the casual player it
+            // is modeling — it accepts a food destination at roughly half
+            // the survival floor. It sees everything (no blindness) but
+            // misjudges commitment the way greedy humans do: sometimes the
+            // pocket it dove into seals behind it. That enclosure is the
+            // honest, baitable mistake the beatable opening now offers,
+            // replacing the retired trail-blind faceplants. Sharp play is
+            // untouched: with the read earned the full floor returns.
+            let greed_floor = if game.discipline_sharpness() < 0.5 {
+                escape_cells * 0.45
+            } else {
+                escape_cells
+            };
+            if food_open >= greed_floor {
                 let reason = if food_dir == wall_dir {
                     CpuDecisionReason::WallFollow
                 } else {
@@ -8528,6 +8555,16 @@ mod tests {
     #[test]
     fn tri_shot_needs_forward_arc() {
         let mut game = WormGame::with_size(120, 38);
+        // ADR-018 2026-08-10: an UNREAD CPU holds its weapons. This is a
+        // geometry fixture — warm the brain past the discipline gate so
+        // the aim-arc contracts stay the thing under test.
+        game.cpu_brain.lifetime_read.lat_samples = 100;
+        game.cpu_brain.lifetime_read.lat_hits = 90;
+        game.cpu_brain.lifetime_read.lat_chance = 50.0;
+        game.cpu_brain.lifetime_read.lat_var = 25.0;
+        game.cpu_brain.lifetime_read.lat_latched = true;
+        game.refresh_read_rate();
+        assert_eq!(game.discipline_sharpness(), 1.0);
         game.cycles[1].head = (30, 20);
         game.cycles[1].direction = Direction::Right;
         game.cycles[1].held_powerup = Some(crate::game::PowerUpKind::TriShot);

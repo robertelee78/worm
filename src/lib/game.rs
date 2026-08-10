@@ -491,6 +491,18 @@ pub struct WormGame {
     pub cpu_history: Vec<CPUPlayRecord>,
     pub cpu_brain: crate::cpu_ai::CpuBrain,
     pub frames_since_cpu_move: u32,
+    /// Frame of the CPU's last REAL decision (not dozed, slip-lagged, or
+    /// frozen). Anchors the decision-relative trail-novelty wake (ADR-018
+    /// as amended 2026-08-10): an enemy trail cell laid AFTER this frame
+    /// appeared during the attention lapse and stays invisible — the
+    /// earned mid-chase cut. Anything already standing when the CPU last
+    /// chose is known scenery and wakes it like a wall. Transient:
+    /// rebuilt by simulation, never persisted.
+    pub last_cpu_decision_frame: u32,
+    /// Frame each cell (y*width+x) last became PLAYER trail. Consulted
+    /// only where the grid still says Player, so severed cells can't go
+    /// stale. Transient, replay-safe.
+    pub player_trail_laid: Vec<u32>,
     /// Live power-ups on the board: (x, y, kind). Mirrors food_items.
     pub powerups: Vec<(u16, u16, PowerUpKind)>,
     /// Live tri-shot bolts in flight.
@@ -819,6 +831,8 @@ impl WormGame {
             cpu_history: Vec::new(),
             cpu_brain: crate::cpu_ai::CpuBrain::new(),
             frames_since_cpu_move: 0,
+            last_cpu_decision_frame: 0,
+            player_trail_laid: vec![0; width as usize * height as usize],
             powerups: Vec::new(),
             projectiles: Vec::new(),
             bombs: Vec::new(),
@@ -1743,9 +1757,23 @@ impl WormGame {
                 true, // a death is always an informative frame
             );
             // What killed the player: bomb cell, wall, own trail, or CPU trail.
+            // Driving off the board clamps the destination back onto the
+            // boundary cell — usually the worm's own head marker — so the
+            // OOB case must classify as Wall BEFORE the grid is consulted,
+            // or edge deaths masquerade as OwnTrail/BombBlast (probe-audit
+            // finding, 2026-08-10).
             if self.death_cause.is_none() {
+                let (dx, dy) = self.cycles[self.player].direction.as_delta();
+                let rx = self.cycles[self.player].head.0 as i16 + dx;
+                let ry = self.cycles[self.player].head.1 as i16 + dy;
+                let oob = rx < 0
+                    || ry < 0
+                    || rx >= self.width as i16
+                    || ry >= self.height as i16;
                 self.death_cause = Some(
-                    if self
+                    if oob {
+                        DeathCause::Wall
+                    } else if self
                         .bombs
                         .iter()
                         .any(|b| b.x == player_new.0 && b.y == player_new.1)
@@ -1891,6 +1919,9 @@ impl WormGame {
                 cycle.pending_growth -= 1;
             }
             self.grid[player_new.1 as usize][player_new.0 as usize] = CellType::Player;
+            let idx =
+                player_new.1 as usize * self.width as usize + player_new.0 as usize;
+            self.player_trail_laid[idx] = self.frame_count;
         }
 
         // Player power-up pickup (grid cell gets overwritten by the head marker below,
@@ -2231,10 +2262,45 @@ impl WormGame {
                 self.food_items.iter().any(|&(fx, fy, _)| near(fx, fy))
                     || self.powerups.iter().any(|&(px, py, _)| near(px, py))
             };
+            // ADR-018 amendment (2026-08-10, owner: "runs into itself and
+            // the opponent more than expected"; codex + k3 convergent):
+            // - OWN trail ahead ALWAYS wakes — strict self-knowledge, the
+            //   own-mine rationale with even more force: it laid every cell
+            //   of itself this round. Post-fix, dying on own trail requires
+            //   an enclosure (no legal exit), never blindness.
+            // - The opponent's live HEAD ahead wakes — seeing a body coming
+            //   is a basic reflex, not a read.
+            // - ENEMY trail ahead wakes IFF it is KNOWN SCENERY: the cell
+            //   already stood at the CPU's last real decision (decision-
+            //   relative novelty — parameter-free, and it dissolves at full
+            //   sharpness where decisions run every frame). A cell laid
+            //   DURING the lapse stays invisible: the player whipping
+            //   across a committed heading inside the CPU's reaction window
+            //   remains the classic earned Tron kill (owner: "fair
+            //   enough"). Humans with full board vision die to exactly
+            //   this and nothing else; so should the dozing CPU.
+            let in_bounds = nx >= 0
+                && ny >= 0
+                && nx < self.width as i16
+                && ny < self.height as i16;
+            let own_trail_ahead = in_bounds
+                && self.grid[ny as usize][nx as usize] == CellType::CPU;
+            let player_head_ahead = in_bounds
+                && self.cycles[0].alive
+                && (nx as u16, ny as u16) == self.cycles[0].head;
+            let known_enemy_trail_ahead = in_bounds
+                && !player_head_ahead
+                && self.grid[ny as usize][nx as usize] == CellType::Player
+                && self.player_trail_laid
+                    [ny as usize * self.width as usize + nx as usize]
+                    <= self.last_cpu_decision_frame;
             !wall_ahead
                 && !own_mine_ahead
                 && !pocket_ahead
                 && !food_beside
+                && !own_trail_ahead
+                && !player_head_ahead
+                && !known_enemy_trail_ahead
                 && !crate::cpu_ai::ring_doomed_step(self, cy.head, cy.direction)
         };
         let cpu_dir = if cpu_frozen {
@@ -2244,6 +2310,10 @@ impl WormGame {
             // Attention lapse: hold the heading, no decisions, no firing.
             self.cycles[1].direction
         } else if self.cpu_autopilot {
+            // A REAL decision frame: anchor the trail-novelty wake here.
+            // Trail laid at or before this frame is known scenery from now
+            // on; only what appears after it can earn the mid-lapse kill.
+            self.last_cpu_decision_frame = self.frame_count;
             // The CPU fires a held power-up when the heuristic sees a good
             // shot — SAME-FRAME, symmetric with the player (ADR-025, owner:
             // "we don't need the dodge asymmetry at all"; the old
@@ -2369,8 +2439,19 @@ impl WormGame {
         // CPU collision
         if cpu_crashed {
             if self.death_cause.is_none() {
+                // Same OOB-clamp misclassification guard as the player's
+                // death site above.
+                let (dx, dy) = self.cycles[1].direction.as_delta();
+                let rx = self.cycles[1].head.0 as i16 + dx;
+                let ry = self.cycles[1].head.1 as i16 + dy;
+                let oob = rx < 0
+                    || ry < 0
+                    || rx >= self.width as i16
+                    || ry >= self.height as i16;
                 self.death_cause = Some(
-                    if self
+                    if oob {
+                        DeathCause::Wall
+                    } else if self
                         .bombs
                         .iter()
                         .any(|b| b.x == cpu_new.0 && b.y == cpu_new.1)
@@ -2971,6 +3052,9 @@ impl WormGame {
         // so the CPU starts the new game with experience. Only reset the
         // CPU-sequence timer that gates recording (frames_since_cpu_move).
         self.frames_since_cpu_move = 0;
+        self.last_cpu_decision_frame = 0;
+        self.player_trail_laid =
+            vec![0; self.width as usize * self.height as usize];
         // rps-ai wipes its per-game record each game: ensemble model scores are
         // per-game (responsive), the k-NN memory beneath persists (the corpus).
         self.cpu_brain.ensemble.reset_scores();

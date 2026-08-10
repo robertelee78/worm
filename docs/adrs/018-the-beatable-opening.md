@@ -3,6 +3,72 @@
 ## Status
 Implemented (refined after owner play-test)
 
+AMENDED 2026-08-10 (trail blindness ends; the lapse remains): the
+2026-08-06 "stay TRAIL-BLIND" refinement below is superseded. Owner
+reports from the arc video ("the cpu is kind of stupid in the 1st few
+rounds -- runs into itself and the opponent more than expected";
+"running into your own tail seems pretty silly"), grounded by a probe
+and two convergent consults (codex + k3):
+- OWN trail one cell ahead ALWAYS wakes the doze — strict self-
+  knowledge, the own-mine rationale with more force (it laid every
+  cell of itself this round). Post-fix an own-trail death requires an
+  enclosure (no survivable option), never blindness. Probe receipt:
+  the one residual OwnTrail death happened on a decided frame
+  (decided=true — the CPU was awake and chose it, which cpu_decide
+  does only under enclosure pressure), not on a doze coast.
+- The opponent's live HEAD one cell ahead wakes — seeing a body coming
+  is a basic reflex, not a read.
+- ENEMY trail one cell ahead wakes IFF it is KNOWN SCENERY under
+  DECISION-RELATIVE NOVELTY (codex): the cell already stood at the
+  CPU's last real decision (last_cpu_decision_frame). A cell laid
+  DURING the lapse stays invisible — the player whipping across a
+  committed heading inside the CPU's reaction window remains the
+  earned Tron kill (owner: "fair enough"). Parameter-free, and it
+  dissolves at full sharpness where decisions run every frame. This
+  is the human model the owner articulated: full board vision, finite
+  reaction time — you die to the cut you couldn't react to, never to
+  furniture you could see.
+- Death-classification fix (probe audit, codex): driving off the board
+  clamps the destination onto the boundary cell — usually the worm's
+  own head marker — and misclassified edge deaths as OwnTrail. An
+  out-of-bounds exit now classifies as Wall at both death sites.
+- BALANCE REALLOCATION (codex warning, owner: "some sort of goldilocks
+  region"): these wakes strengthen the unread CPU while novice
+  non-loss was already ~35%, below this ADR's 40-60% target. The
+  beatable-opening handicap must live in unread BOLDNESS (hunt
+  commitment, intercept aggression, opening recklessness) — never
+  again in navigation corruption. The novice fixture is the arbiter.
+  MEASURED (novice_probe 40 games, seed 11), same-day:
+  * post-wake baseline: novice 0% (was ~35%) — deaths 18 EnemyTrail,
+    8 BombBlast, 8 Wall, 5 Laser, 1 OwnTrail. An UNREAD CPU was
+    executing first-timers with lasers and mines.
+  * UNREAD TRIGGER DISCIPLINE landed: should_fire holds every weapon
+    while discipline_sharpness < 0.5 except the escape breach
+    (survival, not aggression). Weapon deaths 13 -> 0; novice 5%.
+    Aiming skill untouched (owner R3 intact — once sharp, every shot
+    is exactly as lethal as before; precedent: dozed frames never
+    fired).
+  * UNREAD GREED landed (food destinations accepted at 0.45x the
+    survival floor while unsharp): measured INERT against the novice
+    (identical outcomes) — kept as doctrine (the honest casual-eater
+    model) with zero measured cost.
+  * open_latency default 6 -> 10 (sweep: 6=5%, 10=8%, 12=10% novice):
+    a wider reaction window is more beatable AND more casual-looking,
+    and opening rounds run ~27% longer, feeding the read histograms
+    (k3's tempo warning: sub-10s rounds starve the learning the arc
+    is supposed to show).
+  * HONEST SHORTFALL: 8-10% novice non-loss vs the 40-60% target.
+    The retired classes (stale-trail faceplants, head-on draws) were
+    the old supply; knob-tuning cannot honestly replace them. The
+    candidate mistake class is NAIVE-TRUST OVEREXTENSION — the unread
+    CPU committing to steps whose escape assumes the opponent will
+    not cut it off (the mistake every human novice makes). Queued as
+    its own kata beside the exploitation-legibility work (F3); the
+    40-60 target REMAINS OPEN, now with a named mechanism instead of
+    a hope.
+Contracts: test_doze_wakes_for_own_trail_and_player_head,
+test_doze_enemy_trail_scenery_wakes_but_fresh_cut_kills,
+test_oob_death_classifies_as_wall_not_own_trail.
 
 AMENDED 2026-08-09 (the concentration wake): the doze's wake list —
 walls, own mines, one-step pockets, the ring — gains REAL COLLECTIBLES

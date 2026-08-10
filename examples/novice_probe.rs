@@ -73,6 +73,8 @@ fn main() {
     let (mut cpu_w, mut nov_w, mut draw) = (0u32, 0u32, 0u32);
     let mut arc = String::new();
     let mut nov_frames = 0u64;
+    let mut novice_deaths: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
     for g in 0..games {
         if g > 0 {
             game.restart();
@@ -93,12 +95,23 @@ fn main() {
         }
         nov_frames += game.frame_count as u64;
         match game.winner {
-            Some(1) => { cpu_w += 1; arc.push('C'); }
+            Some(1) => {
+                cpu_w += 1;
+                arc.push('C');
+                *novice_deaths
+                    .entry(format!("{:?}", game.death_cause))
+                    .or_insert(0u32) += 1;
+            }
             Some(0) => { nov_w += 1; arc.push('n'); }
             _ => { draw += 1; arc.push('·'); }
         }
     }
     println!("arc: {} (read {:.2})", arc, game.read_rate);
+    let mut v: Vec<_> = novice_deaths.into_iter().collect();
+    v.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    for (cause, n) in v {
+        println!("  novice death: {n:3}  {cause}");
+    }
     println!(
         "NOVICE vs unread CPU: novice {} · cpu {} · draw {}  (novice wins {:.0}%)  mean round {} frames",
         nov_w,

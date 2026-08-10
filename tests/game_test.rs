@@ -658,6 +658,16 @@ fn test_opp_prediction_accuracy_tracking() {
     for _ in 0..60 {
         game.cpu_brain.remember(v, worm::Direction::Up, 1.0);
     }
+    // Latch the read so every frame is a decision frame — this fixture
+    // asserts decision telemetry on frame 6, and the doze cadence
+    // (open_latency, 6 -> 10 in the 2026-08-10 amendment) must not be
+    // what the test hinges on.
+    game.cpu_brain.lifetime_read.lat_samples = 100;
+    game.cpu_brain.lifetime_read.lat_hits = 90;
+    game.cpu_brain.lifetime_read.lat_chance = 50.0;
+    game.cpu_brain.lifetime_read.lat_var = 25.0;
+    game.cpu_brain.lifetime_read.lat_latched = true;
+    game.refresh_read_rate();
     // Player holds Right (its initial direction) in the open arena.
     for _ in 0..6 {
         game.update();
@@ -2966,6 +2976,106 @@ fn test_doze_wakes_for_own_mine_but_not_the_enemys() {
     );
 }
 
+/// ADR-018 amendment 2026-08-10 (owner: "runs into itself and the
+/// opponent more than expected"): own trail and the opponent's live head
+/// one cell ahead wake the doze — self-knowledge and the body-coming
+/// reflex are basics, not reads.
+#[test]
+fn test_doze_wakes_for_own_trail_and_player_head() {
+    let run = |setup: &dyn Fn(&mut worm::WormGame, u16, u16)| -> bool {
+        let mut game = worm::WormGame::with_size_seed(60, 30, 7);
+        game.food_items.clear();
+        game.powerups.clear();
+        assert!(game.cpu_brain.earned_snapshot == 0.0);
+        let (hx, hy) = game.cycles[1].head;
+        let (dx, dy) = game.cycles[1].direction.as_delta();
+        let (ax, ay) = ((hx as i16 + dx) as u16, (hy as i16 + dy) as u16);
+        setup(&mut game, ax, ay);
+        game.update();
+        game.cpu_telemetry.decision.is_some()
+    };
+    assert!(
+        run(&|g, ax, ay| {
+            g.grid[ay as usize][ax as usize] = worm::game::CellType::CPU;
+        }),
+        "own trail one cell ahead must wake the doze (it laid every cell of itself)"
+    );
+    assert!(
+        run(&|g, ax, ay| {
+            // The player moves before the CPU's doze check runs: place the
+            // head one step short so it LANDS on the cell ahead of the CPU.
+            let (pdx, pdy) = g.cycles[0].direction.as_delta();
+            g.cycles[0].head = ((ax as i16 - pdx) as u16, (ay as i16 - pdy) as u16);
+            g.cycles[0].positions = vec![g.cycles[0].head];
+        }),
+        "the opponent's live head one cell ahead must wake the doze (basic reflex)"
+    );
+}
+
+/// ADR-018 amendment 2026-08-10, the decision-relative novelty rule
+/// (codex consult): enemy trail that already stood at the CPU's last real
+/// decision is KNOWN SCENERY and wakes the doze; trail laid during the
+/// attention lapse stays invisible and the mid-chase cut remains the
+/// earned Tron kill (owner: "fair enough").
+#[test]
+fn test_doze_enemy_trail_scenery_wakes_but_fresh_cut_kills() {
+    let run = |laid_frame: u32| -> (bool, bool) {
+        let mut game = worm::WormGame::with_size_seed(60, 30, 7);
+        game.food_items.clear();
+        game.powerups.clear();
+        assert!(game.cpu_brain.earned_snapshot == 0.0);
+        let (hx, hy) = game.cycles[1].head;
+        let (dx, dy) = game.cycles[1].direction.as_delta();
+        let (ax, ay) = ((hx as i16 + dx) as u16, (hy as i16 + dy) as u16);
+        game.grid[ay as usize][ax as usize] = worm::game::CellType::Player;
+        game.player_trail_laid[ay as usize * game.width as usize + ax as usize] =
+            laid_frame;
+        // last_cpu_decision_frame is 0 (no decision yet): laid 0 = existed
+        // at that decision (scenery); laid 1 = appeared after it (lapse).
+        game.update();
+        (game.cpu_telemetry.decision.is_some(), game.game_over)
+    };
+    let (woke, _) = run(0);
+    assert!(
+        woke,
+        "enemy trail that stood at the last decision is scenery and must wake the doze"
+    );
+    let (woke, over) = run(1);
+    assert!(
+        !woke,
+        "enemy trail laid during the lapse must stay invisible (held heading)"
+    );
+    assert!(
+        over,
+        "the held heading must ram the fresh cut — the earned kill stays lethal"
+    );
+}
+
+/// Probe-audit finding 2026-08-10 (codex): driving off the board clamps
+/// the destination back onto the boundary — usually the worm's own head
+/// marker — and used to classify an edge death as OwnTrail. An
+/// out-of-bounds exit is a Wall death, full stop.
+#[test]
+fn test_oob_death_classifies_as_wall_not_own_trail() {
+    let mut game = worm::WormGame::with_size_seed(60, 30, 7);
+    game.food_items.clear();
+    game.powerups.clear();
+    // Externally-driven CPU (no autopilot veto): aim it straight off the
+    // left edge from the boundary column.
+    game.cpu_autopilot = false;
+    game.cycles[1].head = (0, 15);
+    game.cycles[1].direction = worm::Direction::Left;
+    game.cycles[1].positions = vec![(0, 15)];
+    game.grid[15][0] = worm::game::CellType::CPU;
+    game.update();
+    assert!(game.game_over, "driving off the edge must be fatal");
+    assert_eq!(
+        game.death_cause,
+        Some(worm::game::DeathCause::Wall),
+        "an out-of-bounds exit is a Wall death, not OwnTrail"
+    );
+}
+
 /// ADR-022 / k3 Q6: the session doze-exit latch, exercised through the
 /// REAL production sites (codex verify round: the first version wrote the
 /// latch by hand and could not fail). The latch is set only inside
@@ -3908,7 +4018,7 @@ fn test_v9_burn_completing_on_a_death_frame_is_a_draw() {
 /// open one-step dead-end pocket — and a trail DIRECTLY ahead stays
 /// invisible (the classic earned kill is untouched).
 #[test]
-fn test_v9_doze_wakes_at_a_pocket_but_stays_blind_to_trails() {
+fn test_v9_doze_wakes_at_a_pocket_and_at_scenery_trail() {
     let pocket = |version: u8| -> bool {
         let mut game = worm::WormGame::with_size_seed(60, 30, 7);
         // 2026-08-09 doze amendment: food within 4 now WAKES the doze
@@ -3935,7 +4045,11 @@ fn test_v9_doze_wakes_at_a_pocket_but_stays_blind_to_trails() {
     assert!(pocket(9), "v9: the pocket wakes the doze (a decision frame)");
     assert!(!pocket(8), "pre-v9 arms keep their recorded blindness");
 
-    // Trail DIRECTLY ahead: still invisible to the doze.
+    // Trail DIRECTLY ahead: under the 2026-08-10 amendment this fixture's
+    // trail is KNOWN SCENERY (laid frame 0 = it already stood at the
+    // CPU's last decision) and WAKES the doze. The earned Tron kill now
+    // lives exclusively in the mid-lapse fresh cut — see
+    // test_doze_enemy_trail_scenery_wakes_but_fresh_cut_kills.
     let mut game = worm::WormGame::with_size_seed(60, 30, 7);
     game.food_items.clear();
     game.powerups.clear();
@@ -3946,9 +4060,9 @@ fn test_v9_doze_wakes_at_a_pocket_but_stays_blind_to_trails() {
         worm::CellType::Player;
     game.update();
     assert!(
-        game.cpu_telemetry.decision.is_none(),
-        "a trail one cell ahead never wakes the doze — the earned Tron \
-         kill survives the pocket rule"
+        game.cpu_telemetry.decision.is_some(),
+        "scenery trail one cell ahead wakes the doze (ADR-018 amendment \
+         2026-08-10: decision-relative novelty)"
     );
 }
 
@@ -4404,12 +4518,25 @@ fn test_v12_dest_contact_beats_brush_and_final_step_brushes() {
     assert_eq!(game.flames.iter().map(|f| (f.x, f.y)).collect::<Vec<_>>(), vec![(17, 10)]);
 }
 
+/// ADR-018 2026-08-10: an UNREAD CPU holds its weapons. The weapon-
+/// geometry fixtures latch the read so the aim contracts stay the thing
+/// under test (once sharp, every shot is exactly as lethal as before).
+fn latch_read_for_weapon_fixture(game: &mut worm::WormGame) {
+    game.cpu_brain.lifetime_read.lat_samples = 100;
+    game.cpu_brain.lifetime_read.lat_hits = 90;
+    game.cpu_brain.lifetime_read.lat_chance = 50.0;
+    game.cpu_brain.lifetime_read.lat_var = 25.0;
+    game.cpu_brain.lifetime_read.lat_latched = true;
+    game.refresh_read_rate();
+}
+
 /// v12: the CPU's aim gate counts corner-brush lines as hittable —
 /// "the bolt's ACTUAL reach per world version" — and refuses them at v11.
 #[test]
 fn test_v12_aim_gate_counts_brush_lines() {
     let run = |version: u8| -> bool {
         let mut game = WormGame::with_size(120, 38);
+        latch_read_for_weapon_fixture(&mut game);
         game.set_world_version(version);
         game.cpu_autopilot = false;
         game.food_items.clear();
@@ -4438,6 +4565,7 @@ fn test_v12_aim_gate_counts_brush_lines() {
 fn test_rca_trishot_gate_prices_the_shot() {
     let stage = |version: u8, head: (u16, u16), trail: Vec<(u16, u16)>| -> bool {
         let mut game = WormGame::with_size(120, 38);
+        latch_read_for_weapon_fixture(&mut game);
         game.set_world_version(version);
         game.cpu_autopilot = false;
         game.food_items.clear();
@@ -4528,6 +4656,7 @@ fn test_v13_burn_quota_and_head_burnthrough() {
 fn test_laser_step1_lead_geometry() {
     let stage = |pdir: worm::Direction, wall_ahead: bool| -> bool {
         let mut game = WormGame::with_size(120, 38);
+        latch_read_for_weapon_fixture(&mut game);
         for row in &mut game.grid {
             for cell in row.iter_mut() {
                 if *cell != worm::CellType::Wall {

@@ -94,7 +94,7 @@ pub fn tuning() -> &'static Tuning {
         discipline_floor: env_f32("WORM_TUNE_DISCIPLINE_FLOOR", 0.35),
         bold_spend: env_f32("WORM_TUNE_BOLD_SPEND", 0.40),
         bold_drive: env_f32("WORM_TUNE_BOLD_DRIVE", 1.0),
-        open_latency: env_f32("WORM_TUNE_OPEN_LATENCY", 6.0),
+        open_latency: env_f32("WORM_TUNE_OPEN_LATENCY", 10.0),
         laser_lead: env_f32("WORM_TUNE_LASER_LEAD", 1.0),
         // Default ON — EARNED by measurement, in two steps (ADR-014
         // discipline): with the original 64-cell aligned-boolean hazard
