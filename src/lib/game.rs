@@ -144,7 +144,6 @@ pub fn in_blast(cx: i32, cy: i32, x: i32, y: i32, arm: i32) -> bool {
     (ax <= core && ay <= core) || (ay == 0 && ax <= arm) || (ax == 0 && ay <= arm)
 }
 /// Frames the CPU's laser charges (visibly, along the beam) before firing.
-pub const LASER_TELEGRAPH_FRAMES: u32 = 10;
 /// Ricochets a beam gets before it spends its energy punching through the wall.
 pub const LASER_MAX_BOUNCES: u32 = 4;
 
@@ -341,7 +340,7 @@ impl LightCycle {
 /// of the v3 bolt-ordering fix. Same-frame deaths are atomic (both
 /// dead = draw); the firer is immune to their own beam; a frozen worm
 /// enters nothing but remains hittable at discharge.
-pub const ARENA_VERSION: u8 = 12;
+pub const ARENA_VERSION: u8 = 13;
 
 /// A collected player input (world v10): consumed in order at the
 /// frame's player phase.
@@ -574,10 +573,6 @@ pub struct WormGame {
     /// What killed the losing cycle (first lethal event wins). Shown on the
     /// game-over screen so "how did I die?" is never a mystery.
     pub death_cause: Option<DeathCause>,
-    /// Frames the CPU's laser has been visibly charging. The beam telegraphs
-    /// for LASER_TELEGRAPH_FRAMES before it fires so crossing the CPU's
-    /// firing line is dodgeable, not an unannounced instant death.
-    pub cpu_laser_charge: u32,
     /// Sudden death: how many inward wall rings have closed so far.
     pub shrink_level: u16,
 }
@@ -846,7 +841,6 @@ impl WormGame {
             cpu_telemetry: crate::cpu_ai::CpuFrameTelemetry::default(),
             round_last_cpu_decision: None,
             death_cause: None,
-            cpu_laser_charge: 0,
             shrink_level: 0,
             replay: ReplayLog::default(),
             script: None,
@@ -2251,10 +2245,12 @@ impl WormGame {
             self.cycles[1].direction
         } else if self.cpu_autopilot {
             // The CPU fires a held power-up when the heuristic sees a good
-            // shot. The laser is special-cased: it kills the same frame it
-            // fires, so it charges visibly for LASER_TELEGRAPH_FRAMES first
-            // (red embers along the beam) — crossing the CPU's firing line is
-            // dodgeable instead of an unannounced instant death.
+            // shot — SAME-FRAME, symmetric with the player (ADR-025, owner:
+            // "we don't need the dodge asymmetry at all"; the old
+            // 10-consecutive-frame hard-reset telegraph completed 2-3 fires
+            // per 90 rounds and ember-flickered the rest). Fairness lives in
+            // the ADR-023 renderer contract — exact beam cells painted the
+            // frame they exist, hit markers at hit cells — not in a charge.
             let mut wants_fire = crate::cpu_ai::should_fire(self, 1);
             // ADR-021 Kata 5 (#2): the bait book's supply-generator. The
             // geometric gate stays the incumbent; a mine the CPU has sat
@@ -2287,34 +2283,7 @@ impl WormGame {
                 // telegraph frames were being counted as fires).
                 self.cpu_brain.ledgers.note_weapon(kind, wants_fire, false);
             }
-            let holding_laser = self.cycles[1].held_powerup == Some(PowerUpKind::Laser);
-            let fire_now = if holding_laser {
-                if wants_fire {
-                    self.cpu_laser_charge += 1;
-                    let (hx, hy) = self.cycles[1].head;
-                    let (dx, dy) = self.cycles[1].direction.as_delta();
-                    let beam = self.beam_cells(hx, hy, dx, dy);
-                    for &(bx, by) in &beam {
-                        self.particles.push(Particle {
-                            x: bx as f32,
-                            y: by as f32,
-                            vx: 0.0,
-                            vy: 0.0,
-                            lifetime: 3,
-                            color: (255, 70, 70),
-                        });
-                    }
-                    self.cpu_laser_charge >= LASER_TELEGRAPH_FRAMES
-                } else {
-                    // Target left the firing line — the charge resets.
-                    self.cpu_laser_charge = 0;
-                    false
-                }
-            } else {
-                wants_fire
-            };
-            if fire_now {
-                self.cpu_laser_charge = 0;
+            if wants_fire {
                 if let Some(kind) = self.cycles[1].held_powerup {
                     self.cpu_brain.ledgers.note_weapon_fired(kind);
                 }
@@ -3035,7 +3004,6 @@ impl WormGame {
         self.seal_frames = 0;
         self.round_pred_hits = 0;
         self.round_pred_total = 0;
-        self.cpu_laser_charge = 0;
         self.shrink_level = 0;
         self.cpu_telemetry = crate::cpu_ai::CpuFrameTelemetry::default();
         self.round_last_cpu_decision = None;
@@ -3957,17 +3925,30 @@ impl WormGame {
                 }
                 continue;
             }
-            // STICKY schedule, wall-clock: up to 5 segments in the first
-            // second of contact, 3 in the second, 1 in the third.
+            // STICKY schedule, wall-clock, three tiers with floor pacing
+            // (k3 v9 verify: each tier's quota spreads across its second
+            // and COMPLETES at the boundary). World v13 (owner ruling,
+            // 2026-08-09: "make the tri-shot ~25% more effective"):
+            // 6/4/1 = 11 segments; v9-v12 replays keep 5/3/1 = 9
+            // bit-exact. Note the owner's felt gap — "no kills since
+            // napalm" — is the fixed FROM-THE-TAIL tax vs today's
+            // well-fed lengths (the old bolt severed AT the hit point);
+            // burn-through-the-head itself has always worked and is
+            // contract-tested below.
             let b = &mut self.burns[who];
             b.contact_ms = b.contact_ms.saturating_add(tick_ms);
             let t = b.contact_ms;
-            // FLOOR pacing (k3 v9 verify): each tier's quota spreads
-            // across its second and COMPLETES at the boundary — the
-            // 5th segment lands at t=1.0s, the 8th at 2.0s, the 9th at
-            // 3.0s; ceil pacing front-loaded each tier's first quantum
-            // onto the boundary tick.
-            let target = if t >= 3_000 {
+            let target = if self.arena_version >= 13 {
+                if t >= 3_000 {
+                    11
+                } else if t >= 2_000 {
+                    10 + (t - 2_000) / 1_000
+                } else if t >= 1_000 {
+                    6 + (t - 1_000) * 4 / 1_000
+                } else {
+                    t * 6 / 1_000
+                }
+            } else if t >= 3_000 {
                 9
             } else if t >= 2_000 {
                 8 + (t - 2_000) / 1_000

@@ -1,6 +1,17 @@
 # ADR-022: The World-Rules Program — Two-Lane Corridor, Timed Decoy, Napalm
 
 ## Status
+v13 (napalm quota +25%) Implemented — owner ruling 2026-08-09: "make
+the tri-shot maybe 25% more effective." Burn schedule 5/3/1 (9
+segments) -> 6/4/1 (11), same tiers and floor pacing, gated on
+arena_version >= 13; v9-v12 replays bit-exact. The owner's felt gap —
+"I've not seen a tri-shot actually kill since napalm" — is diagnosed
+in-code: the fixed from-the-tail tax cannot reach a well-fed worm's
+head (the pre-napalm bolt severed AT the hit point, position-dependent
+lethality the napalm trade removed); burn-through-the-head itself has
+always worked and is now contract-pinned (test_v13_burn_quota_and_
+head_burnthrough, both eras). Positional lethality, if wanted, is a
+future owner decision, not part of this bump.
 v12 (supercover diagonals) Implemented — owner, live v11 play: the
 tri-shot "still seems off … doesn't feel lethal … when they hit the
 opponent, no flame effect, and their tail doesn't shrink per my

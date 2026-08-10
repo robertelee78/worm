@@ -1375,9 +1375,12 @@ fn test_laser_bounces_off_arena_wall() {
 }
 
 #[test]
-fn test_cpu_laser_charges_before_firing() {
-    // The CPU's laser telegraphs for LASER_TELEGRAPH_FRAMES before firing —
-    // it must NOT kill the moment the player crosses the firing line.
+fn test_cpu_laser_fires_first_eligible_frame() {
+    // ADR-025 (owner: "we don't need the dodge asymmetry at all"): the
+    // CPU fires the SAME FRAME its gate opens, symmetric with the
+    // player. The old 10-frame hard-reset telegraph completed 2-3 fires
+    // per 90 rounds; fairness lives in the ADR-023 renderer contract
+    // (exact beam cells painted the frame they exist), not in a charge.
     let mut game = WormGame::with_size(120, 38);
     game.read_rate = 1.0; // tick-perfect CPU under test — ADR-018 opens dozy
     game.food_items.clear();
@@ -1396,21 +1399,10 @@ fn test_cpu_laser_charges_before_firing() {
     game.cycles[0].positions = vec![(50, 20)];
     game.cycles[0].direction = worm::Direction::Right;
     game.grid[20][50] = worm::CellType::Player;
-    for _ in 0..(worm::game::LASER_TELEGRAPH_FRAMES - 1) {
-        game.update();
-        assert!(
-            !game.game_over,
-            "the laser must not fire while still charging"
-        );
-        assert_eq!(
-            game.cycles[1].held_powerup,
-            Some(worm::game::PowerUpKind::Laser)
-        );
-    }
     game.update();
     assert!(
         game.game_over,
-        "the charged laser fires on the telegraph deadline"
+        "the laser fires on the first eligible frame — no charge, no flicker"
     );
     assert_eq!(game.winner, Some(1));
 }
@@ -3709,6 +3701,8 @@ fn test_v9_bolt_stops_at_four_and_ignites() {
 #[test]
 fn test_v9_burn_schedule_five_three_one() {
     let mut game = v9_board();
+    // v13 raised the burn quota to 6/4/1; these tests pin the v9-v12 era.
+    game.set_world_version(12);
     game.cycles[1].positions = (0..20).map(|i| (20u16 + i, 10u16)).collect();
     game.cycles[1].head = (20, 10);
     for i in 0..20 {
@@ -3759,6 +3753,8 @@ fn test_v9_burn_schedule_five_three_one() {
 #[test]
 fn test_v9_burn_is_sticky_after_leaving_the_fire() {
     let mut game = v9_board();
+    // v13 raised the burn quota to 6/4/1; these tests pin the v9-v12 era.
+    game.set_world_version(12);
     game.cycles[1].positions = (0..12).map(|i| (20u16 + i, 10u16)).collect();
     game.cycles[1].head = (20, 10);
     for i in 0..12 {
@@ -4483,4 +4479,45 @@ fn test_rca_trishot_gate_prices_the_shot() {
         stage(11, (60, 30), vec![(35, 35)]),
         "v11 gate unchanged for its era"
     );
+}
+
+/// v13 (owner: tri-shot ~25% more effective): the burn quota is 6/4/1
+/// = 11 segments, v12 pins 5/3/1 = 9 — and burn-through-the-head kills
+/// a worm shorter than the quota (the owner's "that should take the
+/// head" — it always has; contract-pinned here).
+#[test]
+fn test_v13_burn_quota_and_head_burnthrough() {
+    let burn = |version: u8, len: u16| -> (usize, bool) {
+        let mut game = WormGame::with_size(120, 38);
+        game.set_world_version(version);
+        game.cpu_autopilot = false;
+        game.food_items.clear();
+        let mut pos = vec![];
+        for i in 0..len {
+            pos.push((30 + i, 20u16));
+            game.grid[20][(30 + i) as usize] = worm::CellType::CPU;
+        }
+        game.cycles[1].head = pos[0];
+        game.cycles[1].positions = pos;
+        game.cycles[1].direction = worm::Direction::Left;
+        game.burns[1] = worm::game::BurnState { contact_ms: 1, taken: 0, burned_by: 0 };
+        let mut ms = 0u32;
+        while ms < 4_000 {
+            game.tick_flames();
+            ms += game.frame_delay().as_millis() as u32;
+        }
+        (game.cycles[1].positions.len(), game.cycles[1].alive)
+    };
+    // Long worm: v13 takes 11, v12 takes 9.
+    let (len13, alive13) = burn(13, 30);
+    assert_eq!(len13, 30 - 11, "v13 quota is 6/4/1 = 11");
+    assert!(alive13);
+    let (len12, alive12) = burn(12, 30);
+    assert_eq!(len12, 30 - 9, "v12 pins 5/3/1 = 9");
+    assert!(alive12);
+    // Short worm: the burn goes through the head — a kill, both eras.
+    let (_, alive_short13) = burn(13, 4);
+    assert!(!alive_short13, "v13: quota > length burns through the head");
+    let (_, alive_short12) = burn(12, 4);
+    assert!(!alive_short12, "v12: it always did");
 }
