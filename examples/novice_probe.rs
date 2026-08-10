@@ -39,6 +39,31 @@ fn novice(game: &WormGame, rng: &mut Rng, tick: u32) -> Option<Direction> {
         let i = (rng.next_f32() * legal.len() as f32) as usize;
         return Some(legal[i.min(legal.len() - 1)]);
     }
+    // THE BASIC TRON CUT (fixture amendment 2026-08-10): every real
+    // first-timer knows "make them hit your wall" — the fixture's old
+    // pure-food-chaser had ZERO offensive intent, so it under-measured
+    // real novice wins and pushed the goldilocks tuning toward a CPU
+    // that must throw rounds to lose. When the CPU is near, the novice
+    // sometimes races for the cell a couple of steps ahead of the CPU's
+    // heading — crude, unplanned, exactly the mid-lapse fresh cut that
+    // ADR-018 preserves as the earned kill.
+    let (px, py) = game.cycles[0].head;
+    let (cx, cy) = game.cycles[1].head;
+    let cpu_dist = (cx as i32 - px as i32).abs() + (cy as i32 - py as i32).abs();
+    if cpu_dist <= 8 && rng.next_f32() < 0.5 {
+        let (cdx, cdy) = game.cycles[1].direction.as_delta();
+        let (tx, ty) = (cx as i32 + 2 * cdx as i32, cy as i32 + 2 * cdy as i32);
+        let mut prefs = Vec::new();
+        if tx < px as i32 { prefs.push(Direction::Left) }
+        if tx > px as i32 { prefs.push(Direction::Right) }
+        if ty < py as i32 { prefs.push(Direction::Up) }
+        if ty > py as i32 { prefs.push(Direction::Down) }
+        for d in prefs {
+            if legal.contains(&d) {
+                return Some(d);
+            }
+        }
+    }
     // Greedy: head toward the nearest food, no planning.
     let (px, py) = game.cycles[0].head;
     let target = game
@@ -75,6 +100,8 @@ fn main() {
     let mut nov_frames = 0u64;
     let mut novice_deaths: std::collections::HashMap<String, u32> =
         std::collections::HashMap::new();
+    let mut cpu_deaths: std::collections::HashMap<String, u32> =
+        std::collections::HashMap::new();
     for g in 0..games {
         if g > 0 {
             game.restart();
@@ -102,7 +129,13 @@ fn main() {
                     .entry(format!("{:?}", game.death_cause))
                     .or_insert(0u32) += 1;
             }
-            Some(0) => { nov_w += 1; arc.push('n'); }
+            Some(0) => {
+                nov_w += 1;
+                arc.push('n');
+                *cpu_deaths
+                    .entry(format!("{:?}", game.death_cause))
+                    .or_insert(0u32) += 1;
+            }
             _ => { draw += 1; arc.push('·'); }
         }
     }
@@ -111,6 +144,11 @@ fn main() {
     v.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
     for (cause, n) in v {
         println!("  novice death: {n:3}  {cause}");
+    }
+    let mut v: Vec<_> = cpu_deaths.into_iter().collect();
+    v.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+    for (cause, n) in v {
+        println!("  cpu death:    {n:3}  {cause}");
     }
     println!(
         "NOVICE vs unread CPU: novice {} · cpu {} · draw {}  (novice wins {:.0}%)  mean round {} frames",

@@ -57,7 +57,42 @@ and two convergent consults (codex + k3):
     and opening rounds run ~27% longer, feeding the read histograms
     (k3's tempo warning: sub-10s rounds starve the learning the arc
     is supposed to show).
-  * HONEST SHORTFALL: 8-10% novice non-loss vs the 40-60% target.
+  SECOND AMENDMENT, same day (snack steering + the cutting fixture):
+  * The concentration wake is RETIRED: it fixed the food orbit but
+    granted tick-perfect combat wits everywhere food sits — and food is
+    where novices fight, so the earned fresh cut had nowhere to land
+    (sweeps pinned at 5-12%; discipline_floor measured inert both
+    directions). Dozed frames near food now run SNACK STEERING
+    (cpu_snack_steer): one-step greedy toward collectibles within 4,
+    reflex-class checks only (walls, own trail, own mines, scenery),
+    no floors, no threat suite, lapse-laid trail INVISIBLE. Eating
+    stays cell-precise every frame. Coil probe, measured: 5.5% box-
+    dwell frames (pathology was 14.7%; the full wake's 0.1% is not
+    recoverable without the wits it granted) — the residual is tight
+    food-cluster maneuvering with purposeful reasons and 1 CPU loss
+    per 30 rounds, not the whole-round orbit; re-judge on the next
+    video per the watch-before-shipping rule. A snacking casual is at
+    their most cuttable, which is the beatable opening as a product.
+  * FIXTURE amendment: the novice gains THE BASIC TRON CUT (near the
+    CPU, sometimes races for the cell 2 ahead of its heading). The old
+    pure-food-chaser had zero offensive intent, so it under-measured
+    real novice wins and pushed tuning toward a CPU that must throw
+    rounds — the banned failure mode. Every fixture win now arrives
+    via EnemyTrail on the CPU (6/6 in the 40-game probe): the earned
+    cut class, and nothing else.
+  * MEASURED after both: novice non-loss 17.5% (7/40; was 0% post-wake,
+    ~35% pre-wake via the retired faceplant classes). INSTRUMENT
+    CEILING: the fixture self-walls in 25/40 long rounds (mean 1411
+    frames), capping any honest non-loss near ~37% — above ~25% the
+    binding constraint is the fixture's skill, not the CPU's mercy.
+  * HONEST SHORTFALL: 17.5% vs the 40-60% target, and the target
+    itself now exceeds the instrument's ceiling. RECALIBRATION
+    PENDING REAL HUMAN DATA: the owner's playtest (engagement ledger
+    live) is the true calibrator; until then the fixture gate is
+    "non-loss >= 15% with all CPU deaths in the earned-cut class",
+    and the 40-60 band stays recorded as the aspiration it was.
+  * (superseded same-day numbers, kept for the audit trail:)
+    8-10% novice non-loss vs the 40-60% target.
     The retired classes (stale-trail faceplants, head-on draws) were
     the old supply; knob-tuning cannot honestly replace them. The
     candidate mistake class is NAIVE-TRUST OVEREXTENSION — the unread

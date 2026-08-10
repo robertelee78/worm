@@ -101,6 +101,9 @@ struct BrainState {
     book: BookState,
     /// How well the CPU reads this player, in [0,1], and the HUD tier it buys.
     read_lift: f32,
+    /// F3: the most recent signature punish — cue, prediction, counter —
+    /// surfaced AFTER the action (the LearnedExploit receipt).
+    learned_exploit: Option<crate::cpu_ai::LearnedExploit>,
     difficulty: u32,
     seal: SealState,
     memory: MemoryState,
@@ -556,6 +559,7 @@ impl GameState {
                     lifetime: (&game.cpu_brain.lifetime_read).into(),
                 },
                 read_lift: game.read_rate,
+                learned_exploit: game.cpu_brain.last_exploit.clone(),
                 difficulty: game.difficulty,
                 seal: SealState {
                     chain: format!("0x{:016x}", game.seal_chain),

@@ -1983,6 +1983,24 @@ impl WormGame {
             player_dir_this_frame,
             player_had_choice,
         );
+        // F3 wall-break book: a voluntary lateral taken while driving at
+        // a boundary within 4 cells is a wall break — count its side.
+        // head_pre = the head at frame start (positions[1] after this
+        // frame's insert; the head cell itself when growth kept index 0).
+        if player_had_choice {
+            let head_pre = self.cycles[self.player]
+                .positions
+                .get(1)
+                .copied()
+                .unwrap_or(self.cycles[self.player].head);
+            self.cpu_brain.wall_book.observe_break(
+                head_pre,
+                self.cycles[self.player].prev_direction,
+                player_dir_this_frame,
+                self.width,
+                self.height,
+            );
+        }
         // Player move history feeding the CPU tail (trailing-match bonus).
         self.cpu_brain.record_player_move(player_dir_this_frame);
 
@@ -2235,33 +2253,15 @@ impl WormGame {
                         },
                     )
                 };
-            // FOOD WAKES THE DOZE (2026-08-09; loop-probe receipt: the
-            // entire remaining loop mass — 763 routing decisions plus
-            // ~2,700 held frames per 30-round probe — was the food
-            // ORBIT: a dozy driver re-deciding every Nth frame cannot
-            // make cell-precise turns, so it circles what it cannot
-            // eat, sometimes for whole rounds). Eating is a solid basic
-            // under the ADR-018 contract ("solid basics that hasn't
-            // read you yet"); orbiting food reads as broken, not
-            // casual. Mines NEVER wake it — any cell in the bombs list
-            // is excluded — so the decoy disguise class is untouched,
-            // own and enemy alike.
-            let food_beside = {
-                // Approach range, not adjacency: the orbit is a sampled-
-                // control limit cycle — a 6-frame hold overshoots any
-                // precise approach, so the dozy CPU circles at radius 2-5
-                // where an adjacency wake never fires. A casual human
-                // CONCENTRATES while lining up food; within 4 cells of a
-                // real collectible the doze lifts. food_items/powerups
-                // never contain disguised mines (those live in `bombs`),
-                // so the decoy class is untouched by construction.
-                let (hx0, hy0) = (cy.head.0 as i32, cy.head.1 as i32);
-                let near = |x: u16, y: u16| {
-                    (x as i32 - hx0).abs() + (y as i32 - hy0).abs() <= 4
-                };
-                self.food_items.iter().any(|&(fx, fy, _)| near(fx, fy))
-                    || self.powerups.iter().any(|&(px, py, _)| near(px, py))
-            };
+            // FOOD WAKES THE DOZE (2026-08-09) — RETIRED 2026-08-10 by
+            // the second amendment: the full wake fixed the food orbit
+            // but granted tick-perfect combat wits everywhere food sits,
+            // and food is where novices fight, so the earned fresh cut
+            // had nowhere to land. Snack steering (below) keeps eating
+            // cell-precise — the orbit cannot return — without the
+            // threat suite. Mines still never influence the doze.
+            // (The 2026-08-09 food_beside wake predicate stood here; the
+            // second amendment replaces it with snack steering below.)
             // ADR-018 amendment (2026-08-10, owner: "runs into itself and
             // the opponent more than expected"; codex + k3 convergent):
             // - OWN trail ahead ALWAYS wakes — strict self-knowledge, the
@@ -2294,10 +2294,19 @@ impl WormGame {
                 && self.player_trail_laid
                     [ny as usize * self.width as usize + nx as usize]
                     <= self.last_cpu_decision_frame;
+            // 2026-08-10 second amendment (goldilocks): food no longer
+            // FULLY wakes the doze. The concentration wake (2026-08-09)
+            // fixed the food orbit, but it granted tick-perfect combat
+            // wits everywhere food sits — and food is exactly where
+            // novices fight, so the lapse never existed in contested
+            // space and the earned fresh cut had nowhere to land
+            // (novice probe: sweeps pinned at 5-12% non-loss with the
+            // full wake; the discipline_floor knob measured inert).
+            // Dozed frames near food now run SNACK STEERING instead —
+            // see the cpu_dozing branch below.
             !wall_ahead
                 && !own_mine_ahead
                 && !pocket_ahead
-                && !food_beside
                 && !own_trail_ahead
                 && !player_head_ahead
                 && !known_enemy_trail_ahead
@@ -2307,8 +2316,18 @@ impl WormGame {
             // Slipstream-frozen: no decision, no discharge — held heading.
             self.cycles[1].direction
         } else if self.cpu_autopilot && cpu_dozing {
-            // Attention lapse: hold the heading, no decisions, no firing.
-            self.cycles[1].direction
+            // Attention lapse: no decisions, no firing. SNACK STEERING
+            // (2026-08-10): a casual player lining up food is precise
+            // enough to eat — one-step greedy toward the nearest
+            // collectible within 4 cells, checked only against the
+            // doze's own reflex classes (walls, own trail, own mines,
+            // scenery). No floors, no threat suite, and trail laid
+            // during the lapse stays INVISIBLE — snacking is when the
+            // casual player is most cuttable, which is the beatable
+            // opening working as a product. Without nearby food: the
+            // held heading, as before. Cell-precise every frame, so the
+            // 2026-08-09 orbit pathology cannot return.
+            self.cpu_snack_steer().unwrap_or(self.cycles[1].direction)
         } else if self.cpu_autopilot {
             // A REAL decision frame: anchor the trail-novelty wake here.
             // Trail laid at or before this frame is known scenery from now
@@ -2969,6 +2988,70 @@ impl WormGame {
         self.difficulty = 1 + (self.read_rate * 4.0).round() as u32;
     }
 
+    /// SNACK STEERING (ADR-018, 2026-08-10 second amendment): the dozed
+    /// CPU's one-step greedy move toward the nearest collectible within
+    /// 4 cells. Checked ONLY against the doze's reflex classes — walls,
+    /// own trail, own mines, known-scenery enemy trail, the opponent's
+    /// head. No escape floors, no threat suite, and trail laid during
+    /// the lapse stays invisible: a snacking casual is at their most
+    /// cuttable. None = no nearby food or no passing step (hold heading).
+    fn cpu_snack_steer(&self) -> Option<Direction> {
+        let cy = &self.cycles[1];
+        let (hx, hy) = (cy.head.0 as i32, cy.head.1 as i32);
+        let target = self
+            .food_items
+            .iter()
+            .map(|&(x, y, _)| (x, y))
+            .chain(self.powerups.iter().map(|&(x, y, _)| (x, y)))
+            .map(|(x, y)| ((x as i32 - hx).abs() + (y as i32 - hy).abs(), x, y))
+            .filter(|&(d, _, _)| d <= 4)
+            .min_by_key(|&(d, _, _)| d)?;
+        let (_, tx, ty) = target;
+        let back = match cy.direction {
+            Direction::Up => Direction::Down,
+            Direction::Down => Direction::Up,
+            Direction::Left => Direction::Right,
+            Direction::Right => Direction::Left,
+        };
+        let reflex_ok = |d: Direction| -> bool {
+            let (dx, dy) = d.as_delta();
+            let (nx, ny) = (hx + dx as i32, hy + dy as i32);
+            if nx < 0 || ny < 0 || nx >= self.width as i32 || ny >= self.height as i32 {
+                return false;
+            }
+            let (nxu, nyu) = (nx as usize, ny as usize);
+            match self.grid[nyu][nxu] {
+                CellType::Wall | CellType::CPU => return false,
+                // Known scenery blocks; a cell laid during the lapse is
+                // invisible — the earned-cut class.
+                CellType::Player
+                    if self.player_trail_laid[nyu * self.width as usize + nxu]
+                        <= self.last_cpu_decision_frame =>
+                {
+                    return false;
+                }
+                _ => {}
+            }
+            if self.cycles[0].alive && (nx, ny) == {
+                let h = self.cycles[0].head;
+                (h.0 as i32, h.1 as i32)
+            } {
+                return false;
+            }
+            !self
+                .bombs
+                .iter()
+                .any(|b| b.owner == 1 && b.x as i32 == nx && b.y as i32 == ny)
+        };
+        [Direction::Up, Direction::Down, Direction::Left, Direction::Right]
+            .into_iter()
+            .filter(|&d| d != back && reflex_ok(d))
+            .min_by_key(|&d| {
+                let (dx, dy) = d.as_delta();
+                (tx as i32 - (hx + dx as i32)).abs() + (ty as i32 - (hy + dy as i32)).abs()
+            })
+    }
+
     pub fn restart(&mut self) {
         // Explicit-size games (browser) keep their dimensions; native games
         // re-read the terminal so resizes take effect.
@@ -3052,6 +3135,7 @@ impl WormGame {
         // so the CPU starts the new game with experience. Only reset the
         // CPU-sequence timer that gates recording (frames_since_cpu_move).
         self.frames_since_cpu_move = 0;
+        self.cpu_brain.exploit_fired_this_round = false;
         self.last_cpu_decision_frame = 0;
         self.player_trail_laid =
             vec![0; self.width as usize * self.height as usize];

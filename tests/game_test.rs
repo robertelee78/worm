@@ -3076,6 +3076,112 @@ fn test_oob_death_classifies_as_wall_not_own_trail() {
     );
 }
 
+/// F3 (2026-08-10): the wall-break book counts relative breaks on wall
+/// approaches and backs off segment -> wall -> silence.
+#[test]
+fn test_wall_break_book_records_and_backs_off() {
+    let mut b = worm::cpu_ai::WallBreakBook::default();
+    // 8 left breaks driving Up at the north wall, x=20 of 60 (segment 1).
+    for _ in 0..8 {
+        b.observe_break((20, 3), worm::Direction::Up, worm::Direction::Left, 60, 30);
+    }
+    // A turn far from any wall is not a break.
+    b.observe_break((30, 15), worm::Direction::Up, worm::Direction::Left, 60, 30);
+    // Same segment: confident left call with the full count.
+    let (d, hits, n, cue) = b
+        .predict_break((21, 5), worm::Direction::Up, 60, 30)
+        .expect("segment-level evidence must answer");
+    assert_eq!((d, hits, n), (worm::Direction::Left, 8, 8));
+    assert!(cue.contains("north"), "cue names the wall: {cue}");
+    // Different segment of the SAME wall: the wall-level backoff answers.
+    let (d, _, n, _) = b
+        .predict_break((50, 5), worm::Direction::Up, 60, 30)
+        .expect("wall-level backoff must answer at n=8");
+    assert_eq!((d, n), (worm::Direction::Left, 8));
+    // A different wall knows nothing.
+    assert!(b.predict_break((20, 25), worm::Direction::Down, 60, 30).is_none());
+    // And the book survives the WRM2 round trip (its own section).
+    let mut brain = worm::CpuBrain::new();
+    brain.wall_book = b;
+    let restored = worm::CpuBrain::from_bytes(&brain.to_bytes()).unwrap();
+    assert_eq!(restored.wall_book.counts[0][1], [8, 0]);
+}
+
+/// F3, the product claim in test form (codex): brains trained on
+/// mirrored personas take mirrored counters at matched sharpness, and
+/// the cross-swapped brain declines the shot its counterpart takes.
+#[test]
+fn test_cross_persona_punish_is_mirrored_and_budgeted() {
+    let stage = |train_left: bool, earned: f32| -> (bool, Option<String>) {
+        let mut game = WormGame::with_size(60, 30);
+        for row in &mut game.grid {
+            for cell in row.iter_mut() {
+                if *cell != worm::CellType::Wall {
+                    *cell = worm::CellType::Empty;
+                }
+            }
+        }
+        game.cpu_autopilot = false;
+        game.food_items.clear();
+        game.powerups.clear();
+        // Persona training: 8 breaks driving Up at the north wall,
+        // segment 2 — left for Brain-L, right for Brain-R.
+        let brk = if train_left { worm::Direction::Left } else { worm::Direction::Right };
+        for _ in 0..8 {
+            game.cpu_brain.wall_book.observe_break((30, 3), worm::Direction::Up, brk, 60, 30);
+        }
+        game.cpu_brain.earned_snapshot = earned; // matched read authority
+        // CPU fires a vertical beam up column 29; the player approaches
+        // the north wall one column right of it, head OFF the beam, so
+        // neither the headshot nor the step-1 lead can claim the frame.
+        // Only the habit bet reaches column 29: the LEFT-break cell.
+        game.cycles[1].head = (29, 20);
+        game.cycles[1].positions = vec![(29, 20)];
+        game.cycles[1].direction = worm::Direction::Up;
+        game.grid[20][29] = worm::CellType::CPU;
+        game.cycles[1].held_powerup = Some(worm::game::PowerUpKind::Laser);
+        game.cycles[0].head = (30, 6);
+        game.cycles[0].positions = vec![(30, 6)];
+        game.cycles[0].direction = worm::Direction::Up;
+        game.grid[6][30] = worm::CellType::Player;
+        let fired = worm::cpu_ai::should_fire(&mut game, 1);
+        let cue = game.cpu_brain.last_exploit.as_ref().map(|e| e.prediction.clone());
+        (fired, cue)
+    };
+    let (fired, receipt) = stage(true, 0.3);
+    assert!(fired, "Brain-L pre-aims the left break its book predicts");
+    let receipt = receipt.expect("a signature punish writes its receipt");
+    assert!(receipt.contains("8/8"), "the receipt carries the evidence: {receipt}");
+    let (fired, receipt) = stage(false, 0.3);
+    assert!(
+        !fired && receipt.is_none(),
+        "Brain-R, cross-swapped into the same staging, declines the shot"
+    );
+    // The punish budget: with a weak read the SECOND attempt in a round
+    // holds; a strong read (>= 0.5) punishes at will.
+    let mut game = WormGame::with_size(60, 30);
+    game.cpu_brain.earned_snapshot = 0.3;
+    game.cpu_brain.exploit_fired_this_round = true;
+    for _ in 0..8 {
+        game.cpu_brain.wall_book.observe_break((30, 3), worm::Direction::Up, worm::Direction::Left, 60, 30);
+    }
+    game.cpu_autopilot = false;
+    game.cycles[1].head = (29, 20);
+    game.cycles[1].direction = worm::Direction::Up;
+    game.cycles[1].held_powerup = Some(worm::game::PowerUpKind::Laser);
+    game.cycles[0].head = (30, 6);
+    game.cycles[0].direction = worm::Direction::Up;
+    assert!(
+        !worm::cpu_ai::should_fire(&mut game, 1),
+        "a weak read's punish budget is one per round"
+    );
+    game.cpu_brain.earned_snapshot = 0.6;
+    assert!(
+        worm::cpu_ai::should_fire(&mut game, 1),
+        "a strong read punishes at will"
+    );
+}
+
 /// ADR-022 / k3 Q6: the session doze-exit latch, exercised through the
 /// REAL production sites (codex verify round: the first version wrote the
 /// latch by hand and could not fail). The latch is set only inside

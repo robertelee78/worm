@@ -1563,6 +1563,23 @@ pub struct CpuBrain {
     /// is not field-tolerant and this struct rides other wire shapes.
     #[serde(skip)]
     pub class_books: ClassBooks,
+    /// F3 (2026-08-10, codex+k3 convergent): the WALL-BREAK BOOK —
+    /// per-player counts of the relative break direction on boundary
+    /// approaches. Persisted in its OWN WRM2 section (SEC_WALL_BOOK):
+    /// this is precisely the "learns YOU over many matches" knowledge
+    /// the sectioned format exists to protect.
+    #[serde(skip)]
+    pub wall_book: WallBreakBook,
+    /// Signature-punish budget: one read-powered exploit per round while
+    /// discipline_sharpness < 0.7 ("dawning recognition", k3) — a CPU
+    /// that mines your favorite lane every round from round 2 feels
+    /// scripted. Transient; reset at round boundaries.
+    #[serde(skip)]
+    pub exploit_fired_this_round: bool,
+    /// The most recent signature punish, surfaced AFTER the action (the
+    /// LearnedExploit receipt: cue, prediction, counter). Transient.
+    #[serde(skip)]
+    pub last_exploit: Option<LearnedExploit>,
     /// Frames since the player's last VOLUNTARY lateral turn — the
     /// dedicated hazard counter (the 4-deep player tail cannot represent a
     /// 5-frame gap). Transient.
@@ -2230,6 +2247,144 @@ const BOOK_DECAY: f32 = 0.995;
 /// books are specialist accounting (sleeping-experts formalism): each is
 /// scored ONLY against its own class, gate-independently, so neither can
 /// be starved by the other's volume.
+/// F3: the LearnedExploit receipt — what the CPU knew, what it
+/// predicted, and what it did about it, emitted AFTER the action so the
+/// player sees causality without leaking the forecast beforehand.
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LearnedExploit {
+    /// The cue the book keyed on, e.g. "north wall, segment 2".
+    pub cue: String,
+    /// The habit it bet on, with its evidence, e.g. "breaks left (8/10)".
+    pub prediction: String,
+    /// The counter it committed, e.g. "laser pre-aimed at the left break".
+    pub counter: String,
+    /// Frame the punish fired (round-relative context for the HUD).
+    pub frame: u32,
+}
+
+/// F3 (codex design): the WALL-BREAK BOOK. Counts of the player's
+/// relative break direction (left/right of their approach heading) when
+/// they drive at a boundary wall, keyed wall side (N/E/S/W) x quarter
+/// segment along that wall. Query backs off segment -> whole wall; below
+/// the evidence floor it stays silent (the global turn prior already
+/// lives in the ensemble). "At the north wall you broke left 8 of 10
+/// times — Worm covered left."
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct WallBreakBook {
+    /// counts[wall][segment] = [left, right]; wall 0=N 1=S 2=W 3=E.
+    pub counts: [[[u32; 2]; 4]; 4],
+}
+
+fn opposite(d: Direction) -> Direction {
+    match d {
+        Direction::Up => Direction::Down,
+        Direction::Down => Direction::Up,
+        Direction::Left => Direction::Right,
+        Direction::Right => Direction::Left,
+    }
+}
+
+impl WallBreakBook {
+    const SEG_FLOOR: u32 = 5;
+    const WALL_FLOOR: u32 = 8;
+    const CONF: f32 = 0.6;
+
+    fn left_of(d: Direction) -> Direction {
+        match d {
+            Direction::Up => Direction::Left,
+            Direction::Left => Direction::Down,
+            Direction::Down => Direction::Right,
+            Direction::Right => Direction::Up,
+        }
+    }
+
+    /// Which boundary a heading runs at, and the cells left to impact.
+    fn facing_wall(
+        head: (u16, u16),
+        d: Direction,
+        w: u16,
+        h: u16,
+    ) -> (usize, u16) {
+        match d {
+            Direction::Up => (0, head.1),
+            Direction::Down => (1, h - 1 - head.1),
+            Direction::Left => (2, head.0),
+            Direction::Right => (3, w - 1 - head.0),
+        }
+    }
+
+    fn segment(head: (u16, u16), wall: usize, w: u16, h: u16) -> usize {
+        let (pos, span) = if wall <= 1 { (head.0, w) } else { (head.1, h) };
+        ((pos as usize * 4) / span.max(1) as usize).min(3)
+    }
+
+    /// Record a voluntary turn made while driving at a boundary within 4
+    /// cells: the classic wall break.
+    pub fn observe_break(
+        &mut self,
+        head_pre: (u16, u16),
+        prev: Direction,
+        chosen: Direction,
+        w: u16,
+        h: u16,
+    ) {
+        if chosen == prev || chosen == opposite(prev) {
+            return;
+        }
+        let (wall, dist) = Self::facing_wall(head_pre, prev, w, h);
+        if dist > 4 {
+            return;
+        }
+        let seg = Self::segment(head_pre, wall, w, h);
+        let rel = usize::from(chosen != Self::left_of(prev));
+        self.counts[wall][seg][rel] += 1;
+    }
+
+    /// The book's bet for an approach at `head` heading `d`, with its
+    /// evidence: (predicted absolute break direction, hits, total, cue).
+    /// Backoff: segment (n >= 5) -> whole wall (n >= 8) -> silence.
+    pub fn predict_break(
+        &self,
+        head: (u16, u16),
+        d: Direction,
+        w: u16,
+        h: u16,
+    ) -> Option<(Direction, u32, u32, String)> {
+        let (wall, dist) = Self::facing_wall(head, d, w, h);
+        if dist > 6 {
+            return None;
+        }
+        let seg = Self::segment(head, wall, w, h);
+        let name = ["north", "south", "west", "east"][wall];
+        let pick = |c: [u32; 2], floor: u32, cue: String| {
+            let n = c[0] + c[1];
+            let (rel, hits) = if c[0] >= c[1] { (0, c[0]) } else { (1, c[1]) };
+            (n >= floor && hits as f32 / n as f32 >= Self::CONF).then(|| {
+                let abs = if rel == 0 {
+                    Self::left_of(d)
+                } else {
+                    opposite(Self::left_of(d))
+                };
+                (abs, hits, n, cue)
+            })
+        };
+        pick(
+            self.counts[wall][seg],
+            Self::SEG_FLOOR,
+            format!("{name} wall, segment {seg}"),
+        )
+        .or_else(|| {
+            let mut c = [0u32; 2];
+            for s in &self.counts[wall] {
+                c[0] += s[0];
+                c[1] += s[1];
+            }
+            pick(c, Self::WALL_FLOOR, format!("{name} wall"))
+        })
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct ClassBooks {
     /// KT cells: decayed (turn events, total eligible events) per context.
@@ -2660,6 +2815,9 @@ impl Default for CpuBrain {
             portfolio: Portfolio::default(),
             intent_targets: [None; 2],
             class_books: ClassBooks::default(),
+            wall_book: WallBreakBook::default(),
+            exploit_fired_this_round: false,
+            last_exploit: None,
             gap_since_voluntary: 0,
             frames_since_food: 99,
             prev_pc_dist: 0,
@@ -2918,6 +3076,7 @@ impl CpuBrain {
         );
         push_section(&mut sections, SEC_TURN_PRIOR, &self.opp_brain.turn_tally);
         push_section(&mut sections, SEC_PORTFOLIO, &self.portfolio);
+        push_section(&mut sections, SEC_WALL_BOOK, &self.wall_book);
 
         let mut out = BRAIN_MAGIC_V2.to_le_bytes().to_vec();
         out.extend(BRAIN_FORMAT_V2.to_le_bytes());
@@ -3244,6 +3403,12 @@ impl CpuBrain {
                     }
                     Err(_) => report.sections_skipped += 1,
                 },
+                SEC_WALL_BOOK => {
+                    match bincode::deserialize::<WallBreakBook>(body) {
+                        Ok(b) => brain.wall_book = b,
+                        Err(_) => report.sections_skipped += 1,
+                    }
+                }
                 SEC_PORTFOLIO => match bincode::deserialize::<Portfolio>(body) {
                     Ok(p) => brain.portfolio = p,
                     Err(_) => report.sections_skipped += 1,
@@ -3412,6 +3577,10 @@ const SEC_DRIFT_EPOCHS: u16 = 13;
 /// section is the kata's durable half: the sequence read survives
 /// sessions.
 const SEC_TURN_TIMING: u16 = 14;
+/// F3 wall-break book (2026-08-10) — per-player wall-approach break
+/// counts. Its own section: this is learned-about-the-human state and
+/// must survive every other section's schema churn.
+const SEC_WALL_BOOK: u16 = 15;
 
 /// The pre-ADR-020 `ReadRate` shape, kept as the v1 wire projection.
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -5942,6 +6111,57 @@ pub fn should_fire(game: &mut WormGame, who: usize) -> bool {
             // Headshot: always worth the discharge — it ends the round.
             if beam.contains(&(ox, oy)) {
                 return true;
+            }
+            // F3 SIGNATURE PUNISH (2026-08-10): the read-gated corner-
+            // turn lead. ADR-025 stage 3 kept habit-leading OUT of the
+            // basics ("corner-turn leading is a read by definition") —
+            // here it comes IN as exploitation: when the player is
+            // driving at a wall they habitually break one way from,
+            // pre-aim the break cell BEFORE they turn. Gated on the
+            // earned read (this is knowledge, not marksmanship) and on
+            // the punish budget (once per round until sharp — dawning
+            // recognition, not a script). The receipt is written at the
+            // moment of commitment and surfaced after the action.
+            // Budget scale: discipline_sharpness saturates to 1.0 the
+            // moment ANY read is earned, so the budget keys on the
+            // earned magnitude instead — a weak read punishes once per
+            // round; a strong one (>= 0.5) punishes at will.
+            if game.cpu_brain.earned_snapshot > 0.0
+                && (!game.cpu_brain.exploit_fired_this_round
+                    || game.cpu_brain.earned_snapshot >= 0.5)
+            {
+                let (opx, opy) = (ox, oy);
+                let pdir = game.cycles[opp].direction;
+                if let Some((brk, hits, n, cue)) = game
+                    .cpu_brain
+                    .wall_book
+                    .predict_break((opx, opy), pdir, game.width, game.height)
+                {
+                    let (bdx, bdy) = brk.as_delta();
+                    let (bx, by) = (opx as i16 + bdx, opy as i16 + bdy);
+                    if bx >= 0
+                        && by >= 0
+                        && (bx as u16) < game.width
+                        && (by as u16) < game.height
+                        && game.passable(bx as u16, by as u16)
+                        && beam.contains(&(bx as u16, by as u16))
+                    {
+                        let side = match brk {
+                            crate::Direction::Up => "upward",
+                            crate::Direction::Down => "downward",
+                            crate::Direction::Left => "left",
+                            crate::Direction::Right => "right",
+                        };
+                        game.cpu_brain.last_exploit = Some(LearnedExploit {
+                            prediction: format!("breaks {side} ({hits}/{n})"),
+                            counter: format!("laser pre-aimed at the {side} break"),
+                            cue,
+                            frame: game.frame_count,
+                        });
+                        game.cpu_brain.exploit_fired_this_round = true;
+                        return true;
+                    }
+                }
             }
             // ADR-025 stage 3, STEP-1 LEAD (pure geometry, never
             // read-gated — "aiming is a basic"): fire when the player's
