@@ -2,7 +2,7 @@
 // the REAL audio.js voices into an OfflineAudioContext, export WAV.
 import { chromium } from 'playwright';
 import fs from 'fs';
-const OUT = '/tmp/claude-1000/-opt-worm/a78acb6e-cc14-4d94-a2be-c3071fe8311a/scratchpad/claude-plays';
+const OUT = process.cwd();
 const log = JSON.parse(fs.readFileSync(`${OUT}/sfx-log.json`, 'utf8'));
 const durMs = Math.max(...log.sfx.map(([t]) => t), 1000) + 3000;
 
