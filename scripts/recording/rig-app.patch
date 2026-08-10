@@ -1,0 +1,77 @@
+--- /opt/worm/web/app.js	2026-08-10 08:27:23.493006667 -0700
++++ /tmp/claude-1000/-opt-worm/a78acb6e-cc14-4d94-a2be-c3071fe8311a/scratchpad/claude-plays/web/app.js	2026-08-10 09:57:39.386287027 -0700
+@@ -430,6 +430,8 @@
+   applyBoardLayout(layout);
+   const seed = BigInt((Date.now() ^ (Math.random() * 0xffffffff)) >>> 0);
+   game = new WasmGame(cols, rows, seed);
++  window.game = game; // claude-plays harness: policy + sfx tee access
++  if (!window.__t0) window.__t0 = performance.now();
+ 
+   const saved = await brainRead();
+   if (saved && game.brain_load(saved)) {
+@@ -641,6 +643,7 @@
+     showFatal(`${e.message} — please reload the page`);
+     return;
+   }
++  if (window.__onFrame) { try { window.__onFrame(state); } catch (e) { window.__brainErr = String(e); } }
+   updateHum(state);
+   // SLIPSTREAM (corridor half-time): the world slows and the screen says
+   // so — cool, cheap, GPU-composited. Class toggle only; CSS owns the look.
+@@ -652,6 +655,46 @@
+     if (label) label.classList.toggle('hidden', !on);
+   }
+   render(state);
++  // VIDEO BANNER (recording rig only): the learning arc, visible.
++  {
++    const c = document.getElementById('game-canvas');
++    const bctx = (c && c.getContext) ? c.getContext('2d') : null;
++    if (bctx && state && state.brain) {
++      // Cumulative session score (state.wins is per-MATCH and resets
++      // each first-to-3 — the driver publishes running totals) and the
++      // lifetime prediction accuracy (smooth, honest, moves from round
++      // 1 — unlike the Schmitt-latched earned lift, which is designed
++      // to sit at 0 until statistical significance).
++      const tot = window.__vidScore || [0, 0];
++      const round = (window.__vidRound || 0);
++      const acc = state.brain.accuracy && state.brain.accuracy.lifetime
++        && state.brain.accuracy.lifetime.samples > 20
++        ? Math.round(state.brain.accuracy.lifetime.rate * 100) : 0;
++      // Both numbers, per owner: accuracy for motion, earned lift for
++      // rigor. PROVEN READ stays +0% until the statistical latch — that
++      // is the design, not a bug, now that PREDICTS carries the arc.
++      const lift = state.brain.readLift != null ? Math.round(state.brain.readLift * 100) : 0;
++      bctx.save();
++      bctx.textAlign = 'center';
++      const msg = 'ROUND ' + round + '   CLAUDE ' + tot[0] + ' — ' + tot[1] + ' CPU   |   PREDICTS ' + acc + '% · PROVEN READ +' + lift + '%';
++      // Fit the line to the canvas: the dual-metric string clips at
++      // 22px once the round number and score go two-digit.
++      let fpx = 22;
++      bctx.font = 'bold ' + fpx + 'px monospace';
++      let tw = bctx.measureText(msg).width;
++      if (tw > c.width - 36) {
++        fpx = Math.max(12, Math.floor(fpx * (c.width - 36) / tw));
++        bctx.font = 'bold ' + fpx + 'px monospace';
++        tw = bctx.measureText(msg).width;
++      }
++      const y = 26;
++      bctx.fillStyle = 'rgba(0,0,0,0.65)';
++      bctx.fillRect(c.width / 2 - tw / 2 - 14, y - 20, tw + 28, 30);
++      bctx.fillStyle = acc >= 70 ? '#ff5d5d' : acc >= 45 ? '#ffc94d' : '#7ddc7d';
++      bctx.fillText(msg, c.width / 2, y);
++      bctx.restore();
++    }
++  }
+   hud(state);
+   if (paused) {
+     document.getElementById('mid-status').textContent = 'PAUSED — press P to resume';
+@@ -667,6 +710,10 @@
+ // and unknown kinds fall back to the raw square voice.
+ function playSfx() {
+   const events = JSON.parse(game.sfx_json());
++  if (window.__sfx && events.length) {
++    const t = performance.now() - (window.__t0 || 0);
++    for (const ev of events) window.__sfx.push([t, ev]);
++  }
+   let foodSeen = 0;
+   for (const ev of events) {
+     if (!Array.isArray(ev) || ev.length < 3) continue;
