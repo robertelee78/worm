@@ -4521,3 +4521,105 @@ fn test_v13_burn_quota_and_head_burnthrough() {
     let (_, alive_short12) = burn(12, 4);
     assert!(!alive_short12, "v12: it always did");
 }
+
+/// ADR-025 stage 3: the step-1 lead is pure geometry — the player's
+/// straight-ahead cell on the beam fires; moving away or blocked holds.
+#[test]
+fn test_laser_step1_lead_geometry() {
+    let stage = |pdir: worm::Direction, wall_ahead: bool| -> bool {
+        let mut game = WormGame::with_size(120, 38);
+        for row in &mut game.grid {
+            for cell in row.iter_mut() {
+                if *cell != worm::CellType::Wall {
+                    *cell = worm::CellType::Empty;
+                }
+            }
+        }
+        game.cpu_autopilot = false;
+        game.food_items.clear();
+        game.cycles[1].head = (30, 20);
+        game.cycles[1].positions = vec![(30, 20)];
+        game.cycles[1].direction = worm::Direction::Right;
+        game.cycles[1].held_powerup = Some(worm::game::PowerUpKind::Laser);
+        game.grid[20][30] = worm::CellType::CPU;
+        // Player head one row ABOVE the beam row, so only the lead can fire.
+        game.cycles[0].head = (50, 19);
+        game.cycles[0].positions = vec![(50, 19)];
+        game.cycles[0].direction = pdir;
+        game.grid[19][50] = worm::CellType::Player;
+        if wall_ahead {
+            game.grid[20][50] = worm::CellType::Wall;
+        }
+        worm::cpu_ai::should_fire(&mut game, 1)
+    };
+    assert!(
+        stage(worm::Direction::Down, false),
+        "stepping onto the beam next frame: the lead fires (reconciliation kills the entry)"
+    );
+    assert!(
+        !stage(worm::Direction::Up, false),
+        "moving away from the beam: no shot"
+    );
+    assert!(
+        !stage(worm::Direction::Down, true),
+        "blocked ahead: the entry cannot happen, no shot"
+    );
+}
+
+/// ADR-025 stage 4: Targeting lines up the shot — a candidate turn that
+/// stages a next-frame headshot beam is taken and labeled honestly, and
+/// the layer never touches the tactic ledger.
+#[test]
+fn test_targeting_lines_up_the_shot() {
+    let mut game = WormGame::with_size(120, 38);
+    for row in &mut game.grid {
+        for cell in row.iter_mut() {
+            if *cell != worm::CellType::Wall {
+                *cell = worm::CellType::Empty;
+            }
+        }
+    }
+    game.food_items.clear();
+    game.powerups.clear();
+    // CPU heading Right along row 20; player far DOWN the column ahead —
+    // turning Down at (31,20)... stage: player at (31, 30): after the CPU
+    // steps to (31,20)? No: candidate Down from (30,20) -> (30,21), beam
+    // Down the column x=30. Put the player's head on that column.
+    game.cycles[1].head = (30, 20);
+    game.cycles[1].positions = vec![(30, 20), (29, 20)];
+    game.cycles[1].direction = worm::Direction::Right;
+    game.cycles[1].held_powerup = Some(worm::game::PowerUpKind::Laser);
+    game.grid[20][30] = worm::CellType::CPU;
+    game.grid[20][29] = worm::CellType::CPU;
+    // Within 10 cells so the Curiosity drift (dist > 10) stays silent
+    // and the Targeting label is unambiguous.
+    game.cycles[0].head = (30, 29);
+    game.cycles[0].positions = vec![(30, 29)];
+    game.cycles[0].direction = worm::Direction::Left;
+    game.grid[29][30] = worm::CellType::Player;
+    // Warm the brain past the cold-start wall-safety reflex, which sits
+    // above Targeting in the ladder.
+    let mut v = [0.0f32; worm::cpu_ai::CPU_FEATURE_DIM];
+    v[0] = 1.0;
+    for _ in 0..worm::cpu_ai::CPU_FEATURE_DIM * 3 {
+        game.cpu_brain.remember(v, worm::Direction::Up, 1.0);
+    }
+    let before = game.cpu_brain.ledgers.tactic_attempts.clone();
+    let d = worm::cpu_decide(&mut game);
+    // Down stages the direct beam; Up stages the RICOCHET beam (the
+    // vertical bounce covers the same column both ways) — either is a
+    // genuine headshot lineup. The contract is the intent, not the path.
+    assert!(
+        matches!(d, worm::Direction::Down | worm::Direction::Up),
+        "a turn that stages a headshot beam (got {d:?})"
+    );
+    assert_eq!(
+        game.cpu_telemetry.decision.as_ref().unwrap().reason,
+        worm::cpu_ai::CpuDecisionReason::Targeting,
+        "labeled honestly"
+    );
+    assert_eq!(
+        game.cpu_brain.ledgers.tactic_attempts, before,
+        "Targeting never enters the tactic ledger"
+    );
+}

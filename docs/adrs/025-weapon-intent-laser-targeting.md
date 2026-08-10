@@ -1,8 +1,14 @@
 # ADR-025: Weapon Intent — Laser Targeting, Symmetric Trigger, Shot Economy
 
 ## Status
-Proposed 2026-08-09 (owner rulings verbatim below; codex + k3 consults
-convergent, both source-grounded). Stages 1-2 implementing. This is CPU
+Implemented (stages 1-4) 2026-08-09; stage 5 (offensive breach) gated
+on the ADR-024 Phase-B competence battery pending an explicit owner
+override. Owner rulings verbatim below; codex + k3 consults convergent,
+both source-grounded. INCIDENT NOTE: commit a6e69e9 claimed stages 1-2
+while the cpu_ai value-model hunks were absent from it (a lost-edit
+during parallel patching); the follow-up landing re-applied them with
+grep-verified receipts and passing contracts — recorded here per the
+honest-history rule. This is CPU
 POLICY, not world rules — beam physics (ADR-023 dual test, sever,
 breach) untouched; ghost replays consume recorded fire events, so no
 version gate (precedent: the v12 tri-shot aim-policy amendment).

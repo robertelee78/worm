@@ -199,6 +199,10 @@ pub enum CpuDecisionReason {
     /// intercept that steers to shrink the player's reachable region
     /// instead of closing distance.
     Boxer,
+    /// ADR-025: movement cooperating with the held weapon — a 1-step
+    /// rollout that stages next frame's fire check. Skill, not
+    /// read-priced aggression; never a tactic-ledger arm.
+    Targeting,
 }
 
 impl CpuDecisionReason {
@@ -224,6 +228,7 @@ impl CpuDecisionReason {
             Self::SurvivalMemory => "reusing a surviving move",
             Self::WallFollow => "following the survival floor",
             Self::Boxer => "boxing off your space",
+            Self::Targeting => "lining up a shot",
         }
     }
 }
@@ -1647,6 +1652,11 @@ pub struct CpuBrain {
     /// Boxer start has been used. Reset at the round boundary.
     #[serde(skip)]
     pub boxer_probe_used: bool,
+    /// ADR-025 Targeting TTL: frames spent lining up the current shot.
+    /// A weapon held is a weapon not fired — 8 frames of maneuvering,
+    /// then the layer yields until the weapon changes hands. Transient.
+    #[serde(skip)]
+    pub targeting_ttl: u32,
     /// Self-knowledge instrumentation (ADR-021 Kata 0). Persisted in its
     /// own sections; recording-only until later katas activate readers.
     #[serde(skip)]
@@ -2662,6 +2672,7 @@ impl Default for CpuBrain {
             tactic_boxer_ok: true,
             boxer_hold: 0,
             boxer_probe_used: false,
+            targeting_ttl: 0,
             region_ring: std::collections::VecDeque::new(),
             ledgers: LearningLedgers::default(),
             pending_book: None,
@@ -5910,13 +5921,51 @@ pub fn should_fire(game: &mut WormGame, who: usize) -> bool {
 
     match kind {
         crate::game::PowerUpKind::Laser => {
-            // The beam ricochets off arena walls, so the player needn't share
-            // a row/col — fire when the (possibly bounced) beam path reaches
-            // the player's head. The telegraph draws this exact path.
+            // ADR-025 value model (owner R1: headshot, tail TRIM, breach —
+            // the old head-only gate couldn't even attempt a trim). The
+            // beam ricochets off arena walls, so no shared row/col needed.
             let (dx, dy) = game.cycles[who].direction.as_delta();
             let beam = game.beam_cells(hx, hy, dx, dy);
+            // Headshot: always worth the discharge — it ends the round.
             if beam.contains(&(ox, oy)) {
                 return true;
+            }
+            // ADR-025 stage 3, STEP-1 LEAD (pure geometry, never
+            // read-gated — "aiming is a basic"): fire when the player's
+            // straight-ahead-if-passable next cell is on the beam. The
+            // lead horizon is exactly 1 BY CONSTRUCTION — the ADR-023
+            // post-move reconciliation makes that entry lethal; longer
+            // horizons fire at ghosts (k3).
+            if crate::tuning::tuning().laser_lead >= 0.5 {
+                let (pdx, pdy) = game.cycles[opp].direction.as_delta();
+                let (lx, ly) = (ox as i16 + pdx, oy as i16 + pdy);
+                if lx >= 0
+                    && ly >= 0
+                    && (lx as u16) < game.width
+                    && (ly as u16) < game.height
+                    && game.passable(lx as u16, ly as u16)
+                    && beam.contains(&(lx as u16, ly as u16))
+                {
+                    return true;
+                }
+            }
+            // Tail trim: a NECK CUT only — severed >= max(8, half their
+            // body). Board-clearing + economy denial (sever_from deletes
+            // their laid trail cells), never boxing setup (k3: severing
+            // SHRINKS their length-scaled escape floor). Tip clips hold;
+            // the weapon is scarce.
+            let opp_len = game.cycles[opp].positions.len();
+            if let Some(cut) = game.cycles[opp]
+                .positions
+                .iter()
+                .enumerate()
+                .skip(1)
+                .find(|(_, p)| beam.contains(p))
+                .map(|(i, _)| i)
+            {
+                if opp_len - cut >= 8.max(opp_len.div_ceil(2)) {
+                    return true;
+                }
             }
             // BREACH SHOT (owner: "I expect it to know how to punch holes"):
             // an enveloped CPU holding a laser blasts itself an exit — the
@@ -6739,6 +6788,59 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
                     choose!(best_dir, CpuDecisionReason::DirectIntercept);
                 }
             }
+        }
+    }
+
+    // --- TARGETING (ADR-025 stage 4): line up the shot ---
+    // Movement cooperates with the held weapon: a 1-step rollout stages
+    // the beam the PRE-MOVE fire check will see next frame (fire at N+1
+    // uses the heading chosen at N — game.rs order: fire precedes
+    // decide). Placed after the hunts (read-priced aggression keeps
+    // priority) and before memory/wall-follow. Escape floor only —
+    // aiming is board geometry, not read-priced aggression (owner:
+    // "aiming is a basic"); corridor entries filtered like every hunt.
+    // Recomputed each frame; TTL 8 bounds the maneuvering (a weapon
+    // held is a weapon not fired). Deliberately NOT in TACTIC_IDS —
+    // the fire stays weapon telemetry, the movement gets this label.
+    if game.cycles[1].held_powerup != Some(crate::game::PowerUpKind::Laser) {
+        game.cpu_brain.targeting_ttl = 0;
+    } else if game.cpu_brain.targeting_ttl < 8 {
+        let (thx, thy) = game.cycles[0].head;
+        let t_opp_len = game.cycles[0].positions.len();
+        let mut best_line: Option<(Direction, f32)> = None;
+        for &d in candidates {
+            if step_enters_corridor(game, 1, d) {
+                continue;
+            }
+            let (ddx, ddy) = d.as_delta();
+            let nx = (cx as i16 + ddx).clamp(0, (game.width - 1) as i16) as u16;
+            let ny = (cy as i16 + ddy).clamp(0, (game.height - 1) as i16) as u16;
+            if count_open_space(game, nx, ny) < escape_cells {
+                continue;
+            }
+            let beam = game.beam_cells(nx, ny, ddx, ddy);
+            let mut score = 0.0f32;
+            if beam.contains(&(thx, thy)) {
+                score = 100.0; // headshot lineup
+            } else if let Some(cut) = game.cycles[0]
+                .positions
+                .iter()
+                .enumerate()
+                .skip(1)
+                .find(|(_, pp)| beam.contains(pp))
+                .map(|(i, _)| i)
+            {
+                if t_opp_len - cut >= 8.max(t_opp_len.div_ceil(2)) {
+                    score = 40.0; // neck-cut trim lineup
+                }
+            }
+            if score > 0.0 && best_line.is_none_or(|(_, s2)| score > s2) {
+                best_line = Some((d, score));
+            }
+        }
+        if let Some((d, _)) = best_line {
+            game.cpu_brain.targeting_ttl += 1;
+            choose!(d, CpuDecisionReason::Targeting);
         }
     }
 

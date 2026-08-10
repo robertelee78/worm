@@ -2865,6 +2865,7 @@ impl WormGame {
         // "self-recovering" claim here was false (RCA 2026-08-09).
         self.cpu_brain.boxer_probe_used = false;
         self.cpu_brain.boxer_hold = 0;
+        self.cpu_brain.targeting_ttl = 0;
         self.cpu_brain.tactic_boxer_ok = {
             let best_intercept = [
                 self.cpu_brain.ledgers.tactic_kill_rate(0),

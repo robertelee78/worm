@@ -56,6 +56,10 @@ pub struct Tuning {
     /// play — reaching every-frame wits as the read grows. THE lever that
     /// makes the opening genuinely losable: held headings meet walls.
     pub open_latency: f32,
+    /// ADR-025 stage 3: step-1 laser lead (0 = off, 1 = on). Pure
+    /// geometry — fire when the player's straight-ahead next cell is on
+    /// the beam; the ADR-023 reconciliation makes that entry lethal.
+    pub laser_lead: f32,
     /// Attribution-arm switches (ADR-020 stage 2.1, codex D10): 1.0 = on.
     /// book_bend: the turn book may bend the 5-frame player projection.
     /// book_spend: the book's earned evidence may feed difficulty.
@@ -91,6 +95,7 @@ pub fn tuning() -> &'static Tuning {
         bold_spend: env_f32("WORM_TUNE_BOLD_SPEND", 0.40),
         bold_drive: env_f32("WORM_TUNE_BOLD_DRIVE", 1.0),
         open_latency: env_f32("WORM_TUNE_OPEN_LATENCY", 6.0),
+        laser_lead: env_f32("WORM_TUNE_LASER_LEAD", 1.0),
         // Default ON — EARNED by measurement, in two steps (ADR-014
         // discipline): with the original 64-cell aligned-boolean hazard
         // the bend measured WORSE on the authority-active subset (8075
