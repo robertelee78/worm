@@ -19,3 +19,4 @@ ruvector.db
 # Environment variables
 .darwin/
 data/
+web/claude-vs-cpu*.mp4
