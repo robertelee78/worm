@@ -2210,9 +2210,37 @@ impl WormGame {
                         },
                     )
                 };
+            // FOOD WAKES THE DOZE (2026-08-09; loop-probe receipt: the
+            // entire remaining loop mass — 763 routing decisions plus
+            // ~2,700 held frames per 30-round probe — was the food
+            // ORBIT: a dozy driver re-deciding every Nth frame cannot
+            // make cell-precise turns, so it circles what it cannot
+            // eat, sometimes for whole rounds). Eating is a solid basic
+            // under the ADR-018 contract ("solid basics that hasn't
+            // read you yet"); orbiting food reads as broken, not
+            // casual. Mines NEVER wake it — any cell in the bombs list
+            // is excluded — so the decoy disguise class is untouched,
+            // own and enemy alike.
+            let food_beside = {
+                // Approach range, not adjacency: the orbit is a sampled-
+                // control limit cycle — a 6-frame hold overshoots any
+                // precise approach, so the dozy CPU circles at radius 2-5
+                // where an adjacency wake never fires. A casual human
+                // CONCENTRATES while lining up food; within 4 cells of a
+                // real collectible the doze lifts. food_items/powerups
+                // never contain disguised mines (those live in `bombs`),
+                // so the decoy class is untouched by construction.
+                let (hx0, hy0) = (cy.head.0 as i32, cy.head.1 as i32);
+                let near = |x: u16, y: u16| {
+                    (x as i32 - hx0).abs() + (y as i32 - hy0).abs() <= 4
+                };
+                self.food_items.iter().any(|&(fx, fy, _)| near(fx, fy))
+                    || self.powerups.iter().any(|&(px, py, _)| near(px, py))
+            };
             !wall_ahead
                 && !own_mine_ahead
                 && !pocket_ahead
+                && !food_beside
                 && !crate::cpu_ai::ring_doomed_step(self, cy.head, cy.direction)
         };
         let cpu_dir = if cpu_frozen {

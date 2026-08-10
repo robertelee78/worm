@@ -3,6 +3,22 @@
 ## Status
 Implemented (refined after owner play-test)
 
+
+AMENDED 2026-08-09 (the concentration wake): the doze's wake list —
+walls, own mines, one-step pockets, the ring — gains REAL COLLECTIBLES
+within 4 cells. Receipt: a loop probe showed 14.7% of all frames spent
+circling inside an 8x8 box, and the dominant mechanism was the doze
+itself — a sampled controller re-deciding every Nth frame cannot make
+cell-precise turns, so the dozy CPU orbited food it could never line
+up, sometimes for whole rounds ("it just goes around and around" —
+owner). Eating is a solid basic under this ADR's own contract; combat
+sloppiness (trail blindness, thinned floors, held headings in the
+open) is untouched, and disguised mines never wake it (food_items and
+powerups never contain decoys by construction). Paired with the
+survival floor's corner-tracking fix (a wall follower that turned
+right whenever right was free was, in open space, a circler), loop
+frames fell 14.7% -> 0.1% per 30-round probe. Doze contract fixtures
+updated to clear incidental collectibles.
 ## Updated
 2026-08-06 — the raw doze failed the look-and-feel test: a CPU holding
 heading into a static wall reads as broken, not casual ("kind of

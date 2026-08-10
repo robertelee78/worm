@@ -2939,6 +2939,11 @@ fn an_enveloped_cpu_blasts_itself_an_exit() {
 fn test_doze_wakes_for_own_mine_but_not_the_enemys() {
     let run = |owner: u8| -> bool {
         let mut game = worm::WormGame::with_size_seed(60, 30, 7);
+        // 2026-08-09 doze amendment: food within 4 now WAKES the doze
+        // (the concentration wake). These contracts test other wake
+        // classes — clear collectibles so incidental spawns can't fire it.
+        game.food_items.clear();
+        game.powerups.clear();
         // A fresh, unread brain keeps the beatable opening's doze cadence.
         assert!(game.cpu_brain.earned_snapshot == 0.0);
         // update() pre-increments frame_count, so starting at 0 the doze
@@ -3910,6 +3915,11 @@ fn test_v9_burn_completing_on_a_death_frame_is_a_draw() {
 fn test_v9_doze_wakes_at_a_pocket_but_stays_blind_to_trails() {
     let pocket = |version: u8| -> bool {
         let mut game = worm::WormGame::with_size_seed(60, 30, 7);
+        // 2026-08-09 doze amendment: food within 4 now WAKES the doze
+        // (the concentration wake). These contracts test other wake
+        // classes — clear collectibles so incidental spawns can't fire it.
+        game.food_items.clear();
+        game.powerups.clear();
         game.set_world_version(version);
         game.frame_count = 0; // update() observes frame 1: doze candidate
         let (hx, hy) = game.cycles[1].head;
@@ -3931,6 +3941,8 @@ fn test_v9_doze_wakes_at_a_pocket_but_stays_blind_to_trails() {
 
     // Trail DIRECTLY ahead: still invisible to the doze.
     let mut game = worm::WormGame::with_size_seed(60, 30, 7);
+    game.food_items.clear();
+    game.powerups.clear();
     game.frame_count = 0;
     let (hx, hy) = game.cycles[1].head;
     let (dx, dy) = game.cycles[1].direction.as_delta();
