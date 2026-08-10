@@ -9,7 +9,7 @@ const durMs = Math.max(...log.sfx.map(([t]) => t), 1000) + 3000;
 const b = await chromium.launch();
 const p = await b.newPage();
 await p.goto('http://localhost:8082/', { waitUntil: 'domcontentloaded' });
-const dl = p.waitForEvent('download', { timeout: 600000 });
+const dl = p.waitForEvent('download', { timeout: 3_600_000 });
 const wav = await p.evaluate(async ({ events, durMs }) => {
   const rate = 44100;
   const off = new OfflineAudioContext(2, Math.ceil(durMs / 1000 * rate), rate);
