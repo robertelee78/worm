@@ -26,7 +26,7 @@ import { chromium } from 'playwright';
 import fs from 'fs';
 
 const ROUNDS = 20; // owner: "we should play like 15 though — 3-0, 3-1 not enough"
-const OUT = '/tmp/claude-1000/-opt-worm/a78acb6e-cc14-4d94-a2be-c3071fe8311a/scratchpad/claude-plays';
+const OUT = process.cwd();
 
 const b = await chromium.launch();
 const ctx = await b.newContext({

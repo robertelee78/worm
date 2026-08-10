@@ -10,7 +10,7 @@ for i in 1 2 3; do
   node driver.mjs 2>&1 | tee "take-roll$i.log"
   python3 - "take-roll$i.log" <<'PY'
 import json, re, sys
-back = tot = 0
+back = tot = act1 = 0
 for line in open(sys.argv[1]):
     m = re.match(r'round (\d+) (\{.*\})', line.strip())
     if not m:
@@ -20,8 +20,13 @@ for line in open(sys.argv[1]):
         tot += 1
         if r['round'] >= 11:
             back += 1
-print(f"cpu total {tot} back-half {back}")
-sys.exit(0 if (back >= 4 and tot >= 5) else 1)
+    # The two-act story gate (owner: 'the tension between beatable in
+    # early rounds but actually learning ... that's the magic'): Claude
+    # must OWN the opening before the CPU takes the back half.
+    if r.get('winner') == 0 and r['round'] <= 6:
+        act1 += 1
+print(f"claude act1 {act1} cpu total {tot} back-half {back}")
+sys.exit(0 if (act1 >= 4 and back >= 4 and tot >= 5) else 1)
 PY
   if [ $? -eq 0 ]; then
     echo "ARC FOUND on roll $i"
