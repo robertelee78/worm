@@ -3896,6 +3896,12 @@ fn best_food_target(
         // (player wins 0-1 -> 4-6) — a race won by one step leaves it head to
         // head with the opponent at the prize. Two steps of daylight keeps
         // the engagement and returns the survival.
+        // (2026-08-09 NOTE: a relaxed 'uncontested forager' second pass —
+        // contest inference + satiation + scan leash — was implemented and
+        // MEASURED OUT: every variant cost 30+ points of win rate against
+        // the probe persona (78%->42-52%) via gorge-growth-self-collision.
+        // The owner's 'why is it not eating' question is real but needs
+        // engagement-ledger data from HUMAN play, not another blind knob.)
         if td >= 0 && td <= md + 2 {
             return;
         }
@@ -7021,6 +7027,34 @@ pub fn wall_follow_decide(game: &WormGame, cpu: &LightCycle) -> Direction {
     } else {
         [current_dir, right_dir, left_dir, back_dir]
     };
+
+    // SPACE-AWARE FLOOR (2026-08-09; probe receipt: once the forager fed
+    // it to length 35-151, the floor's blind preference order drove it
+    // into pockets of its own body — 'following the survival floor'
+    // own-trail deaths dominated the ledger. Legality alone was enough
+    // for a 3-length worm; a long worm's base step must clear the same
+    // flood-fill logic every higher layer already obeys). Among legal
+    // options in preference order, take the first whose reachable space
+    // fits the body; if none fits, take the roomiest.
+    let own_len = cpu.positions.len() as f32;
+    let mut roomiest: Option<(Direction, f32)> = None;
+    for dir in order {
+        if free_step(game, head.0, head.1, dir) {
+            let (dx, dy) = dir.as_delta();
+            let nx = (head.0 as i16 + dx) as u16;
+            let ny = (head.1 as i16 + dy) as u16;
+            let open = count_open_space(game, nx, ny);
+            if open >= own_len {
+                return dir;
+            }
+            if roomiest.is_none_or(|(_, o)| open > o) {
+                roomiest = Some((dir, open));
+            }
+        }
+    }
+    if let Some((dir, _)) = roomiest {
+        return dir;
+    }
 
     // Use the same legality predicate as physics (passable via free_step):
     // the old Empty-only check refused to step onto food, punched holes and
