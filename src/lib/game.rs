@@ -3136,6 +3136,7 @@ impl WormGame {
         // CPU-sequence timer that gates recording (frames_since_cpu_move).
         self.frames_since_cpu_move = 0;
         self.cpu_brain.exploit_fired_this_round = false;
+        self.cpu_brain.trim_to_box_until = 0;
         self.last_cpu_decision_frame = 0;
         self.player_trail_laid =
             vec![0; self.width as usize * self.height as usize];

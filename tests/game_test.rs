@@ -4697,21 +4697,103 @@ fn test_rca_trishot_gate_prices_the_shot() {
         !stage(12, (60, 30), vec![(14, 7)]),
         "trail cells never earn a brush shot"
     );
-    // Trail on a strict diagonal ray within the 10-cell band: fires.
+    // ADR-027 superseded the bare trail-clip class (56 fires / 0 lethal
+    // across two funnel probes): a trail hit fires ONLY as TRIM-TO-BOX —
+    // the sever must be material (>= max(4, len/3)) AND transition the
+    // length ratio into the boxing phase (self >= 2x their remainder).
+    // A 1-cell clip on a strict ray now holds, in every era (policy,
+    // not physics — the old v11 pin is retired with the class).
     assert!(
-        stage(12, (60, 30), vec![(16, 4)]),
-        "close strict-ray trail sever is legitimate pressure"
+        !stage(12, (60, 30), vec![(16, 4)]),
+        "an immaterial 1-cell trail clip holds under ADR-027"
     );
-    // Same strict diagonal ray ((1,1) from (10,10)), 25 cells out:
-    // refused in the sweep era.
     assert!(
-        !stage(12, (60, 30), vec![(35, 35)]),
-        "a sever 25 cells away targets a tail that will not exist"
+        !stage(11, (60, 30), vec![(35, 35)]),
+        "the v11 unbounded trail ray died with the trail-clip class"
     );
-    // v11 pin: the old unbounded trail ray still fires (policy history).
+}
+
+/// ADR-027 TRIM-TO-BOX: the one trail fire left — a material sever that
+/// hands the CPU the boxing phase, opening the window the Boxer's
+/// dominance entry consumes.
+#[test]
+fn test_trishot_trim_fires_only_into_the_boxing_phase() {
+    let stage = |cpu_len: usize| -> (bool, bool) {
+        let mut game = WormGame::with_size(120, 38);
+        latch_read_for_weapon_fixture(&mut game);
+        game.set_world_version(12);
+        game.cpu_autopilot = false;
+        game.food_items.clear();
+        let mut cpu_pos = vec![(10u16, 10u16)];
+        for i in 1..cpu_len {
+            cpu_pos.push((10 - i as u16, 10));
+        }
+        game.cycles[1].head = (10, 10);
+        game.cycles[1].direction = worm::Direction::Right;
+        game.cycles[1].positions = cpu_pos.clone();
+        for &(x, y) in &cpu_pos {
+            game.grid[y as usize][x as usize] = worm::CellType::CPU;
+        }
+        game.cycles[1].held_powerup = Some(worm::game::PowerUpKind::TriShot);
+        // Player: head far off every ray; a 12-cell trail crossing the
+        // straight ray at (14,10) with index 4 -> severed 8 (material).
+        game.cycles[0].head = (60, 30);
+        let mut pos = vec![(60u16, 30u16), (61, 30), (62, 30), (63, 30)];
+        for k in 0..8u16 {
+            pos.push((14, 10 + k));
+        }
+        game.cycles[0].positions = pos.clone();
+        for &(x, y) in &pos {
+            game.grid[y as usize][x as usize] = worm::CellType::Player;
+        }
+        let fired = worm::cpu_ai::should_fire(&mut game, 1);
+        let window = game.cpu_brain.trim_to_box_until > 0;
+        (fired, window)
+    };
+    // Severed 8 of 12 leaves 4; a 8-long CPU is 2x the remainder: fires
+    // and opens the trim-to-box window.
+    let (fired, window) = stage(8);
+    assert!(fired, "a material, ratio-transitioning sever fires");
+    assert!(window, "the trim opens the boxing window");
+    // The same sever with a 5-long CPU never reaches the boxing phase:
+    // hold (ADR-025's counterweight governs below ratio 2).
+    let (fired, window) = stage(5);
+    assert!(!fired && !window, "a trim that cannot box holds");
+}
+
+/// ADR-027 BURN-TRAP: read-gated napalm on the player's PREDICTED next
+/// cells — the trap fires where they are about to be, and only with an
+/// earned read.
+#[test]
+fn test_trishot_burn_trap_is_read_gated() {
+    let stage = |earned: f32| -> bool {
+        let mut game = WormGame::with_size(120, 38);
+        game.set_world_version(12);
+        game.cpu_autopilot = false;
+        game.food_items.clear();
+        game.cycles[1].head = (10, 10);
+        game.cycles[1].direction = worm::Direction::Right;
+        game.cycles[1].positions = vec![(10, 10)];
+        game.grid[10][10] = worm::CellType::CPU;
+        game.cycles[1].held_powerup = Some(worm::game::PowerUpKind::TriShot);
+        // Player head OFF every ray, driving Down so its next cell
+        // (13,10) sits on the CPU's straight ray.
+        game.cycles[0].head = (13, 9);
+        game.cycles[0].direction = worm::Direction::Down;
+        game.cycles[0].positions = vec![(13, 9)];
+        game.grid[9][13] = worm::CellType::Player;
+        game.cpu_brain.earned_snapshot = earned;
+        // earned_snapshot > 0 saturates discipline_sharpness, so the
+        // cold arm must rely on the blanket unread hold instead.
+        worm::cpu_ai::should_fire(&mut game, 1)
+    };
     assert!(
-        stage(11, (60, 30), vec![(35, 35)]),
-        "v11 gate unchanged for its era"
+        stage(0.3),
+        "with an earned read, the predicted next cell on a ray is a trap fire"
+    );
+    assert!(
+        !stage(0.0),
+        "no read, no trap — the cold blanket hold is absolute"
     );
 }
 

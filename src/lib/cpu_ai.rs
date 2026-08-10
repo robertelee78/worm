@@ -1580,6 +1580,17 @@ pub struct CpuBrain {
     /// LearnedExploit receipt: cue, prediction, counter). Transient.
     #[serde(skip)]
     pub last_exploit: Option<LearnedExploit>,
+    /// ADR-027 TRIM-TO-BOX window: open until this frame after a
+    /// ratio-transitioning tri-shot trim — the Boxer's dominance entry
+    /// consumes it (fire, then choke while the advantage is fresh).
+    /// Transient.
+    #[serde(skip)]
+    pub trim_to_box_until: u32,
+    /// ADR-027 class census (proof instrumentation): tri-shot fires by
+    /// class [head, burn-trap, trim-to-box]. The noise class has no
+    /// counter because it must not exist. Transient.
+    #[serde(skip)]
+    pub trishot_class_fires: [u32; 3],
     /// Frames since the player's last VOLUNTARY lateral turn — the
     /// dedicated hazard counter (the 4-deep player tail cannot represent a
     /// 5-frame gap). Transient.
@@ -2818,6 +2829,8 @@ impl Default for CpuBrain {
             wall_book: WallBreakBook::default(),
             exploit_fired_this_round: false,
             last_exploit: None,
+            trim_to_box_until: 0,
+            trishot_class_fires: [0; 3],
             gap_since_voluntary: 0,
             frames_since_food: 99,
             prev_pc_dist: 0,
@@ -5155,17 +5168,32 @@ fn boxer_choke_candidate(
     hunt_cells: f32,
     pred: Direction,
 ) -> Option<(Direction, f32)> {
+    // ADR-027 LENGTH-DOMINANCE ENTRY (owner: "it does not box in the
+    // opponent even though it sometimes has a length of four x the
+    // opponent"): a live 2:1 length ratio, or the ~20-frame window a
+    // trim-to-box tri-shot just opened, is a standing invitation to
+    // box — it bypasses the probe-suppression gate (like the recovery
+    // probe) and extends the engagement range. Read-gated at 0.5
+    // sharpness: an unread CPU boxing an unpredicted opponent
+    // self-traps, and the beatable opening stays intact. Dominance
+    // gets INTO the candidate set; the hysteresis, contested credit,
+    // and shrink guard still decide everything downstream.
+    let dominance = game.discipline_sharpness() >= 0.5
+        && (game.cycles[1].positions.len() >= 2 * game.cycles[0].positions.len()
+            || game.frame_count < game.cpu_brain.trim_to_box_until);
     // RCA F3 recovery probe (implements the ADR-024 promise): while the
     // round-boundary gate has the arm suppressed, ONE Boxer start per
     // round is still allowed — a suppressed arm keeps measuring itself,
     // and recovery is earned by a realized choke, not by clock magic.
-    if !game.cpu_brain.tactic_boxer_ok && game.cpu_brain.boxer_probe_used {
+    if !game.cpu_brain.tactic_boxer_ok && game.cpu_brain.boxer_probe_used && !dominance {
         return None;
     }
     let (phx, phy) = game.cycles[0].head;
     let (cx, cy) = game.cycles[1].head;
-    // Cheap prune before any flood: choking is a contact sport.
-    if (phx as i16 - cx as i16).abs() + (phy as i16 - cy as i16).abs() > 14 {
+    // Cheap prune before any flood: choking is a contact sport — but a
+    // dominant worm reaches further (14 -> 20).
+    let reach = if dominance { 20 } else { 14 };
+    if (phx as i16 - cx as i16).abs() + (phy as i16 - cy as i16).abs() > reach {
         return None;
     }
     let baseline = count_open_space(game, phx, phy);
@@ -6259,8 +6287,107 @@ pub fn should_fire(game: &mut WormGame, who: usize) -> bool {
                 let reach = fdx.abs().max(fdy.abs()) <= reach_cap;
                 forward && (aligned || brush) && reach
             };
-            on_a_ray(ox, oy, true)
-                || game.cycles[opp].positions.iter().skip(1).any(|&(px, py)| on_a_ray(px, py, false))
+            // ADR-027 VALUE MODEL (k3 + gemini convergent; owner rulings
+            // R1-R3): every discharge is a kill attempt, a read-priced
+            // trap, or the opening move of a box. Anything else HOLDS —
+            // the first-eligible-frame trail-clip class (56 fires, 0
+            // lethal, two funnel probes) is dead by construction.
+            //
+            // CLASS 1 — HEAD: the only guaranteed-lethal class (napalm
+            // burn-through executes the owner's short-opponent kill
+            // rule). Ungated.
+            if on_a_ray(ox, oy, true) {
+                game.cpu_brain.trishot_class_fires[0] += 1;
+                return true;
+            }
+            // CLASS 2 — BURN-TRAP (read-gated): napalm laid where the
+            // player is ABOUT to be. Straight extrapolation of their
+            // next 1-2 cells always; the wall-break-book exit when an
+            // imminent break is confidently predicted (that branch is a
+            // signature punish: ADR-026 budget + receipt). Open-field
+            // zone denial rejected by both consultants.
+            if game.cpu_brain.earned_snapshot > 0.0 {
+                let (pdx, pdy) = game.cycles[opp].direction.as_delta();
+                for step in 1..=2i16 {
+                    let (tx, ty) = (ox as i16 + pdx * step, oy as i16 + pdy * step);
+                    if tx >= 0
+                        && ty >= 0
+                        && (tx as u16) < game.width
+                        && (ty as u16) < game.height
+                        && game.passable(tx as u16, ty as u16)
+                        && on_a_ray(tx as u16, ty as u16, true)
+                    {
+                        game.cpu_brain.trishot_class_fires[1] += 1;
+                        return true;
+                    }
+                }
+                if !game.cpu_brain.exploit_fired_this_round
+                    || game.cpu_brain.earned_snapshot >= 0.5
+                {
+                    if let Some((brk, hits, n, cue)) = game.cpu_brain.wall_book.predict_break(
+                        (ox, oy),
+                        game.cycles[opp].direction,
+                        game.width,
+                        game.height,
+                    ) {
+                        let (bdx, bdy) = brk.as_delta();
+                        let (bx, by) = (ox as i16 + bdx, oy as i16 + bdy);
+                        if bx >= 0
+                            && by >= 0
+                            && (bx as u16) < game.width
+                            && (by as u16) < game.height
+                            && game.passable(bx as u16, by as u16)
+                            && on_a_ray(bx as u16, by as u16, true)
+                        {
+                            let side = match brk {
+                                crate::Direction::Up => "upward",
+                                crate::Direction::Down => "downward",
+                                crate::Direction::Left => "left",
+                                crate::Direction::Right => "right",
+                            };
+                            game.cpu_brain.last_exploit = Some(LearnedExploit {
+                                prediction: format!("breaks {side} ({hits}/{n})"),
+                                counter: format!(
+                                    "napalm laid on the {side} break"
+                                ),
+                                cue,
+                                frame: game.frame_count,
+                            });
+                            game.cpu_brain.exploit_fired_this_round = true;
+                            game.cpu_brain.trishot_class_fires[1] += 1;
+                            return true;
+                        }
+                    }
+                }
+            }
+            // CLASS 3 — TRIM-TO-BOX (owner R2, the A1 resolution): a
+            // trail hit fires IFF the sever is material (>= max(4,
+            // their_len/3)) AND it transitions the LENGTH RATIO into the
+            // boxing phase (self/theirs-after >= 2.0). Below that,
+            // ADR-025's counterweight dominates (a shorter opponent
+            // slips smaller gaps): hold. Firing opens the trim-to-box
+            // window the Boxer's dominance entry consumes.
+            let opp_len = game.cycles[opp].positions.len();
+            let self_len = game.cycles[who].positions.len();
+            let best_sever = game.cycles[opp]
+                .positions
+                .iter()
+                .enumerate()
+                .skip(1)
+                .filter(|&(_, &(px, py))| on_a_ray(px, py, false))
+                .map(|(i, _)| opp_len - i)
+                .max();
+            if let Some(severed) = best_sever {
+                let material = severed >= (opp_len / 3).max(4);
+                let post_ratio_boxes =
+                    self_len >= 2 * opp_len.saturating_sub(severed).max(1);
+                if material && post_ratio_boxes {
+                    game.cpu_brain.trim_to_box_until = game.frame_count + 20;
+                    game.cpu_brain.trishot_class_fires[2] += 1;
+                    return true;
+                }
+            }
+            false
         }
         crate::game::PowerUpKind::Bomb => {
             // A mine is PLACED, not aimed, so proximity is the wrong question.
