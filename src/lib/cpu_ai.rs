@@ -6600,18 +6600,39 @@ pub fn coil_decide(game: &mut WormGame, candidates: &[Direction]) -> Option<Dire
     {
         return None;
     }
-    let cap = ((self_len as f32) * 0.75) as usize;
-    let region = coil_region_cells(game, (px, py), cap.max(8))?;
-    if region.len() > cap.max(8) {
-        return None;
+    // The CAGE (stage 3 — the accepted design's actual ring): the bbox
+    // of the prey's PROJECTED path (head + up to 5 straight passable
+    // cells), inflated by 2. The first implementation wrapped the
+    // prey's whole flooded region, which in open play is the arena —
+    // so the coil only ever scavenged pre-trapped prey (measured:
+    // 40-round roll, coils 0). A boa builds the cage around where the
+    // prey is GOING; a prey that outruns the arc escapes and the abort
+    // books the attempt.
+    let mut proj = vec![(px, py)];
+    {
+        let (pdx, pdy) = game.cycles[0].direction.as_delta();
+        let (mut jx, mut jy) = (px as i16, py as i16);
+        for _ in 0..5 {
+            jx += pdx;
+            jy += pdy;
+            if jx < 0
+                || jy < 0
+                || jx >= game.width as i16
+                || jy >= game.height as i16
+                || !matches!(
+                    game.grid[jy as usize][jx as usize],
+                    CellType::Empty | CellType::Food | CellType::Hole | CellType::PowerUp
+                )
+            {
+                break;
+            }
+            proj.push((jx as u16, jy as u16));
+        }
     }
-    // Ring: the region bbox inflated by 1, clipped in-bounds, walked
-    // clockwise from the CPU's nearest perimeter cell. Feasibility:
-    // the CPU must have the mass to lay it (ring <= 0.8 x own length).
-    let minx = region.iter().map(|c| c.0).min()?.saturating_sub(1);
-    let maxx = (region.iter().map(|c| c.0).max()? + 1).min(game.width - 1);
-    let miny = region.iter().map(|c| c.1).min()?.saturating_sub(1);
-    let maxy = (region.iter().map(|c| c.1).max()? + 1).min(game.height - 1);
+    let minx = proj.iter().map(|c| c.0).min()?.saturating_sub(2);
+    let maxx = (proj.iter().map(|c| c.0).max()? + 2).min(game.width - 1);
+    let miny = proj.iter().map(|c| c.1).min()?.saturating_sub(2);
+    let maxy = (proj.iter().map(|c| c.1).max()? + 2).min(game.height - 1);
     let mut ring: Vec<(u16, u16)> = Vec::new();
     for x in minx..=maxx {
         ring.push((x, miny));

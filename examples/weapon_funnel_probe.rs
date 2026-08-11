@@ -66,6 +66,11 @@ fn run(warm: bool) {
     let c = game.cpu_brain.trishot_class_fires;
     println!("  trishot class census: head {} · burn-trap {} · trim-to-box {}", c[0], c[1], c[2]);
     println!("  napalm attrition: {} player segments burned off by CPU fire", burned_total);
+    if let Some(e) = game.cpu_brain.ledgers.tactic_attempts.iter().find(|e| e.0 == 7) {
+        println!("  coil (ADR-028): attempts {} kills {}", e.3, e.4);
+    } else {
+        println!("  coil (ADR-028): never attempted");
+    }
     for &(id, kind) in &worm::cpu_ai::WEAPON_IDS {
         let e = game
             .cpu_brain

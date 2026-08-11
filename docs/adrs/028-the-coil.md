@@ -7,8 +7,16 @@ negatives. AMENDED same day: the ladder slot moved ABOVE the items
 layer — the accepted below-items slot measurably abandoned a live
 Tighten episode for grocery runs (fixture frames chose ItemPath with
 a sealed pocket standing); survival layers keep their veto, and a boa
-does not snack mid-squeeze. Remaining: abort/self-trap fixtures 5-6,
-probe metrics, the on-camera wrap video.
+does not snack mid-squeeze. STAGE 3 same day (the cage): the first ring
+wrapped the prey's whole flooded region — in open play that is the
+arena, so the coil only scavenged pre-trapped prey (measured: 40-round
+roll, coils 0). Rebuilt to the accepted design: the ring is the bbox
+of the prey's PROJECTED path (head + up to 5 straight passable cells)
+inflated by 2 — a local cage laid around where the prey is going.
+Measured after: 89 attempts / 3 kills per 30 warm rounds (funnel
+probe), zero before. Fixtures 5-6 landed (escape-abort + cooldown;
+the tighten floor yields to survival). Remaining: the on-camera wrap
+video (roll gate requires >= 1 ring-closure receipt).
 
 ## Date
 2026-08-10
