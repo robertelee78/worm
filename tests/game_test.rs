@@ -171,9 +171,7 @@ fn test_tri_shot_does_not_self_kill() {
     // Clean arena, park both cycles on far-apart rows, pin food away.
     for row in &mut game.grid {
         for cell in row.iter_mut() {
-            if *cell != worm::CellType::Wall {
-                *cell = worm::CellType::Empty;
-            }
+            *cell = worm::CellType::Empty;
         }
     }
     game.cycles[0].head = (10, 15);
@@ -3193,13 +3191,12 @@ fn test_coil_activates_on_dominance_and_never_unearned() {
         let mut game = WormGame::with_size(60, 30);
         game.food_items.clear();
         game.powerups.clear();
-        // Wipe the default-spawn worm markers: this fixture stages both
-        // bodies by hand, and stale grid cells corrupt the region flood.
+        // Wipe EVERYTHING (v13 boards spawn interior wall structures;
+        // this fixture stages its whole geometry by hand — a leftover
+        // wall inside the nook turns it into a 3-cell coffin).
         for row in &mut game.grid {
             for cell in row.iter_mut() {
-                if *cell != worm::CellType::Wall {
-                    *cell = worm::CellType::Empty;
-                }
+                *cell = worm::CellType::Empty;
             }
         }
         // Warm the self-brain past the cold-start (WarmingUp) layer.

@@ -6539,6 +6539,18 @@ pub fn coil_decide(game: &mut WormGame, candidates: &[Direction]) -> Option<Dire
         }
         if ep.phase != CoilPhase::Tighten && coil_sealed(game, (px, py), 220) {
             ep.phase = CoilPhase::Tighten;
+            // ADR-028/026: the closure receipt — the kill narrates the
+            // macro-game that earned it, after commitment, once.
+            let pocket = coil_region_cells(game, (px, py), 220)
+                .map(|c| c.len())
+                .unwrap_or(0);
+            let ratio = self_len as f32 / opp_len as f32;
+            game.cpu_brain.last_exploit = Some(LearnedExploit {
+                cue: format!("{ratio:.1}x length dominance"),
+                prediction: "nowhere left to go".to_string(),
+                counter: format!("ring closed — pocket {pocket} cells"),
+                frame,
+            });
         }
         if (cx, cy) == ep.ring[ep.cursor % ep.ring.len()] {
             ep.cursor = (ep.cursor + 1) % ep.ring.len();
@@ -6613,7 +6625,18 @@ pub fn coil_decide(game: &mut WormGame, candidates: &[Direction]) -> Option<Dire
     for y in ((miny + 1)..maxy).rev() {
         ring.push((minx, y));
     }
-    if ring.len() < 8 || ring.len() as f32 > 0.8 * self_len as f32 {
+    let full_ring = ring.len();
+    // Walls and standing bodies are PRE-BUILT ring segments: the CPU
+    // only traverses (and thereby lays) the passable arc. Waypoints it
+    // could never stand on would stall the cursor into the 40-frame
+    // abort. Feasibility is priced on the arc it must actually lay.
+    ring.retain(|&(x, y)| {
+        matches!(
+            game.grid[y as usize][x as usize],
+            CellType::Empty | CellType::Food | CellType::Hole | CellType::PowerUp
+        )
+    });
+    if full_ring < 8 || ring.is_empty() || ring.len() as f32 > 0.8 * self_len as f32 {
         return None;
     }
     let cursor = ring
@@ -7031,6 +7054,16 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
         }
     }
 
+    // ADR-028 THE COIL (slot amended same day): a committed
+    // encirclement outranks ITEMS as well as Boxer/intercepts — the
+    // measured failure of the below-items slot was the wrap being
+    // abandoned mid-constriction for grocery runs (fixture frames
+    // chose ItemPath/WallFollow with a live Tighten episode). Survival
+    // layers above keep their veto; a boa does not snack mid-squeeze.
+    if let Some(d) = coil_decide(game, candidates) {
+        choose!(d, CpuDecisionReason::Coil);
+    }
+
     // --- ITEMS: grab food / power-ups on or near our path ---
     // Only deviate for items already near our path — we don't abandon the
     // perimeter. Three tiers:
@@ -7189,12 +7222,6 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
     // so this cannot open before ~10 observed real choices regardless; the
     // hunt floor still vets every destination. Lowered to buy engagement
     // without touching a survival floor.
-    // ADR-028 THE COIL: a committed encirclement outranks Boxer and the
-    // intercepts — the ring was priced at commit and the episode carries
-    // its own aborts. Survival layers above retain their veto by order.
-    if let Some(d) = coil_decide(game, candidates) {
-        choose!(d, CpuDecisionReason::Coil);
-    }
     // RCA F3 episode hysteresis (k3: K in [3,4], <= the 12-frame credit
     // window): once a Boxer episode opens, hold the EPISODE — recompute
     // the safe choke each frame rather than freezing a direction — and

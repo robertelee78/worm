@@ -10,9 +10,7 @@ fn main() {
     game.powerups.clear();
     for row in &mut game.grid {
         for cell in row.iter_mut() {
-            if *cell != worm::CellType::Wall {
-                *cell = worm::CellType::Empty;
-            }
+            *cell = worm::CellType::Empty;
         }
     }
     let mut v = [0.0f32; worm::cpu_ai::CPU_FEATURE_DIM];
@@ -58,6 +56,13 @@ fn main() {
     let (cx, cy) = game.cycles[1].head;
     println!("dist {}", (px as i16 - cx as i16).abs() + (py as i16 - cy as i16).abs());
     println!("region {:?}", worm::cpu_ai::count_open_space(&game, px, py));
+    // Direct probe of the driver before update() muddies the water.
+    let cands = [Direction::Left, Direction::Up, Direction::Down];
+    let d = worm::cpu_ai::coil_decide(&mut game, &cands);
+    println!("direct coil_decide -> {:?}, episode {:?}", d,
+        game.cpu_brain.coil.as_ref().map(|c| (c.phase, c.ring.len(), c.cursor)));
+    game.cpu_brain.coil = None;
+    game.cpu_brain.coil_cooldown_until = 0;
     for fr in 0..12 {
         if game.game_over {
             println!("game over at {fr}, cause {:?}", game.death_cause);

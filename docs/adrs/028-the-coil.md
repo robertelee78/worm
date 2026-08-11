@@ -1,9 +1,14 @@
 # ADR-028: The Coil — a Deliberate Encirclement Kill Tactic
 
 ## Status
-Accepted (design; k3 + gemini-3.1-pro convergent). Implementation is
-the next work item — fixture 1 below FAILS on today's build by
-construction, which is the owner's missing-tactic test.
+Implemented (stages 1-2, 2026-08-10): episode FSM, activation gates,
+walls-as-ring-segments, closure receipt, existence contract + both
+negatives. AMENDED same day: the ladder slot moved ABOVE the items
+layer — the accepted below-items slot measurably abandoned a live
+Tighten episode for grocery runs (fixture frames chose ItemPath with
+a sealed pocket standing); survival layers keep their veto, and a boa
+does not snack mid-squeeze. Remaining: abort/self-trap fixtures 5-6,
+probe metrics, the on-camera wrap video.
 
 ## Date
 2026-08-10
