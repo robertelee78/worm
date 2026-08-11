@@ -43,9 +43,15 @@ listfile = open('cutseg/list.txt', 'w')
 total = 0.0
 for i, (a, b) in enumerate(windows):
     seg = f'cutseg/seg{i:03d}.mp4'
+    # Audio fades at both seams: 30 independently-encoded AAC joints
+    # otherwise click, chop riffs mid-note, and make the continuous
+    # engine hum jump discontinuously at every cut ('the sound seems
+    # off' — owner, on the seamless-cut v1).
+    dur = b - a
     subprocess.run([
         'ffmpeg', '-y', '-loglevel', 'error', '-ss', f'{a:.2f}',
-        '-i', 'claude-vs-cpu.mp4', '-t', f'{b - a:.2f}',
+        '-i', 'claude-vs-cpu.mp4', '-t', f'{dur:.2f}',
+        '-af', f'afade=t=in:d=0.25,afade=t=out:st={max(0.0, dur - 0.25):.2f}:d=0.25',
         '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
         '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '160k', seg
     ], check=True)
