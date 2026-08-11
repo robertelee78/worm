@@ -214,8 +214,14 @@ await p.evaluate(() => {
           if (path && path.length > 2) goal = { type: 'hunt', target: aim, path, age: 0 };
         }
       }
-      // 3) eat (provably-real food only)
-      if (!goal) {
+      // 3) eat (provably-real food only) — WITH SATIATION (ADR-028
+      // demo persona): a fight-fixated human stops farming food once
+      // comfortably long. Six 40-round rolls measured exactly one coil
+      // because the bot's endless eating kept the CPU's 2x length
+      // window shut; satiation opens the mass game the encirclement
+      // tactic exists to punish.
+      const myLen = me.pos.length;
+      if (!goal && myLen < 12) {
         let bf = null, bd = 1e9;
         for (const [fx, fy] of safeFood) {
           const d = Math.abs(fx - hx) + Math.abs(fy - hy);
