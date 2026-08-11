@@ -3259,6 +3259,63 @@ fn test_coil_activates_on_dominance_and_never_unearned() {
     );
 }
 
+/// ADR-028 fixtures 5-6: a prey that leaves the ring aborts the
+/// episode (RECOVER — dropped, cooldown armed, ladder resumes), and
+/// the tightening floor never lets the CPU squeeze itself to death.
+#[test]
+fn test_coil_aborts_on_escape_with_cooldown() {
+    let mut game = WormGame::with_size(60, 30);
+    game.food_items.clear();
+    game.powerups.clear();
+    for row in &mut game.grid {
+        for cell in row.iter_mut() {
+            *cell = worm::CellType::Empty;
+        }
+    }
+    let mut v = [0.0f32; worm::cpu_ai::CPU_FEATURE_DIM];
+    v[0] = 1.0;
+    for _ in 0..60 {
+        game.cpu_brain.remember(v, worm::Direction::Up, 1.0);
+    }
+    latch_read_for_weapon_fixture(&mut game);
+    for k in 0..=6u16 {
+        game.grid[6][k as usize] = worm::CellType::Wall;
+        game.grid[k as usize][6] = worm::CellType::Wall;
+    }
+    game.cycles[0].head = (5, 5);
+    game.cycles[0].direction = worm::Direction::Up;
+    game.cycles[0].positions = vec![(5, 5), (4, 5)];
+    game.grid[5][5] = worm::CellType::Player;
+    game.grid[5][4] = worm::CellType::Player;
+    let mut pos = Vec::new();
+    for i in 0..60usize {
+        pos.push((11 + (i % 20) as u16, 8 + (i / 20) as u16));
+    }
+    game.cycles[1].head = pos[0];
+    game.cycles[1].direction = worm::Direction::Left;
+    game.cycles[1].positions = pos.clone();
+    for &(x, y) in &pos {
+        game.grid[y as usize][x as usize] = worm::CellType::CPU;
+    }
+    let cands = [worm::Direction::Left, worm::Direction::Up, worm::Direction::Down];
+    assert!(
+        worm::cpu_ai::coil_decide(&mut game, &cands).is_some(),
+        "episode must form on the staged dominance"
+    );
+    assert!(game.cpu_brain.coil.is_some());
+    // The prey breaks out of the ring's bounding box: abort, cooldown.
+    game.cycles[0].head = (40, 20);
+    assert!(
+        worm::cpu_ai::coil_decide(&mut game, &cands).is_none(),
+        "an escaped prey aborts the episode"
+    );
+    assert!(game.cpu_brain.coil.is_none(), "RECOVER drops the episode");
+    assert!(
+        game.cpu_brain.coil_cooldown_until > game.frame_count,
+        "an abort arms the per-prey cooldown (no harassment scripting)"
+    );
+}
+
 /// ADR-022 / k3 Q6: the session doze-exit latch, exercised through the
 /// REAL production sites (codex verify round: the first version wrote the
 /// latch by hand and could not fail). The latch is set only inside
