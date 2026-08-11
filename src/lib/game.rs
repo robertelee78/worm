@@ -3137,6 +3137,8 @@ impl WormGame {
         self.frames_since_cpu_move = 0;
         self.cpu_brain.exploit_fired_this_round = false;
         self.cpu_brain.trim_to_box_until = 0;
+        self.cpu_brain.coil = None;
+        self.cpu_brain.coil_cooldown_until = 0;
         self.last_cpu_decision_frame = 0;
         self.player_trail_laid =
             vec![0; self.width as usize * self.height as usize];

@@ -1585,6 +1585,13 @@ pub struct CpuBrain {
     /// LearnedExploit receipt: cue, prediction, counter). Transient.
     #[serde(skip)]
     pub last_exploit: Option<LearnedExploit>,
+    /// ADR-028: the live encirclement episode, if any. Transient.
+    #[serde(skip)]
+    pub coil: Option<CoilEpisode>,
+    /// ADR-028 per-prey re-attempt cooldown: no new coil before this
+    /// frame after an abort (harassment-scripting guard). Transient.
+    #[serde(skip)]
+    pub coil_cooldown_until: u32,
     /// ADR-027 TRIM-TO-BOX window: open until this frame after a
     /// ratio-transitioning tri-shot trim — the Boxer's dominance entry
     /// consumes it (fire, then choke while the advantage is fresh).
@@ -2294,6 +2301,34 @@ pub struct WallBreakBook {
     pub counts: [[[u32; 2]; 4]; 4],
 }
 
+/// ADR-028 THE COIL: phase of a committed encirclement episode.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CoilPhase {
+    /// Steering toward the ring's start waypoint.
+    Approach,
+    /// On the ring, laying the wall — the attempt is booked here.
+    Cross,
+    /// Ring geometry complete; verifying the pocket seals.
+    Close,
+    /// Pocket confirmed sealed: trace the ring, starve the space.
+    Tighten,
+}
+
+/// ADR-028: one committed wrap. The ring is computed ONCE at commit;
+/// per-frame work is waypoint-following plus abort checks. Transient.
+#[derive(Clone, Debug)]
+pub struct CoilEpisode {
+    pub phase: CoilPhase,
+    /// Border waypoints of the prey-region bounding box, in tracing
+    /// order starting from the CPU's nearest entry point.
+    pub ring: Vec<(u16, u16)>,
+    pub cursor: usize,
+    /// Frame the episode committed (per-prey cooldown + stall abort).
+    pub committed: u32,
+    /// Waypoint progress clock: no cursor advance for 40 frames aborts.
+    pub last_progress: u32,
+}
+
 fn opposite(d: Direction) -> Direction {
     match d {
         Direction::Up => Direction::Down,
@@ -2838,6 +2873,8 @@ impl Default for CpuBrain {
             last_exploit: None,
             trim_to_box_until: 0,
             trishot_class_fires: [0; 3],
+            coil: None,
+            coil_cooldown_until: 0,
             gap_since_voluntary: 0,
             frames_since_food: 99,
             prev_pc_dist: 0,
@@ -6420,6 +6457,180 @@ pub fn should_fire(game: &mut WormGame, who: usize) -> bool {
 }
 
 
+
+/// ADR-028: the prey's flooded region cells (bounded; None above cap =
+/// too big to coil). Blockers are honest: bounds, walls, and BOTH
+/// bodies' cells.
+fn coil_region_cells(
+    game: &WormGame,
+    from: (u16, u16),
+    cap: usize,
+) -> Option<Vec<(u16, u16)>> {
+    let mut visited = vec![false; game.width as usize * game.height as usize];
+    let idx = |x: u16, y: u16| y as usize * game.width as usize + x as usize;
+    let mut queue = std::collections::VecDeque::new();
+    let mut cells = Vec::new();
+    queue.push_back(from);
+    visited[idx(from.0, from.1)] = true;
+    while let Some((x, y)) = queue.pop_front() {
+        cells.push((x, y));
+        if cells.len() > cap {
+            return None;
+        }
+        for (dx, dy) in [(0i16, -1i16), (0, 1), (-1, 0), (1, 0)] {
+            let (nx, ny) = (x as i16 + dx, y as i16 + dy);
+            if nx < 0 || ny < 0 || nx >= game.width as i16 || ny >= game.height as i16 {
+                continue;
+            }
+            let (nx, ny) = (nx as u16, ny as u16);
+            if !visited[idx(nx, ny)]
+                && matches!(
+                    game.grid[ny as usize][nx as usize],
+                    CellType::Empty | CellType::Food | CellType::Hole | CellType::PowerUp
+                )
+            {
+                visited[idx(nx, ny)] = true;
+                queue.push_back((nx, ny));
+            }
+        }
+    }
+    Some(cells)
+}
+
+/// ADR-028 closure test: the prey's region is bounded ONLY by walls,
+/// bounds, and CPU body — no frontier cell blocked by anything else
+/// (its own trail helps seal; that still counts as sealed only when
+/// every non-CPU blocker is its own body, which is fine: it cannot
+/// pass through itself either). Sealed = no Empty-class frontier.
+fn coil_sealed(game: &WormGame, prey: (u16, u16), cap: usize) -> bool {
+    coil_region_cells(game, prey, cap).is_some()
+}
+
+/// ADR-028 coil driver — activation, once-computed ring, waypoint
+/// steering, closure, aborts. Ladder slot: above Boxer, below survival.
+pub fn coil_decide(game: &mut WormGame, candidates: &[Direction]) -> Option<Direction> {
+    if candidates.is_empty() || !game.cycles[0].alive {
+        game.cpu_brain.coil = None;
+        return None;
+    }
+    let frame = game.frame_count;
+    let (px, py) = game.cycles[0].head;
+    let (cx, cy) = game.cycles[1].head;
+    let self_len = game.cycles[1].positions.len()
+        + game.cycles[1].pending_growth as usize;
+    let opp_len = game.cycles[0].positions.len().max(1);
+    let step = |x: u16, y: u16, d: Direction| -> (i16, i16) {
+        let (dx, dy) = d.as_delta();
+        (x as i16 + dx, y as i16 + dy)
+    };
+
+    if let Some(mut ep) = game.cpu_brain.coil.take() {
+        // Stall / prey-escape aborts (RECOVER: drop, cooldown, resume).
+        let escaped = {
+            let minx = ep.ring.iter().map(|c| c.0).min().unwrap_or(0) as i16;
+            let maxx = ep.ring.iter().map(|c| c.0).max().unwrap_or(0) as i16;
+            let miny = ep.ring.iter().map(|c| c.1).min().unwrap_or(0) as i16;
+            let maxy = ep.ring.iter().map(|c| c.1).max().unwrap_or(0) as i16;
+            (px as i16) < minx || (px as i16) > maxx || (py as i16) < miny || (py as i16) > maxy
+        };
+        if escaped || frame.saturating_sub(ep.last_progress) > 40 {
+            game.cpu_brain.coil_cooldown_until = frame + 150;
+            return None;
+        }
+        if ep.phase != CoilPhase::Tighten && coil_sealed(game, (px, py), 220) {
+            ep.phase = CoilPhase::Tighten;
+        }
+        if (cx, cy) == ep.ring[ep.cursor % ep.ring.len()] {
+            ep.cursor = (ep.cursor + 1) % ep.ring.len();
+            ep.last_progress = frame;
+            if ep.phase == CoilPhase::Approach {
+                ep.phase = CoilPhase::Cross;
+            }
+        }
+        let target = ep.ring[ep.cursor % ep.ring.len()];
+        // Self-trap guard while tightening: never take a step whose own
+        // open space drops under prey_len + 2 — WAIT instead (the
+        // starve needs no hurry; the exit clock is the own tail).
+        let floor = if ep.phase == CoilPhase::Tighten {
+            (opp_len + 2) as f32
+        } else {
+            0.0
+        };
+        let dir = candidates
+            .iter()
+            .copied()
+            .filter(|&d| {
+                let (nx, ny) = step(cx, cy, d);
+                nx >= 0
+                    && ny >= 0
+                    && (nx as u16) < game.width
+                    && (ny as u16) < game.height
+                    && (floor == 0.0
+                        || count_open_space(game, nx as u16, ny as u16) >= floor)
+            })
+            .min_by_key(|&d| {
+                let (nx, ny) = step(cx, cy, d);
+                (nx - target.0 as i16).abs() + (ny - target.1 as i16).abs()
+            });
+        if dir.is_some() {
+            game.cpu_brain.coil = Some(ep);
+        } else {
+            game.cpu_brain.coil_cooldown_until = frame + 150;
+        }
+        return dir;
+    }
+
+    // ---- ACTIVATION (all earned: read + mass + feasibility) ----
+    if frame < game.cpu_brain.coil_cooldown_until
+        || game.discipline_sharpness() < 0.5
+        || self_len < 2 * opp_len
+        || (px as i16 - cx as i16).abs() + (py as i16 - cy as i16).abs() > 10
+    {
+        return None;
+    }
+    let cap = ((self_len as f32) * 0.75) as usize;
+    let region = coil_region_cells(game, (px, py), cap.max(8))?;
+    if region.len() > cap.max(8) {
+        return None;
+    }
+    // Ring: the region bbox inflated by 1, clipped in-bounds, walked
+    // clockwise from the CPU's nearest perimeter cell. Feasibility:
+    // the CPU must have the mass to lay it (ring <= 0.8 x own length).
+    let minx = region.iter().map(|c| c.0).min()?.saturating_sub(1);
+    let maxx = (region.iter().map(|c| c.0).max()? + 1).min(game.width - 1);
+    let miny = region.iter().map(|c| c.1).min()?.saturating_sub(1);
+    let maxy = (region.iter().map(|c| c.1).max()? + 1).min(game.height - 1);
+    let mut ring: Vec<(u16, u16)> = Vec::new();
+    for x in minx..=maxx {
+        ring.push((x, miny));
+    }
+    for y in (miny + 1)..=maxy {
+        ring.push((maxx, y));
+    }
+    for x in (minx..maxx).rev() {
+        ring.push((x, maxy));
+    }
+    for y in ((miny + 1)..maxy).rev() {
+        ring.push((minx, y));
+    }
+    if ring.len() < 8 || ring.len() as f32 > 0.8 * self_len as f32 {
+        return None;
+    }
+    let cursor = ring
+        .iter()
+        .enumerate()
+        .min_by_key(|(_, c)| (c.0 as i16 - cx as i16).abs() + (c.1 as i16 - cy as i16).abs())
+        .map(|(i, _)| i)?;
+    game.cpu_brain.coil = Some(CoilEpisode {
+        phase: CoilPhase::Approach,
+        ring,
+        cursor,
+        committed: frame,
+        last_progress: frame,
+    });
+    coil_decide(game, candidates)
+}
+
 /// Faithful to rps-ai's `think` + `decide`: memory-driven read,
 /// confidence-gated, blended with a base-rate prior, resolved by
 /// deterministic argmax (the 5% explore lives only in the close-evasion
@@ -6978,6 +7189,12 @@ pub fn cpu_decide(game: &mut WormGame) -> Direction {
     // so this cannot open before ~10 observed real choices regardless; the
     // hunt floor still vets every destination. Lowered to buy engagement
     // without touching a survival floor.
+    // ADR-028 THE COIL: a committed encirclement outranks Boxer and the
+    // intercepts — the ring was priced at commit and the episode carries
+    // its own aborts. Survival layers above retain their veto by order.
+    if let Some(d) = coil_decide(game, candidates) {
+        choose!(d, CpuDecisionReason::Coil);
+    }
     // RCA F3 episode hysteresis (k3: K in [3,4], <= the 12-frame credit
     // window): once a Boxer episode opens, hold the EPISODE — recompute
     // the safe choke each frame rather than freezing a direction — and

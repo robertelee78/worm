@@ -3182,6 +3182,86 @@ fn test_cross_persona_punish_is_mirrored_and_budgeted() {
     );
 }
 
+/// ADR-028 THE COIL, fixture 1 (the existence test — fails on any
+/// build without the tactic): a read-latched CPU with crushing length
+/// dominance and a nearby confined prey must ENTER the coil (decision
+/// reason "coiling around you") within a handful of frames. Negatives:
+/// unread or under-ratio CPUs must never coil.
+#[test]
+fn test_coil_activates_on_dominance_and_never_unearned() {
+    let run = |latch: bool, cpu_len: usize| -> bool {
+        let mut game = WormGame::with_size(60, 30);
+        game.food_items.clear();
+        game.powerups.clear();
+        // Wipe the default-spawn worm markers: this fixture stages both
+        // bodies by hand, and stale grid cells corrupt the region flood.
+        for row in &mut game.grid {
+            for cell in row.iter_mut() {
+                if *cell != worm::CellType::Wall {
+                    *cell = worm::CellType::Empty;
+                }
+            }
+        }
+        // Warm the self-brain past the cold-start (WarmingUp) layer.
+        let mut v = [0.0f32; worm::cpu_ai::CPU_FEATURE_DIM];
+        v[0] = 1.0;
+        for _ in 0..60 {
+            game.cpu_brain.remember(v, worm::Direction::Up, 1.0);
+        }
+        if latch {
+            latch_read_for_weapon_fixture(&mut game);
+        }
+        // Prey: short worm inside a 6x6 walled nook (region ~34 cells,
+        // under the 0.75 x own-length mass cap for the dominant CPU).
+        for k in 0..=6u16 {
+            game.grid[6][k as usize] = worm::CellType::Wall;
+            game.grid[k as usize][6] = worm::CellType::Wall;
+        }
+        game.cycles[0].head = (5, 5);
+        game.cycles[0].direction = worm::Direction::Up;
+        game.cycles[0].positions = vec![(5, 5), (4, 5)];
+        game.grid[5][5] = worm::CellType::Player;
+        game.grid[5][4] = worm::CellType::Player;
+        // CPU: a long body nearby, head 9 cells from the prey.
+        let mut pos = Vec::new();
+        for i in 0..cpu_len {
+            let x = 11 + (i % 20) as u16;
+            let y = 8 + (i / 20) as u16;
+            pos.push((x, y));
+        }
+        game.cycles[1].head = pos[0];
+        game.cycles[1].direction = worm::Direction::Left;
+        game.cycles[1].positions = pos.clone();
+        for &(x, y) in &pos {
+            game.grid[y as usize][x as usize] = worm::CellType::CPU;
+        }
+        for _ in 0..12 {
+            if game.game_over {
+                break;
+            }
+            game.update();
+            if let Some(d) = game.cpu_telemetry.decision.as_ref() {
+                if d.reason == worm::cpu_ai::CpuDecisionReason::Coil {
+                    return true;
+                }
+            }
+        }
+        false
+    };
+    assert!(
+        run(true, 60),
+        "a latched 30x-length CPU beside a confined prey must coil (fixture 1)"
+    );
+    assert!(
+        !run(false, 60),
+        "an unread CPU never coils — the tactic is earned (negative A)"
+    );
+    assert!(
+        !run(true, 3),
+        "no length dominance, no coil (negative B)"
+    );
+}
+
 /// ADR-022 / k3 Q6: the session doze-exit latch, exercised through the
 /// REAL production sites (codex verify round: the first version wrote the
 /// latch by hand and could not fail). The latch is set only inside
