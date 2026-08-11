@@ -25,7 +25,7 @@
 import { chromium } from 'playwright';
 import fs from 'fs';
 
-const ROUNDS = 20; // owner: "we should play like 15 though — 3-0, 3-1 not enough"
+const ROUNDS = 40; // owner: "we should play like 15 though — 3-0, 3-1 not enough"
 const OUT = process.cwd();
 
 const b = await chromium.launch();
@@ -342,7 +342,23 @@ while (results.length < ROUNDS && Date.now() - sessionT0 < 35 * 60 * 1000) {
       document.getElementById('next-round-btn').click();
     }
   });
-  await p.evaluate((r) => { window.__vidRound = r; }, roundNo + 1);
+  await p.evaluate((r) => {
+    window.__vidRound = r;
+    // ADR-028: count coil closures via the wire receipt so the roll
+    // gate can demand a wrap on camera.
+    if (!window.__coilWatch) {
+      window.__coilWatch = true;
+      const prev = window.__onFrame;
+      window.__onFrame = (s) => {
+        if (prev) prev(s);
+        const ex = s && s.brain && s.brain.learnedExploit;
+        if (ex && /ring closed/.test(ex.counter) && ex.frame !== window.__coilLastFrame) {
+          window.__coilLastFrame = ex.frame;
+          window.__coilSeen = (window.__coilSeen || 0) + 1;
+        }
+      };
+    }
+  }, roundNo + 1);
   const started = await p.waitForFunction(
     () => window.game && !JSON.parse(window.game.state_json()).over,
     { timeout: 10000 }
@@ -366,6 +382,7 @@ while (results.length < ROUNDS && Date.now() - sessionT0 < 35 * 60 * 1000) {
   if (err) console.log('BRAIN-ERR', err);
   if (!done) { console.log('round', roundNo, 'STILL-RUNNING at frames', st && st.frames); continue; }
   if (st.champion) matchesDone++;
+  st.coils = await p.evaluate(() => window.__coilSeen || 0);
   results.push({ round: roundNo, ...st });
   // Cumulative session score for the banner (per-match wins reset).
   const totals = results.reduce(
