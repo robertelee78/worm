@@ -203,6 +203,10 @@ pub enum CpuDecisionReason {
     /// rollout that stages next frame's fire check. Skill, not
     /// read-priced aggression; never a tactic-ledger arm.
     Targeting,
+    /// ADR-028: THE COIL — a committed encirclement episode (ring
+    /// computed once, waypoint-followed, starve-never-press). The
+    /// length-dominance kill the owner asked to SEE.
+    Coil,
 }
 
 impl CpuDecisionReason {
@@ -229,6 +233,7 @@ impl CpuDecisionReason {
             Self::WallFollow => "following the survival floor",
             Self::Boxer => "boxing off your space",
             Self::Targeting => "lining up a shot",
+            Self::Coil => "coiling around you",
         }
     }
 }
@@ -1718,7 +1723,7 @@ pub struct PendingBook {
 
 /// Hunt-family tactics with STABLE semantic ids (never reorder — the wire
 /// stores these ids, not enum positions).
-pub const TACTIC_IDS: [(u8, CpuDecisionReason); 5] = [
+pub const TACTIC_IDS: [(u8, CpuDecisionReason); 6] = [
     (0, CpuDecisionReason::DirectIntercept),
     (1, CpuDecisionReason::CornerIntercept),
     (2, CpuDecisionReason::ItemPath),
@@ -1726,6 +1731,8 @@ pub const TACTIC_IDS: [(u8, CpuDecisionReason); 5] = [
     // ADR-024 Phase A. Ids 5 (Breach actuator telemetry) and 6 (SlipRun)
     // are RESERVED for Phase B — never reuse them for anything else.
     (4, CpuDecisionReason::Boxer),
+    // ADR-028: the Coil. Id 7 — 5 and 6 stay reserved (above).
+    (7, CpuDecisionReason::Coil),
 ];
 /// Frames an opened tactic attempt stays live for kill attribution. The
 /// window is PRECOMMITTED at decision time (codex: no post-hoc causal
