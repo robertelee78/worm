@@ -18,11 +18,15 @@ pre = float(sys.argv[2]) if len(sys.argv) > 2 else 27.0
 post = float(sys.argv[3]) if len(sys.argv) > 3 else 3.0
 
 log = json.load(open('sfx-log.json'))
+SRC = os.environ.get('CUT_SRC', 'claude-vs-cpu.mp4')
 dur = float(subprocess.check_output([
     'ffprobe', '-v', 'error', '-show_entries', 'format=duration',
-    '-of', 'csv=p=0', 'claude-vs-cpu.mp4']).strip())
+    '-of', 'csv=p=0', SRC]).strip())
+# Single-clock captures carry a wall-clock bridge: sfx t + offset =
+# capture-file time. Legacy muxes have no offset (0).
+offset = log.get('captureOffsetMs', 0) / 1000.0
 
-deaths = sorted(t / 1000.0 for (t, ev) in log['sfx'] if ev[0] == ev_kind)
+deaths = sorted(t / 1000.0 + offset for (t, ev) in log['sfx'] if ev[0] == ev_kind)
 if not deaths:
     sys.exit(f"no kind-{ev_kind} events in sfx-log.json")
 # The recording stops on the last round's end before its riff lands:
@@ -50,7 +54,7 @@ for i, (a, b) in enumerate(windows):
     dur = b - a
     subprocess.run([
         'ffmpeg', '-y', '-loglevel', 'error', '-ss', f'{a:.2f}',
-        '-i', 'claude-vs-cpu.mp4', '-t', f'{dur:.2f}',
+        '-i', SRC, '-t', f'{dur:.2f}',
         '-af', f'afade=t=in:d=0.25,afade=t=out:st={max(0.0, dur - 0.25):.2f}:d=0.25',
         '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
         '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '160k', seg

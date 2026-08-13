@@ -7,7 +7,7 @@
 # Run from the rig dir (roll logs + video/ land in cwd).
 for i in 1 2 3; do
   rm -rf video
-  node driver.mjs 2>&1 | tee "take-roll$i.log"
+  xvfb-run -a -s '-screen 0 1280x900x24' node driver.mjs 2>&1 | tee "take-roll$i.log"
   python3 - "take-roll$i.log" <<'PY'
 import json, re, sys
 # THE CROSSOVER GATE (owner, on the 20-round takes: 'if they played

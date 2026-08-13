@@ -24,23 +24,57 @@
 //    (~13s) is provably real; fresh arrivals are suspect.
 import { chromium } from 'playwright';
 import fs from 'fs';
+import { spawn } from 'child_process';
 
 const ROUNDS = 40; // owner: "we should play like 15 though — 3-0, 3-1 not enough"
 const OUT = process.cwd();
 
-const b = await chromium.launch();
-const ctx = await b.newContext({
-  viewport: { width: 1280, height: 900 },
-  recordVideo: { dir: `${OUT}/video`, size: { width: 1280, height: 900 } },
+// SINGLE-CLOCK CAPTURE (2026-08-11, owner: 'maybe we do it fresh'):
+// a HEADED kiosk browser under Xvfb, with ONE ffmpeg recording the X
+// display and the pulse monitor together — audio and video share a
+// clock by construction, and the track carries the real procedural
+// music/hum the offline renderer never could. recordVideo, the
+// offline sound render, and the mux step are all retired on this path.
+// launchPersistentContext: kiosk applies to the INITIAL window, and
+// viewport:null lets the kiosk-filled screen drive the page size —
+// a newContext window would reopen with browser chrome in frame.
+const ctx = await chromium.launchPersistentContext(`${OUT}/.chrome-profile`, {
+  headless: false,
+  viewport: null,
+  ignoreDefaultArgs: ['--enable-automation'],
+  args: [
+    '--autoplay-policy=no-user-gesture-required',
+    '--no-sandbox',
+    '--kiosk',
+    '--window-position=0,0',
+    '--window-size=1280,900',
+  ],
 });
-const p = await ctx.newPage();
+const b = ctx;
+const p = ctx.pages()[0] || await ctx.newPage();
 p.on('pageerror', e => console.log('[pageerror]', e.message.slice(0, 160)));
 await p.goto('http://localhost:8082/', { waitUntil: 'load' });
 await p.evaluate(() => { window.__sfx = []; });
 await p.mouse.click(640, 450);
+await p.mouse.move(1279, 899); // park the cursor off the action
 await p.waitForFunction(() => window.game && !JSON.parse(window.game.state_json()).over, { timeout: 15000 });
+fs.mkdirSync(`${OUT}/video`, { recursive: true });
+const ffmpegStartWall = Date.now();
+const ff = spawn('ffmpeg', [
+  '-y', '-loglevel', 'error',
+  '-f', 'x11grab', '-draw_mouse', '0', '-framerate', '30', '-video_size', '1280x900',
+  '-i', process.env.DISPLAY || ':99',
+  '-f', 'pulse', '-i', 'auto_null.monitor',
+  '-vf', 'crop=1268:886:0:12',
+  '-c:v', 'libx264', '-preset', 'veryfast', '-crf', '23',
+  '-pix_fmt', 'yuv420p', '-c:a', 'aac', '-b:a', '160k',
+  `${OUT}/video/capture.mp4`,
+], { stdio: ['pipe', 'inherit', 'inherit'] });
 const videoT0 = Date.now();
 await p.evaluate(() => { window.__t0 = performance.now(); });
+// Wall-clock bridge for the finishes cutter: capture-file time of an
+// sfx event = (timeOrigin + __t0 + t) - ffmpegStartWall.
+const pageT0Wall = await p.evaluate(() => performance.timeOrigin + window.__t0);
 
 await p.evaluate(() => {
   const DELTA = [[0, -1], [0, 1], [-1, 0], [1, 0]]; // up down left right
@@ -401,11 +435,16 @@ while (results.length < ROUNDS && Date.now() - sessionT0 < 35 * 60 * 1000) {
 
 await p.evaluate(() => { window.__onFrame = null; });
 const sfx = await p.evaluate(() => window.__sfx || []);
-fs.writeFileSync(`${OUT}/sfx-log.json`, JSON.stringify({ videoT0, sfx }, null, 0));
+ff.stdin.write('q');
+await new Promise((res) => { ff.on('exit', res); setTimeout(res, 8000); });
+fs.writeFileSync(`${OUT}/sfx-log.json`, JSON.stringify({
+  videoT0,
+  captureOffsetMs: pageT0Wall - ffmpegStartWall,
+  sfx,
+}, null, 0));
 fs.writeFileSync(`${OUT}/results.json`, JSON.stringify(results, null, 1));
-const video = p.video();
 await ctx.close();
-const path = await video.path();
-fs.writeFileSync(`${OUT}/video-path.txt`, path);
 await b.close();
+const path = `${OUT}/video/capture.mp4`;
+fs.writeFileSync(`${OUT}/video-path.txt`, path);
 console.log('DONE video at', path, 'rounds:', results.length, 'matches:', matchesDone);
