@@ -32,7 +32,9 @@ export class Sfx {
     this.master = null;   // master GainNode → destination
     this.noiseBuf = null; // shared 1s white-noise buffer, created once
     this.hum = null;      // { osc, gain } persistent engine hum
-    this.volume = 0.06;   // cabinet default — quiet enough to layer voices
+    this.volume = 0.3;    // cabinet default (was 0.06: measured -29 dB
+                          // peak in a real browser — 'no music, no
+                          // sounds?' — owner, 2026-08-11)
     this.bgm = new Bgm(this); // background music engine (see header)
   }
 
@@ -233,7 +235,8 @@ export class Sfx {
         const g = this.ctx.createGain();
         osc.type = 'triangle';
         osc.frequency.value = 36;
-        g.gain.value = 0.05; // subtle bed under the action
+        g.gain.value = 0.14; // bed under the action (0.05 under the old
+                             // quiet master measured ~-50 dB: inaudible)
         osc.connect(g); g.connect(this.master);
         osc.onended = () => { osc.disconnect(); g.disconnect(); };
         osc.start();
