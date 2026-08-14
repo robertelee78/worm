@@ -279,6 +279,9 @@ const LEAD_PAT = [0, 1, 2, 3, 2, 1, 2, 3, 0, 1, 2, 3, 3, 2, 1, 0]; // up-down
 // harmony the arps outline, an octave down). Bars 16+: a counter
 // melody answering on beats 2 and 4 — thirds and fifths walking
 // against the lead, an octave below, sine so it sits behind.
+// Bars 24+ (owner: 'one more layer — make it even more interesting'):
+// the drums arrive — kick thump on the downbeats, snare on 2 and 4,
+// and a three-hit rising fill closing every other 4-bar loop.
 const COUNTER = [
   [7, 3],    // over Am: E then C
   [3, 0],    // over F:  C then A
@@ -453,6 +456,27 @@ export class Bgm {
         type: 'sine', freq: note(c - 12), at, dur: d * 3.4,
         vol: 0.24, attack: 0.02, out,
       });
+    }
+    if (totalBar >= 24) {
+      // The kit: kick on the downbeats (sine thump sliding down),
+      // snare on 2 and 4 (bandpassed noise burst).
+      if (s16 === 0 || s16 === 8) {
+        this.sfx._tone({
+          type: 'sine', freq: note(-31), slide: 38, at, dur: 0.14,
+          vol: 0.55, attack: 0.002, out,
+        });
+      }
+      if (s16 === 4 || s16 === 12) {
+        this.sfx._noise({ at, dur: 0.09, vol: 0.28, freq: 1800, type: 'bandpass', out });
+      }
+      // Rising three-hit fill closing every OTHER loop (bars 7, 15 …
+      // of each 8): interest without nagging.
+      if (totalBar % 8 === 7 && s16 >= 13) {
+        this.sfx._noise({
+          at, dur: 0.05, vol: 0.12 + (s16 - 13) * 0.08,
+          freq: 2400 + (s16 - 13) * 900, type: 'bandpass', out,
+        });
+      }
     }
   }
 }
