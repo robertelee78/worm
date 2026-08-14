@@ -29,19 +29,26 @@
   <button data-bar="40">+ full kit (bar 40)</button>
   <button data-bar="48">+ horns (bar 48)</button>
   <button data-bar="56">+ guitar solo (bar 56)</button>
+  <button data-bar="64">drum &amp; bass (64)</button>
+  <button data-bar="72">new jack swing (72)</button>
+  <button data-bar="78">tom drop (80)</button>
   <button id="stop">stop</button>
 </div>
 <label>speed <input id="speed" type="range" min="0" max="100" value="50"></label>
-<div id="phase">press play — the bed grows: bare &rarr; chords 8 &rarr; counter 16 &rarr; drums 24 &rarr; rise 32 &rarr; kit 40 &rarr; horns 48 &rarr; solo 56</div>
+<div id="phase">press play — the bed grows: build to bar 56, then the 32-bar cycle: solo &rarr; drum &amp; bass &rarr; new jack swing &rarr; quiet build &rarr; TOM DROP</div>
 <script type="module">
-  import { Sfx } from './audio.js?v=59';
+  import { Sfx } from './audio.js?v=60';
   const sfx = new Sfx();
   const phase = document.getElementById('phase');
   const bgm = () => sfx.bgm;
   const status = () => {
     if (!bgm().playing) { phase.textContent = 'stopped'; return; }
     const bar = ((bgm().totalSteps || 0) / 16) | 0;
-    const layers = bar >= 56 ? 'EVERYTHING + the solo (8 bars on, 8 off)'
+    const sect = bar >= 56 ? (bar - 56) % 32 : -1;
+    const layers = bar >= 64 && sect >= 24 ? (sect >= 30 ? 'THE GATED-TOM CASCADE' : 'the quiet build (pads + heartbeat)')
+      : bar >= 64 && sect >= 16 ? 'new jack swing (shuffle, claps, orchestra hits)'
+      : bar >= 64 && sect >= 8 ? 'drum & bass (two-step break + reese)'
+      : bar >= 56 ? 'EVERYTHING + the solo'
       : bar >= 48 ? 'full groove + horn hits'
       : bar >= 40 ? 'groove + full kit'
       : bar >= 32 ? 'bass + hats + lead + chords + counter + drums + rising line'

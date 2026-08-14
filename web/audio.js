@@ -488,30 +488,165 @@ export class Bgm {
   _scheduleStep(step, t) {
     const bar = (step / 16) | 0, s16 = step % 16;
     const d = 60 / (126 * this._speedMul()) / 4;
-    if (s16 % 2 === 1) t += d * 0.08;              // subtle swing
-    const at = t - this._ctx.currentTime, out = this.chain.filter;
-    // The layered build: musical time elapsed decides what has joined.
-    // Computed FIRST — every block below may consult these flags.
+    // The layered build: musical time decides what has joined —
+    // computed FIRST (before swing: sections swing differently).
+    // From bar 64 a 32-bar SUPER-CYCLE rotates the back half:
+    // solo (8) -> drum & bass (8) -> new jack swing (8) -> the quiet
+    // build into the gated-tom drop (8) -> solo …  Era sections are
+    // STYLE homages with original lines: the njs shuffle/claps/
+    // orchestra hits, and the gated-reverb tom cascade, are idioms —
+    // no borrowed melodies.
     const totalBar = ((this.totalSteps || 0) / 16) | 0;
     this.totalSteps = (this.totalSteps || 0) + 1;
-    const soloOn = totalBar >= 56 && ((totalBar - 56) % 16) < 8;
-    const breakdown = totalBar >= 55 && ((totalBar - 55) % 16) === 0;
-    if (s16 % 2 === 0) {                            // bass: 8th-note pump
-      const off = BASS[bar] + ((s16 / 2) % 2 ? 12 : 0);
-      this.sfx._tone({ type: 'triangle', freq: note(-24 + off), at, dur: d * 1.8, vol: 0.5, out });
+    const sect = totalBar >= 56 ? (totalBar - 56) % 32 : -1;
+    const soloOn = sect >= 0 && sect < 8;
+    const dnb = totalBar >= 64 && sect >= 8 && sect < 16;
+    const njs = totalBar >= 64 && sect >= 16 && sect < 24;
+    const collins = totalBar >= 64 && sect >= 24;
+    const special = dnb || njs || collins;
+    const breakdown = totalBar === 55;   // later cycles drop via the toms
+    if (s16 % 2 === 1) t += d * (dnb ? 0.02 : njs ? 0.3 : 0.08);
+    const at = t - this._ctx.currentTime, out = this.chain.filter;
+    // BASS (owner: 'more interesting periodically'): the personality
+    // rotates per 4-bar loop once the intro is done — 0 the straight
+    // pump, 1 funk (beat 3 dropped, octave pops on the and-of-2/4),
+    // 2 the pump with a chord-walk bar (root-3rd-5th-7th quarters)
+    // climbing into the loop restart, 3 a 16th gallop with slide-in
+    // roots. Sub and hats keep their own grid throughout.
+    const bassMode = totalBar < 8 ? 0 : ((totalBar / 4) | 0) % 4;
+    if (dnb) {
+      // THE BREAK: two-step kick/snare, ghosts, rolling 16th hats.
+      if (s16 === 0 || s16 === 10) {
+        this.sfx._tone({ type: 'sine', freq: note(-31), slide: 34, at, dur: 0.2, vol: 0.6, attack: 0.002, out });
+        this.sfx._noise({ at, dur: 0.012, vol: 0.3, freq: 3500, type: 'highpass', out });
+      }
+      if (s16 === 4 || s16 === 12) {
+        const sOut = (this.fx && this.fx.snareIn) || out;
+        this.sfx._noise({ at, dur: 0.09, vol: 0.3, freq: 1800, type: 'bandpass', out: sOut });
+        this.sfx._tone({ type: 'triangle', freq: 195, at, dur: 0.07, vol: 0.15, attack: 0.001, out: sOut });
+      }
+      if (s16 === 7 || s16 === 11) {
+        this.sfx._noise({ at, dur: 0.04, vol: 0.09, freq: 1900, type: 'bandpass', out });
+      }
+      this.sfx._noise({
+        at, dur: s16 === 2 || s16 === 14 ? 0.1 : 0.02,
+        vol: [0.12, 0.04, 0.09, 0.05][s16 % 4], freq: 6800, type: 'highpass', out,
+      });
+      // REESE: two half-bar detuned saws dipping a fifth and climbing
+      // back, sine sub holding the floor.
+      if (s16 === 0 || s16 === 8) {
+        const root = -24 + BASS[bar];
+        const dip = s16 === 0;
+        for (const det of [1, 1.009]) {
+          this.sfx._tone({
+            type: 'sawtooth', freq: note(dip ? root : root - 7) * det,
+            slide: note(dip ? root - 7 : root) * det,
+            at, dur: d * 7.6, vol: 0.17, attack: 0.02, out,
+          });
+        }
+        if (s16 === 0) {
+          this.sfx._tone({ type: 'sine', freq: note(root - 12), at, dur: d * 15, vol: 0.24, attack: 0.02, out });
+        }
+      }
+      // Crash the section entrance.
+      if (((totalBar - 56) % 16) === 8 && s16 === 0) {
+        this.sfx._noise({ at, dur: 0.7, vol: 0.22, freq: 5200, type: 'highpass', out });
+      }
+    } else if (njs) {
+      // NEW JACK SWING: hard-swung shuffle, kick 1 / and-of-2 / and-of-3,
+      // clap-stacked backbeat, staccato funk bass, orchestra hits.
+      if (s16 === 0 || s16 === 7 || s16 === 10) {
+        this.sfx._tone({ type: 'sine', freq: note(-31), slide: 34, at, dur: 0.18, vol: 0.58, attack: 0.002, out });
+        this.sfx._noise({ at, dur: 0.012, vol: 0.28, freq: 3500, type: 'highpass', out });
+      }
+      if (s16 === 4 || s16 === 12) {
+        const sOut = (this.fx && this.fx.snareIn) || out;
+        this.sfx._noise({ at, dur: 0.09, vol: 0.28, freq: 1800, type: 'bandpass', out: sOut });
+        this.sfx._noise({ at: at + 0.014, dur: 0.06, vol: 0.16, freq: 2300, type: 'bandpass', out: sOut });
+        this.sfx._tone({ type: 'triangle', freq: 195, at, dur: 0.06, vol: 0.14, attack: 0.001, out: sOut });
+      }
+      this.sfx._noise({
+        at, dur: s16 === 14 ? 0.09 : 0.02,
+        vol: [0.11, 0.05, 0.08, 0.06][s16 % 4], freq: 7000, type: 'highpass', out,
+      });
+      {
+        const root = BASS[bar];
+        const stab = { 0: root, 3: root, 6: root + 12, 10: root + 12, 13: root + 7 }[s16];
+        if (stab != null) {
+          this.sfx._tone({ type: 'triangle', freq: note(-24 + stab), at, dur: d * 0.7, vol: 0.46, out });
+        }
+        if (s16 === 0 || (bar % 2 === 1 && s16 === 6)) {
+          // Orchestra hit: the era's exclamation mark — triad stacked
+          // three octaves, saw+square, slapback, hard cutoff.
+          const hOut = (this.fx && this.fx.snareIn) || out;
+          for (const c of ARPS[bar].slice(0, 3)) {
+            for (const oct of [-12, 0, 12]) {
+              this.sfx._tone({ type: 'sawtooth', freq: note(c + oct), at, dur: 0.13, vol: 0.09, attack: 0.002, out: hOut });
+              this.sfx._tone({ type: 'square', freq: note(c + oct), at, dur: 0.11, vol: 0.05, attack: 0.002, out: hOut });
+            }
+          }
+        }
+      }
+    } else if (collins) {
+      // THE QUIET BUILD: pads carry it; sub heartbeat; a high drone —
+      // then the gated-reverb tom cascade breaks the sky open.
+      if (sect < 30) {
+        if (s16 === 0) {
+          this.sfx._tone({ type: 'sine', freq: note(-36 + BASS[bar]), at, dur: d * 4, vol: 0.22, attack: 0.03, out });
+          this.sfx._tone({ type: 'sine', freq: note(19), at, dur: d * 16, vol: 0.045, attack: d * 4, out });
+        }
+        if (s16 % 8 === 0) {
+          this.sfx._noise({ at, dur: 0.02, vol: 0.04, freq: 7000, type: 'highpass', out });
+        }
+      } else {
+        const sOut = (this.fx && this.fx.snareIn) || out;
+        const hit = (semi, v) => {
+          this.sfx._tone({ type: 'triangle', freq: note(semi), slide: 25, at, dur: 0.12, vol: v, attack: 0.002, out: sOut });
+          this.sfx._noise({ at, dur: 0.08, vol: v * 0.5, freq: 900, type: 'bandpass', out: sOut });
+        };
+        if (sect === 30 && s16 >= 8 && s16 % 2 === 0) {
+          hit([-9, -12, -14, -17][(s16 - 8) / 2], 0.5);
+        }
+        if (sect === 31 && s16 % 2 === 0) {
+          hit([-9, -12, -14, -17, -19, -21, -24, -26][s16 / 2], 0.55);
+        }
+      }
+    } else if (s16 % 2 === 0) {
+      const root = BASS[bar];
+      let semi = root + ((s16 / 2) % 2 ? 12 : 0);
+      let slideFrom = null;
+      if (bassMode === 1 && s16 === 8) semi = null;
+      if (bassMode === 2 && bar === 3) {
+        semi = s16 % 4 === 0 ? root + [0, 3, 7, 10][s16 / 4] : null;
+      }
+      if (bassMode === 3 && s16 === 0) slideFrom = root - 3;
+      if (semi != null) {
+        this.sfx._tone({
+          type: 'triangle',
+          freq: note(-24 + (slideFrom != null ? slideFrom : semi)),
+          slide: slideFrom != null ? note(-24 + semi) : undefined,
+          at, dur: d * 1.8, vol: 0.5, out,
+        });
+      }
       if (s16 % 4 === 0) {                          // sine sub: glue + weight
-        this.sfx._tone({ type: 'sine', freq: note(-36 + BASS[bar]), at, dur: d * 3.6, vol: 0.22, attack: 0.01, out });
+        this.sfx._tone({ type: 'sine', freq: note(-36 + root), at, dur: d * 3.6, vol: 0.22, attack: 0.01, out });
       }
       if (!breakdown) this.sfx._noise({ at, dur: 0.03, vol: s16 % 4 === 2 ? 0.12 : 0.07, freq: 6500, type: 'highpass', out });
+    } else if (bassMode === 1 && (s16 === 7 || s16 === 15)) {
+      // Funk pops: octave stabs pushing into the next downbeat.
+      this.sfx._tone({ type: 'triangle', freq: note(-12 + BASS[bar]), at, dur: d * 0.8, vol: 0.36, out });
+    } else if (bassMode === 3 && s16 % 4 === 1) {
+      // Gallop: quiet low-root 16th right behind each 8th.
+      this.sfx._tone({ type: 'triangle', freq: note(-24 + BASS[bar]), at, dur: d * 0.7, vol: 0.2, out });
     }
     // THE BREAKDOWN: the bar before each solo entry strips to bass +
     // kick, so the solo slams in over the crash (flags computed at the
     // top of the step).
-    if (!breakdown) {
+    if (!breakdown && !njs && !collins) {
       const semi = ARPS[bar][LEAD_PAT[s16]] + (s16 % 8 === 0 ? 12 : 0);
       this.sfx._tone({ freq: note(semi), at, dur: d * 0.92, vol: s16 % 4 === 0 ? 0.3 : 0.2, out });
     }
-    if (totalBar >= 8 && s16 === 0 && !breakdown) {
+    if (totalBar >= 8 && s16 === 0 && !breakdown && !dnb) {
       // Chord pad: the bar's triad, octave down, whole-bar sustain with
       // a slow attack so it swells in under the arp.
       for (const c of ARPS[bar].slice(0, 3)) {
@@ -521,7 +656,7 @@ export class Bgm {
         });
       }
     }
-    if (totalBar >= 16 && (s16 === 4 || s16 === 12) && !breakdown) {
+    if (totalBar >= 16 && (s16 === 4 || s16 === 12) && !breakdown && !special) {
       // Counter melody: answers on beats 2 and 4 — and steps back to
       // half volume while the soloist has the floor.
       const c = COUNTER[bar][s16 === 4 ? 0 : 1];
@@ -530,7 +665,7 @@ export class Bgm {
         vol: soloOn ? 0.12 : 0.24, attack: 0.02, out,
       });
     }
-    if (totalBar >= 24) {
+    if (totalBar >= 24 && !special) {
       // The kit: kick on the downbeats (sine thump sliding down),
       // snare on 2 and 4 (bandpassed noise burst).
       if (s16 === 0 || s16 === 8) {
@@ -553,7 +688,7 @@ export class Bgm {
         });
       }
     }
-    if (totalBar >= 32 && !breakdown && !soloOn) {
+    if (totalBar >= 32 && !breakdown && !soloOn && !special) {
       const loopIdx = (totalBar / 4) | 0;
       const pat = RISE_PATS[loopIdx % RISE_PATS.length];
       const shifted = loopIdx % 2 === 1;           // displaced loop
@@ -590,7 +725,7 @@ export class Bgm {
         }
       }
     }
-    if (totalBar >= 40 && !breakdown) {
+    if (totalBar >= 40 && !breakdown && !special) {
       // Full kit: quiet 16ths between the existing hats, open hats on
       // the off-beats, a ghost snare on the e-of-3, and a descending
       // tom fill closing every 4th bar.
@@ -647,7 +782,7 @@ export class Bgm {
         });
       }
     }
-    if (totalBar >= 48 && !breakdown) {
+    if (totalBar >= 48 && !breakdown && !special) {
       // Horn hits: the bar's triad as a tight detuned-saw stack, sharp
       // attack, short — the and-of-2 every bar, doubled in bar 4.
       const stab = s16 === 6 || (bar === 3 && s16 === 4);
