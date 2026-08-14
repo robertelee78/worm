@@ -26,19 +26,25 @@
   <button data-bar="16">+ counter melody (bar 16)</button>
   <button data-bar="24">+ drums (bar 24)</button>
   <button data-bar="32">+ rising line (bar 32)</button>
+  <button data-bar="40">+ full kit (bar 40)</button>
+  <button data-bar="48">+ horns (bar 48)</button>
+  <button data-bar="56">+ guitar solo (bar 56)</button>
   <button id="stop">stop</button>
 </div>
 <label>speed <input id="speed" type="range" min="0" max="100" value="50"></label>
-<div id="phase">press play — the bed grows: bare &rarr; chords 8 &rarr; counter melody 16 &rarr; drums 24 &rarr; rising line 32</div>
+<div id="phase">press play — the bed grows: bare &rarr; chords 8 &rarr; counter 16 &rarr; drums 24 &rarr; rise 32 &rarr; kit 40 &rarr; horns 48 &rarr; solo 56</div>
 <script type="module">
-  import { Sfx } from './audio.js?v=54';
+  import { Sfx } from './audio.js?v=55';
   const sfx = new Sfx();
   const phase = document.getElementById('phase');
   const bgm = () => sfx.bgm;
   const status = () => {
     if (!bgm().playing) { phase.textContent = 'stopped'; return; }
     const bar = ((bgm().totalSteps || 0) / 16) | 0;
-    const layers = bar >= 32 ? 'full: bass + hats + lead + chords + counter + drums + rising line'
+    const layers = bar >= 56 ? 'EVERYTHING + the solo (8 bars on, 8 off)'
+      : bar >= 48 ? 'full groove + horn hits'
+      : bar >= 40 ? 'groove + full kit'
+      : bar >= 32 ? 'bass + hats + lead + chords + counter + drums + rising line'
       : bar >= 24 ? 'bass + hats + lead + chords + counter melody + drums'
       : bar >= 16 ? 'bass + hats + lead + chords + counter melody'
       : bar >= 8 ? 'bass + hats + lead + chords'

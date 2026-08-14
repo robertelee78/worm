@@ -282,11 +282,34 @@ const LEAD_PAT = [0, 1, 2, 3, 2, 1, 2, 3, 0, 1, 2, 3, 3, 2, 1, 0]; // up-down
 // Bars 24+ (owner: 'one more layer — make it even more interesting'):
 // the drums arrive — kick thump on the downbeats, snare on 2 and 4,
 // and a three-hit rising fill closing every other 4-bar loop.
-// Bars 32+ (owner: 'maybe some sort of rising line'): a triangle
-// voice climbs the A natural-minor scale one octave across each
-// 4-bar loop, two notes per bar, swelling as it rises — then
-// restarts the climb with the loop.
-const RISE = [0, 2, 3, 5, 7, 8, 10, 12];
+// Bars 32+ (owner: 'maybe some sort of rising line', then 'needs to
+// be more interesting'): the climb alternates contours per loop —
+// straight ascent, zig-zag (two up, one back), wide leaps — phrased
+// as dotted pushes through bars 1-3 (notes slide in from a tone
+// below), then a double-time run to the top in bar 4. Ten entries
+// per contour: six dotted, four for the run.
+const RISE_PATS = [
+  [0, 2, 3, 5, 7, 8,   10, 12, 14, 15],
+  [0, 3, 2, 7, 5, 10,  8, 12, 15, 19],
+  [0, 7, 3, 10, 7, 14, 12, 15, 17, 19],
+];
+// Bars 40+: the full kit — 16th hats with accents, open hats on the
+// off-beats, a ghost snare, and descending tom fills every 4th bar.
+// Bars 48+: horn hits — detuned sawtooth stacks stabbing the bar's
+// triad on syncopated accents (the and-of-2, plus a bar-4 double).
+// Bars 56+: THE SOLO — a doubled, bent sawtooth guitar line over the
+// whole groove; 8 bars on, 8 bars off, so it phrases like a player
+// and not a siren. Entries: [s16, semi, durSteps, bendFromSemi?].
+const SOLO = [
+  [[0, 12, 2], [2, 15, 2], [4, 17, 2], [6, 19, 6, 17], [12, 15, 2], [14, 12, 2]],
+  [[0, 17, 4], [4, 15, 2], [6, 12, 2], [8, 17, 8, 15]],
+  [[0, 14, 2], [2, 17, 2], [4, 19, 2], [6, 22, 4], [10, 19, 2], [12, 17, 2], [14, 14, 2]],
+  [[0, 12, 10, 10], [12, 19, 2], [14, 24, 2]],
+  [[0, 12, 1], [1, 15, 1], [2, 17, 1], [3, 19, 1], [4, 22, 1], [5, 24, 1], [6, 27, 6, 24], [14, 22, 2]],
+  [[0, 24, 4], [4, 22, 2], [6, 19, 2], [8, 17, 4, 19], [12, 15, 2]],
+  [[0, 14, 2], [2, 14, 1], [3, 14, 1], [4, 17, 2], [6, 19, 2], [8, 22, 2], [10, 24, 2], [12, 26, 4, 24]],
+  [[0, 24, 6, 26], [8, 19, 2], [10, 15, 2], [12, 12, 8]],
+];
 const COUNTER = [
   [7, 3],    // over Am: E then C
   [3, 0],    // over F:  C then A
@@ -483,14 +506,77 @@ export class Bgm {
         });
       }
     }
-    if (totalBar >= 32 && (s16 === 0 || s16 === 8)) {
-      // The rising line: octave climb across the loop, swelling as it
-      // goes, reset by the next loop.
-      const idx = (bar * 2 + (s16 === 8 ? 1 : 0)) % RISE.length;
-      this.sfx._tone({
-        type: 'triangle', freq: note(RISE[idx]), at, dur: d * 7.2,
-        vol: 0.12 + idx * 0.018, attack: d * 1.5, out,
-      });
+    if (totalBar >= 32) {
+      // The rising line, phrased: dotted pushes (0 and the and-of-2)
+      // through bars 1-3, double-time run in bar 4; contour rotates
+      // each loop; dotted notes bend in from a whole tone below.
+      const pat = RISE_PATS[((totalBar / 4) | 0) % RISE_PATS.length];
+      let idx = -1, run = false;
+      if (bar < 3 && (s16 === 0 || s16 === 6)) idx = bar * 2 + (s16 === 6 ? 1 : 0);
+      if (bar === 3 && s16 % 4 === 0) { idx = 6 + s16 / 4; run = true; }
+      if (idx >= 0) {
+        const target = note(pat[idx]);
+        this.sfx._tone({
+          type: 'triangle', freq: run ? target : note(pat[idx] - 2),
+          slide: run ? undefined : target,
+          at, dur: run ? d * 3.4 : d * 5.2,
+          vol: 0.12 + idx * 0.016, attack: run ? 0.01 : d * 1.2, out,
+        });
+      }
+    }
+    if (totalBar >= 40) {
+      // Full kit: quiet 16ths between the existing hats, open hats on
+      // the off-beats, a ghost snare on the e-of-3, and a descending
+      // tom fill closing every 4th bar.
+      if (s16 % 2 === 1 && s16 !== 7 && s16 !== 15) {
+        this.sfx._noise({ at, dur: 0.02, vol: 0.05, freq: 7000, type: 'highpass', out });
+      }
+      if (s16 === 6 || s16 === 14) {
+        this.sfx._noise({ at, dur: 0.12, vol: 0.11, freq: 6000, type: 'highpass', out });
+      }
+      if (s16 === 11) {
+        this.sfx._noise({ at, dur: 0.05, vol: 0.1, freq: 1800, type: 'bandpass', out });
+      }
+      if (totalBar % 4 === 3 && s16 >= 12) {
+        const toms = [-14, -17, -21, -24];
+        this.sfx._tone({
+          type: 'triangle', freq: note(toms[s16 - 12]), slide: 30,
+          at, dur: 0.11, vol: 0.4, attack: 0.002, out,
+        });
+      }
+    }
+    if (totalBar >= 48) {
+      // Horn hits: the bar's triad as a tight detuned-saw stack, sharp
+      // attack, short — the and-of-2 every bar, doubled in bar 4.
+      const stab = s16 === 6 || (bar === 3 && s16 === 4);
+      if (stab) {
+        for (const c of ARPS[bar].slice(0, 3)) {
+          for (const det of [1, 1.006]) {
+            this.sfx._tone({
+              type: 'sawtooth', freq: note(c) * det, at, dur: 0.16,
+              vol: 0.11, attack: 0.004, out,
+            });
+          }
+        }
+      }
+    }
+    if (totalBar >= 56 && ((totalBar - 56) % 16) < 8) {
+      // THE SOLO: 8 bars on, 8 off. Doubled saw lead with slide bends;
+      // the double is detuned and quieter for width.
+      const soloBar = (totalBar - 56) % 8;
+      for (const [hit, semi, durSteps, from] of SOLO[soloBar]) {
+        if (hit === s16) {
+          const target = note(semi);
+          const start = from != null ? note(from) : target;
+          for (const [det, v] of [[1, 0.27], [1.007, 0.1]]) {
+            this.sfx._tone({
+              type: 'sawtooth', freq: start * det,
+              slide: from != null ? target * det : undefined,
+              at, dur: d * durSteps * 0.95, vol: v, attack: 0.008, out,
+            });
+          }
+        }
+      }
     }
   }
 }
