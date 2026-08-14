@@ -543,12 +543,27 @@ export class Bgm {
     const sceneIdx = (totalBar / 8) | 0;
     if (!this.scene || (!this.holdScene && sceneIdx !== this.sceneIdx)) {
       this.sceneIdx = sceneIdx;
-      this.scene = this._rollScene(sceneIdx);
+      const next = (!this.holdScene && this.nextScene) || this._rollScene(sceneIdx);
+      // NATURAL TRANSITIONS (owner): remember whether the show changed
+      // so the entrance can be stamped with a crash.
+      const key = JSON.stringify(next);
+      this.sceneChanged = this.lastSceneKey != null && this.lastSceneKey !== key;
+      this.lastSceneKey = key;
+      this.scene = next;
+      this.nextScene = null;
     } else {
       this.sceneIdx = sceneIdx;
     }
     const sc = this.scene;
     const sceneBar = totalBar % 8;
+    // Look ahead one bar: the last bar of a scene knows what's coming
+    // and telegraphs a change with a drum fill.
+    if (!this.holdScene && sceneBar === 7 && s16 === 0 && !this.nextScene) {
+      this.nextScene = this._rollScene(sceneIdx + 1);
+    }
+    const fillTime = sceneBar === 7 && this.nextScene
+      && JSON.stringify(this.nextScene) !== JSON.stringify(sc)
+      && this.nextScene.mode !== 'build';
     const dnb = sc.mode === 'pocket';
     const njs = sc.mode === 'njs';
     const collins = sc.mode === 'build';
@@ -896,6 +911,25 @@ export class Bgm {
           }
         }
       }
+    }
+    // Transition drama: the telegraph fill into a changing scene, and
+    // the crash stamping a changed scene's first downbeat (kit scenes
+    // already crash their cycle top; quiet build earns its silence).
+    if (fillTime && s16 >= 10 && (sc.drums || sc.kit || dnb || njs)) {
+      this.sfx._noise({
+        at, dur: 0.04, vol: 0.06 + (s16 - 10) * 0.045,
+        freq: 1800, type: 'bandpass', out,
+      });
+      if (s16 === 12 || s16 === 14) {
+        this.sfx._tone({
+          type: 'triangle', freq: note(s16 === 12 ? -14 : -19), slide: 25,
+          at, dur: 0.1, vol: 0.34, attack: 0.002, out,
+        });
+      }
+    }
+    if (this.sceneChanged && sceneBar === 0 && s16 === 0
+        && !collins && !breakdown && !sc.kit && (sc.drums || dnb || njs)) {
+      this.sfx._noise({ at, dur: 0.6, vol: 0.18, freq: 5200, type: 'highpass', out });
     }
     if (soloOn) {
       // THE SOLO: its scene rolls it, the breakdown bar launches it.
