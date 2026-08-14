@@ -26,7 +26,7 @@ import { chromium } from 'playwright';
 import fs from 'fs';
 import { spawn } from 'child_process';
 
-const ROUNDS = 40; // owner: "we should play like 15 though — 3-0, 3-1 not enough"
+const ROUNDS = 48; // owner: "we should play like 15 though — 3-0, 3-1 not enough"
 const OUT = process.cwd();
 
 // SINGLE-CLOCK CAPTURE (2026-08-11, owner: 'maybe we do it fresh'):
@@ -372,7 +372,7 @@ await p.evaluate(() => {
 const results = [];
 let matchesDone = 0, roundNo = 0;
 const sessionT0 = Date.now();
-while (results.length < ROUNDS && Date.now() - sessionT0 < 35 * 60 * 1000) {
+while (results.length < ROUNDS && Date.now() - sessionT0 < 58 * 60 * 1000) {
   await p.evaluate(() => {
     if (!window.game || !window.game.is_over()) return;
     const champ = document.getElementById('champion-overlay');
