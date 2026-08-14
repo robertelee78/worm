@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>worm — music audition</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  body { background: #06110f; color: #7ddc7d; font-family: monospace;
+         display: flex; flex-direction: column; align-items: center;
+         gap: 18px; padding-top: 12vh; }
+  h1 { color: #2ee6d6; font-size: 20px; margin: 0; }
+  button { background: #0b2420; color: #7ddc7d; border: 1px solid #2ee6d6;
+           font-family: monospace; font-size: 16px; padding: 10px 22px;
+           cursor: pointer; }
+  button:hover { background: #123830; }
+  #phase { color: #ffc94d; min-height: 1.2em; }
+  label { font-size: 14px; }
+</style>
+</head>
+<body>
+<h1>worm — background music audition</h1>
+<div>
+  <button id="play">&#9654; play</button>
+  <button data-bar="0">bare (bar 0)</button>
+  <button data-bar="8">+ chords (bar 8)</button>
+  <button data-bar="16">+ counter melody (bar 16)</button>
+  <button id="stop">stop</button>
+</div>
+<label>speed <input id="speed" type="range" min="0" max="100" value="50"></label>
+<div id="phase">press play — the bed grows: bare &rarr; chords at bar 8 &rarr; counter melody at bar 16</div>
+<script type="module">
+  import { Sfx } from './audio.js?v=52';
+  const sfx = new Sfx();
+  const phase = document.getElementById('phase');
+  const bgm = () => sfx.bgm;
+  const status = () => {
+    if (!bgm().playing) { phase.textContent = 'stopped'; return; }
+    const bar = ((bgm().totalSteps || 0) / 16) | 0;
+    const layers = bar >= 16 ? 'bass + hats + lead + chords + counter melody'
+      : bar >= 8 ? 'bass + hats + lead + chords'
+      : 'bass + hats + lead (bare)';
+    phase.textContent = `bar ${bar} — ${layers}`;
+  };
+  setInterval(status, 500);
+  document.getElementById('play').onclick = () => { sfx.unlock(); bgm().start(+document.getElementById('speed').value); };
+  document.getElementById('stop').onclick = () => bgm().stop();
+  document.getElementById('speed').oninput = (e) => bgm().setSpeed(+e.target.value);
+  for (const b of document.querySelectorAll('button[data-bar]')) {
+    b.onclick = () => {
+      sfx.unlock();
+      if (!bgm().playing) bgm().start(+document.getElementById('speed').value);
+      bgm().totalSteps = (+b.dataset.bar) * 16;
+    };
+  }
+</script>
+</body>
+</html>
