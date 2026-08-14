@@ -805,6 +805,30 @@ export class Bgm {
         });
       }
     }
+    // AIRY ORCHESTRAL STRINGS (owner): detuned saw ensembles, slow
+    // attacks, whisper volume, high register — a two-voice shimmer
+    // (high 5th + root two octaves up) over the groove from bar 48,
+    // and the full four-voice section in the quiet build, where
+    // strings live. Each voice is three saws a few cents apart: the
+    // beating IS the air. Never in the pocket (drums and bass only).
+    {
+      const strings =
+        (totalBar >= 48 && !breakdown && !dnb && !njs) || (collins && sect < 30);
+      if (strings && s16 === 0 && totalBar % 2 === 0) {
+        const semis = collins
+          ? [ARPS[bar][0] + 12, ARPS[bar][1] + 12, ARPS[bar][2] + 12, ARPS[bar][0] + 24]
+          : [ARPS[bar][2] + 12, ARPS[bar][0] + 24];
+        for (const semi of semis) {
+          for (const det of [0.9955, 1.0, 1.0055]) {
+            this.sfx._tone({
+              type: 'sawtooth', freq: note(semi) * det, at,
+              dur: d * 31, vol: collins ? 0.038 : 0.027,
+              attack: d * 8, out,
+            });
+          }
+        }
+      }
+    }
     if (totalBar >= 48 && !breakdown && !special) {
       // Horn hits: the bar's triad as a tight detuned-saw stack, sharp
       // attack, short — the and-of-2 every bar, doubled in bar 4.
