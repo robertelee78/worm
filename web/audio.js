@@ -497,9 +497,9 @@ export class Bgm {
       if (s16 === 4 || s16 === 12) {
         this.sfx._noise({ at, dur: 0.09, vol: 0.28, freq: 1800, type: 'bandpass', out });
       }
-      // Rising three-hit fill closing every OTHER loop (bars 7, 15 …
-      // of each 8): interest without nagging.
-      if (totalBar % 8 === 7 && s16 >= 13) {
+      // Rising three-hit fill closing every OTHER loop — pre-kit phase
+      // only; the full kit replaces it with a real snare roll.
+      if (totalBar % 8 === 7 && s16 >= 13 && totalBar < 40) {
         this.sfx._noise({
           at, dur: 0.05, vol: 0.12 + (s16 - 13) * 0.08,
           freq: 2400 + (s16 - 13) * 900, type: 'bandpass', out,
@@ -537,11 +537,47 @@ export class Bgm {
       if (s16 === 11) {
         this.sfx._noise({ at, dur: 0.05, vol: 0.1, freq: 1800, type: 'bandpass', out });
       }
-      if (totalBar % 4 === 3 && s16 >= 12) {
+      if (totalBar % 8 === 3 && s16 >= 12) {
         const toms = [-14, -17, -21, -24];
         this.sfx._tone({
           type: 'triangle', freq: note(toms[s16 - 12]), slide: 30,
           at, dur: 0.11, vol: 0.4, attack: 0.002, out,
+        });
+      }
+      // AWESOME PASS (owner): layered transients and groove.
+      // Kick click for punch, on every kick — plus a funk push on the
+      // and-of-3 every other bar.
+      if (s16 === 0 || s16 === 8 || (s16 === 10 && totalBar % 2 === 1)) {
+        this.sfx._noise({ at, dur: 0.012, vol: 0.3, freq: 3500, type: 'highpass', out });
+        if (s16 === 10) {
+          this.sfx._tone({
+            type: 'sine', freq: note(-31), slide: 38, at, dur: 0.12,
+            vol: 0.42, attack: 0.002, out,
+          });
+        }
+      }
+      // Snare crack: tonal body + click under the noise burst.
+      if (s16 === 4 || s16 === 12) {
+        this.sfx._tone({
+          type: 'triangle', freq: note(-20), slide: 140, at, dur: 0.06,
+          vol: 0.26, attack: 0.001, out,
+        });
+        this.sfx._noise({ at, dur: 0.015, vol: 0.2, freq: 4500, type: 'highpass', out });
+      }
+      // Clap doubling the 4-backbeat every other loop: two offset bursts.
+      if (s16 === 12 && ((totalBar / 4) | 0) % 2 === 1) {
+        this.sfx._noise({ at: at + 0.012, dur: 0.05, vol: 0.16, freq: 2200, type: 'bandpass', out });
+        this.sfx._noise({ at: at + 0.026, dur: 0.07, vol: 0.12, freq: 2600, type: 'bandpass', out });
+      }
+      // Crash splash topping every 8-bar cycle.
+      if (totalBar % 8 === 0 && s16 === 0) {
+        this.sfx._noise({ at, dur: 0.7, vol: 0.2, freq: 5200, type: 'highpass', out });
+      }
+      // Accelerating snare roll into every cycle top.
+      if (totalBar % 8 === 7 && s16 >= 8) {
+        this.sfx._noise({
+          at, dur: 0.035, vol: 0.05 + (s16 - 8) * 0.028,
+          freq: 1800, type: 'bandpass', out,
         });
       }
     }
