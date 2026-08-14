@@ -273,6 +273,18 @@ const ARPS = [                       // per-bar lead chord tones (from A4)
   [0, 3, 7, 12],   // A C E A
 ];
 const LEAD_PAT = [0, 1, 2, 3, 2, 1, 2, 3, 0, 1, 2, 3, 3, 2, 1, 0]; // up-down
+// Layered build (owner: 'pretty good but bare .. add chords after a
+// while, and maybe a counter melody'): the bed grows as a session runs.
+// Bars 0-7: the bare mix. Bars 8+: sustained triad pads (the same
+// harmony the arps outline, an octave down). Bars 16+: a counter
+// melody answering on beats 2 and 4 — thirds and fifths walking
+// against the lead, an octave below, sine so it sits behind.
+const COUNTER = [
+  [7, 3],    // over Am: E then C
+  [3, 0],    // over F:  C then A
+  [5, 2],    // over G:  D then B
+  [3, 7],    // over Am: C then E (lift into the loop restart)
+];
 
 export class Bgm {
   constructor(sfx) {
@@ -388,6 +400,7 @@ export class Bgm {
     if (this.playing || !this.sfx.ready) return;
     this._ensureChain();
     this.playing = true;
+    this.totalSteps = 0;
     this.step = 0;
     this.nextT = this._ctx.currentTime + 0.06;
     this._applyGain();
@@ -419,5 +432,27 @@ export class Bgm {
     }
     const semi = ARPS[bar][LEAD_PAT[s16]] + (s16 % 8 === 0 ? 12 : 0);
     this.sfx._tone({ freq: note(semi), at, dur: d * 0.92, vol: s16 % 4 === 0 ? 0.3 : 0.2, out });
+    // The layered build: musical time elapsed decides what has joined.
+    const totalBar = ((this.totalSteps || 0) / 16) | 0;
+    this.totalSteps = (this.totalSteps || 0) + 1;
+    if (totalBar >= 8 && s16 === 0) {
+      // Chord pad: the bar's triad, octave down, whole-bar sustain with
+      // a slow attack so it swells in under the arp.
+      for (const c of ARPS[bar].slice(0, 3)) {
+        this.sfx._tone({
+          type: 'sawtooth', freq: note(c - 12), at, dur: d * 15.5,
+          vol: 0.085, attack: d * 4, out,
+        });
+      }
+    }
+    if (totalBar >= 16 && (s16 === 4 || s16 === 12)) {
+      // Counter melody: answers on beats 2 and 4, an octave below the
+      // lead, walking thirds/fifths against the arp.
+      const c = COUNTER[bar][s16 === 4 ? 0 : 1];
+      this.sfx._tone({
+        type: 'sine', freq: note(c - 12), at, dur: d * 3.4,
+        vol: 0.24, attack: 0.02, out,
+      });
+    }
   }
 }
