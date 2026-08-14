@@ -543,9 +543,16 @@ export class Bgm {
           [0, 7, 10, 12, 10, 7, 0, 7],
         ];
         const semi = LINE[bar][s16 / 2];
-        this.sfx._tone({ type: 'triangle', freq: note(-24 + semi), at, dur: d * 1.5, vol: 0.5, out });
+        // Bass-guitar stack (owner: 'more masculine'): sine fundamental
+        // a full octave down for chest, sawtooth growl above it with a
+        // pluck slide-in for the finger attack.
+        this.sfx._tone({ type: 'sine', freq: note(-36 + semi), at, dur: d * 1.7, vol: 0.38, attack: 0.004, out });
+        this.sfx._tone({
+          type: 'sawtooth', freq: note(-24 + semi) * 1.02, slide: note(-24 + semi),
+          at, dur: d * 1.4, vol: 0.24, attack: 0.003, out,
+        });
         if (s16 === 0) {
-          this.sfx._tone({ type: 'sine', freq: note(-36 + BASS[bar]), at, dur: d * 7.5, vol: 0.2, attack: 0.015, out });
+          this.sfx._tone({ type: 'sine', freq: note(-36 + BASS[bar]), at, dur: d * 7.5, vol: 0.15, attack: 0.015, out });
         }
       }
       // Crash the section entrance.
@@ -627,9 +634,13 @@ export class Bgm {
           slide: slideFrom != null ? note(-24 + semi) : undefined,
           at, dur: d * 1.8, vol: 0.5, out,
         });
+        this.sfx._tone({
+          type: 'sawtooth', freq: note(-24 + semi), at,
+          dur: d * 1.5, vol: 0.13, attack: 0.004, out,
+        });
       }
       if (s16 % 4 === 0) {                          // sine sub: glue + weight
-        this.sfx._tone({ type: 'sine', freq: note(-36 + root), at, dur: d * 3.6, vol: 0.22, attack: 0.01, out });
+        this.sfx._tone({ type: 'sine', freq: note(-36 + root), at, dur: d * 3.6, vol: 0.27, attack: 0.01, out });
       }
       if (!breakdown) this.sfx._noise({ at, dur: 0.03, vol: s16 % 4 === 2 ? 0.12 : 0.07, freq: 6500, type: 'highpass', out });
     } else if (bassMode === 1 && (s16 === 7 || s16 === 15)) {
