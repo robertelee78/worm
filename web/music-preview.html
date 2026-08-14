@@ -21,23 +21,17 @@
 <h1>worm — background music audition</h1>
 <div>
   <button id="play">&#9654; play</button>
-  <button data-bar="0">bare (bar 0)</button>
-  <button data-bar="8">+ chords (bar 8)</button>
-  <button data-bar="16">+ counter melody (bar 16)</button>
-  <button data-bar="24">+ drums (bar 24)</button>
-  <button data-bar="32">+ rising line (bar 32)</button>
-  <button data-bar="40">+ full kit (bar 40)</button>
-  <button data-bar="48">+ horns (bar 48)</button>
-  <button data-bar="56">+ guitar solo (bar 56)</button>
-  <button data-bar="64">drums &amp; bass groove (64)</button>
-  <button data-bar="72">new jack swing (72)</button>
-  <button data-bar="78">tom drop (80)</button>
+  <button data-mode="full">full groove</button>
+  <button data-mode="pocket">drums &amp; bass</button>
+  <button data-mode="njs">new jack swing</button>
+  <button data-mode="build">quiet build &rarr; tom drop</button>
+  <button data-mode="solo">breakdown &rarr; solo</button>
   <button id="stop">stop</button>
 </div>
 <label>speed <input id="speed" type="range" min="0" max="100" value="50"></label>
 <div id="phase">press play — the bed grows: build to bar 56, then the 32-bar cycle: solo &rarr; groove pocket &rarr; new jack swing &rarr; quiet build &rarr; TOM DROP</div>
 <script type="module">
-  import { Sfx } from './audio.js?v=65';
+  import { Sfx } from './audio.js?v=66';
   const sfx = new Sfx();
   const phase = document.getElementById('phase');
   const bgm = () => sfx.bgm;
@@ -62,11 +56,11 @@
   document.getElementById('play').onclick = () => { sfx.unlock(); bgm().start(+document.getElementById('speed').value); };
   document.getElementById('stop').onclick = () => bgm().stop();
   document.getElementById('speed').oninput = (e) => bgm().setSpeed(+e.target.value);
-  for (const b of document.querySelectorAll('button[data-bar]')) {
+  for (const b of document.querySelectorAll('button[data-mode]')) {
     b.onclick = () => {
       sfx.unlock();
       if (!bgm().playing) bgm().start(+document.getElementById('speed').value);
-      bgm().totalSteps = (+b.dataset.bar) * 16;
+      bgm().forceScene(b.dataset.mode);
     };
   }
 </script>

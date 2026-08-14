@@ -294,7 +294,7 @@ const RISE_PATS = [
   [0, 2, 3, 5, 7, 8,    10, 12, 14, 15],
   [0, 3, 2, 7, 5, 10,   8, 12, 15, 19],
   [0, 7, 3, 10, 7, 14,  19, 15, 12, 24],
-  [0, 1, 3, 4, 7, 8,    10, 11, 12, 15],
+  [0, 3, 5, 7, 8, 10,   12, 15, 17, 19],
   [0, 3, 7, 8, 12, 15,  12, 17, 19, 24],
 ];
 // Bars 40+: the full kit — 16th hats with accents, open hats on the
@@ -461,11 +461,48 @@ export class Bgm {
     });
   }
 
+  // THE ARRANGER (owner: 'random mix and match — each feature should
+  // be mixable with other features'): every 8 bars a SCENE is rolled —
+  // either a special section (the pocket, new jack swing, the quiet
+  // build into the tom drop, or a breakdown into the solo) or a groove
+  // scene with every layer and bass personality toggled independently.
+  // Sparse early, denser as the session matures.
+  _rollScene(i) {
+    const r = Math.random;
+    if (i >= 5 && r() < 0.3) {
+      const mode = ['pocket', 'njs', 'build', 'solo'][(r() * 4) | 0];
+      return { mode, chords: mode !== 'pocket', counter: false, drums: true,
+               kit: true, horns: false, strings: r() < 0.5, rise: false, bass: 0 };
+    }
+    return {
+      mode: 'groove',
+      chords: i >= 1 && r() < 0.8,
+      counter: i >= 2 && r() < 0.6,
+      drums: i >= 2 || r() < 0.4,
+      kit: i >= 3 && r() < 0.65,
+      horns: i >= 4 && r() < 0.4,
+      strings: i >= 3 && r() < 0.5,
+      rise: i >= 2 && r() < 0.5,
+      bass: i < 1 ? 0 : (r() * 4) | 0,
+    };
+  }
+
+  // Audition hook: pin a scene by name until the next boundary.
+  forceScene(mode) {
+    const full = { mode: 'groove', chords: true, counter: true, drums: true,
+                   kit: true, horns: true, strings: true, rise: true, bass: 1 };
+    this.scene = mode === 'full' ? full
+      : { ...full, mode, counter: false, horns: false, rise: false };
+    this.sceneIdx = ((this.totalSteps || 0) / 128) | 0;
+  }
+
   _startProcedural() {
     if (this.playing || !this.sfx.ready) return;
     this._ensureChain();
     this.playing = true;
     this.totalSteps = 0;
+    this.sceneIdx = -1;
+    this.scene = null;
     this.step = 0;
     this.nextT = this._ctx.currentTime + 0.06;
     this._applyGain();
@@ -498,13 +535,20 @@ export class Bgm {
     // no borrowed melodies.
     const totalBar = ((this.totalSteps || 0) / 16) | 0;
     this.totalSteps = (this.totalSteps || 0) + 1;
-    const sect = totalBar >= 56 ? (totalBar - 56) % 32 : -1;
-    const soloOn = sect >= 0 && sect < 8;
-    const dnb = totalBar >= 64 && sect >= 8 && sect < 16;
-    const njs = totalBar >= 64 && sect >= 16 && sect < 24;
-    const collins = totalBar >= 64 && sect >= 24;
+    const sceneIdx = (totalBar / 8) | 0;
+    if (sceneIdx !== this.sceneIdx || !this.scene) {
+      this.sceneIdx = sceneIdx;
+      this.scene = this._rollScene(sceneIdx);
+    }
+    const sc = this.scene;
+    const sceneBar = totalBar % 8;
+    const dnb = sc.mode === 'pocket';
+    const njs = sc.mode === 'njs';
+    const collins = sc.mode === 'build';
+    const sect = collins ? 24 + sceneBar : -1;  // cascade at 30/31
+    const soloOn = sc.mode === 'solo' && sceneBar >= 1;
+    const breakdown = sc.mode === 'solo' && sceneBar === 0;
     const special = dnb || njs || collins;
-    const breakdown = totalBar === 55;   // later cycles drop via the toms
     if (s16 % 2 === 1) t += d * (dnb ? 0.02 : njs ? 0.3 : 0.08);
     const at = t - this._ctx.currentTime, out = this.chain.filter;
     // BASS (owner: 'more interesting periodically'): the personality
@@ -513,7 +557,7 @@ export class Bgm {
     // 2 the pump with a chord-walk bar (root-3rd-5th-7th quarters)
     // climbing into the loop restart, 3 a 16th gallop with slide-in
     // roots. Sub and hats keep their own grid throughout.
-    const bassMode = totalBar < 8 ? 0 : ((totalBar / 4) | 0) % 4;
+    const bassMode = sc.bass;
     if (dnb) {
       // THE GROOVE (owner: 'was thinking more michael jackson'): a
       // stripped drums-and-bass pocket, Billie-Jean-school — DRY
@@ -568,7 +612,7 @@ export class Bgm {
         this.sfx._tone({ type: 'sine', freq: note(-36 + semi), at, dur: d * 1.5, vol: 0.36 * acc, attack: 0.003, out });
       }
       // Crash the section entrance.
-      if (((totalBar - 56) % 32) === 8 && s16 === 0) {
+      if (sceneBar === 0 && s16 === 0) {
         this.sfx._noise({ at, dur: 0.7, vol: 0.22, freq: 5200, type: 'highpass', out });
       }
     } else if (njs) {
@@ -669,7 +713,7 @@ export class Bgm {
       const semi = ARPS[bar][LEAD_PAT[s16]] + (s16 % 8 === 0 ? 12 : 0);
       this.sfx._tone({ freq: note(semi), at, dur: d * 0.92, vol: s16 % 4 === 0 ? 0.3 : 0.2, out });
     }
-    if (totalBar >= 8 && s16 === 0 && !breakdown && !dnb) {
+    if (sc.chords && s16 === 0 && !breakdown && !dnb) {
       // Chord pad: the bar's triad, octave down, whole-bar sustain with
       // a slow attack so it swells in under the arp.
       for (const c of ARPS[bar].slice(0, 3)) {
@@ -679,7 +723,7 @@ export class Bgm {
         });
       }
     }
-    if (totalBar >= 16 && (s16 === 4 || s16 === 12) && !breakdown && !special) {
+    if (sc.counter && (s16 === 4 || s16 === 12) && !breakdown && !special && !soloOn) {
       // Counter melody: answers on beats 2 and 4 — and steps back to
       // half volume while the soloist has the floor.
       const c = COUNTER[bar][s16 === 4 ? 0 : 1];
@@ -688,7 +732,7 @@ export class Bgm {
         vol: soloOn ? 0.12 : 0.24, attack: 0.02, out,
       });
     }
-    if (totalBar >= 24 && !special) {
+    if (sc.drums && !special) {
       // The kit: kick on the downbeats (sine thump sliding down),
       // snare on 2 and 4 (bandpassed noise burst).
       if (s16 === 0 || s16 === 8) {
@@ -704,14 +748,14 @@ export class Bgm {
       }
       // Rising three-hit fill closing every OTHER loop — pre-kit phase
       // only; the full kit replaces it with a real snare roll.
-      if (totalBar % 8 === 7 && s16 >= 13 && totalBar < 40) {
+      if (totalBar % 8 === 7 && s16 >= 13 && !sc.kit) {
         this.sfx._noise({
           at, dur: 0.05, vol: 0.12 + (s16 - 13) * 0.08,
           freq: 2400 + (s16 - 13) * 900, type: 'bandpass', out,
         });
       }
     }
-    if (totalBar >= 32 && !breakdown && !soloOn && !special) {
+    if (sc.rise && !breakdown && !soloOn && !special) {
       const loopIdx = (totalBar / 4) | 0;
       const pat = RISE_PATS[loopIdx % RISE_PATS.length];
       const shifted = loopIdx % 2 === 1;           // displaced loop
@@ -722,13 +766,14 @@ export class Bgm {
       }
       if (bar === 3 && s16 % 4 === 0) { idx = 6 + s16 / 4; run = true; }
       if (idx >= 0) {
+        // On-pitch, clean attack (owner: 'less swoopy/out of tune' —
+        // the old slide-in from a tone below WAS the swoop).
         const target = note(pat[idx]);
         const vol = 0.12 + idx * 0.016;
         this.sfx._tone({
-          type: 'triangle', freq: run ? target : note(pat[idx] - 2),
-          slide: run ? undefined : target,
+          type: 'triangle', freq: target,
           at, dur: run ? d * 3.4 : d * 5.2,
-          vol, attack: run ? 0.01 : d * 1.2, out,
+          vol, attack: run ? 0.01 : 0.03, out,
         });
         if (shifted) {
           // Parallel fifths on displaced loops: thicker, hymnal.
@@ -748,7 +793,7 @@ export class Bgm {
         }
       }
     }
-    if (totalBar >= 40 && !breakdown && !special) {
+    if (sc.kit && !breakdown && !special) {
       // Full kit: quiet 16ths between the existing hats, open hats on
       // the off-beats, a ghost snare on the e-of-3, and a descending
       // tom fill closing every 4th bar.
@@ -813,7 +858,7 @@ export class Bgm {
     // beating IS the air. Never in the pocket (drums and bass only).
     {
       const strings =
-        (totalBar >= 48 && !breakdown && !dnb && !njs) || (collins && sect < 30);
+        (sc.strings && !breakdown && !dnb && !njs) || (collins && sect < 30);
       if (strings && s16 === 0 && totalBar % 2 === 0) {
         const semis = collins
           ? [ARPS[bar][0] + 12, ARPS[bar][1] + 12, ARPS[bar][2] + 12, ARPS[bar][0] + 24]
@@ -829,7 +874,7 @@ export class Bgm {
         }
       }
     }
-    if (totalBar >= 48 && !breakdown && !special) {
+    if (sc.horns && !breakdown && !special) {
       // Horn hits: the bar's triad as a tight detuned-saw stack, sharp
       // attack, short — the and-of-2 every bar, doubled in bar 4.
       const stab = s16 === 6 || (bar === 3 && s16 === 4);
@@ -845,10 +890,9 @@ export class Bgm {
         }
       }
     }
-    if (totalBar >= 56 && ((totalBar - 56) % 16) < 8) {
-      // THE SOLO: 8 bars on, 8 off. Doubled saw lead with slide bends;
-      // the double is detuned and quieter for width.
-      const soloBar = (totalBar - 56) % 8;
+    if (soloOn) {
+      // THE SOLO: its scene rolls it, the breakdown bar launches it.
+      const soloBar = (totalBar - 1) % 8;
       const gOut = (this.fx && this.fx.soloIn) || out;
       for (const [hit, semi, durSteps, from] of SOLO[soloBar]) {
         if (hit === s16) {
