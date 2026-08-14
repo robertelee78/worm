@@ -515,41 +515,41 @@ export class Bgm {
     // roots. Sub and hats keep their own grid throughout.
     const bassMode = totalBar < 8 ? 0 : ((totalBar / 4) | 0) % 4;
     if (dnb) {
-      // THE BREAK: two-step kick/snare, ghosts, rolling 16th hats.
-      if (s16 === 0 || s16 === 10) {
-        this.sfx._tone({ type: 'sine', freq: note(-31), slide: 34, at, dur: 0.2, vol: 0.6, attack: 0.002, out });
-        this.sfx._noise({ at, dur: 0.012, vol: 0.3, freq: 3500, type: 'highpass', out });
+      // THE GROOVE (owner: 'was thinking more michael jackson'): a
+      // stripped drums-and-bass pocket, Billie-Jean-school — DRY
+      // four-on-the-floor kick, tight backbeat, crisp 8th hats, and a
+      // syncopated ostinato bassline (original line, scale-fit per
+      // bar). Nothing else on top: the pocket IS the section.
+      if (s16 % 4 === 0) {
+        this.sfx._tone({ type: 'sine', freq: note(-31), slide: 36, at, dur: 0.16, vol: 0.56, attack: 0.002, out });
+        this.sfx._noise({ at, dur: 0.01, vol: 0.26, freq: 3500, type: 'highpass', out });
       }
       if (s16 === 4 || s16 === 12) {
-        const sOut = (this.fx && this.fx.snareIn) || out;
-        this.sfx._noise({ at, dur: 0.09, vol: 0.3, freq: 1800, type: 'bandpass', out: sOut });
-        this.sfx._tone({ type: 'triangle', freq: 195, at, dur: 0.07, vol: 0.15, attack: 0.001, out: sOut });
+        this.sfx._noise({ at, dur: 0.07, vol: 0.26, freq: 2000, type: 'bandpass', out });
+        this.sfx._tone({ type: 'triangle', freq: 200, at, dur: 0.05, vol: 0.13, attack: 0.001, out });
       }
-      if (s16 === 7 || s16 === 11) {
-        this.sfx._noise({ at, dur: 0.04, vol: 0.09, freq: 1900, type: 'bandpass', out });
+      if (s16 % 2 === 0) {
+        this.sfx._noise({ at, dur: 0.02, vol: s16 % 4 === 2 ? 0.1 : 0.06, freq: 7500, type: 'highpass', out });
       }
-      this.sfx._noise({
-        at, dur: s16 === 2 || s16 === 14 ? 0.1 : 0.02,
-        vol: [0.12, 0.04, 0.09, 0.05][s16 % 4], freq: 6800, type: 'highpass', out,
-      });
-      // REESE: two half-bar detuned saws dipping a fifth and climbing
-      // back, sine sub holding the floor.
-      if (s16 === 0 || s16 === 8) {
-        const root = -24 + BASS[bar];
-        const dip = s16 === 0;
-        for (const det of [1, 1.009]) {
-          this.sfx._tone({
-            type: 'sawtooth', freq: note(dip ? root : root - 7) * det,
-            slide: note(dip ? root - 7 : root) * det,
-            at, dur: d * 7.6, vol: 0.17, attack: 0.02, out,
-          });
-        }
+      if (s16 === 14) {
+        this.sfx._noise({ at, dur: 0.08, vol: 0.09, freq: 6500, type: 'highpass', out });
+      }
+      if (s16 % 2 === 0) {
+        // The ostinato: root, 5th, 7th-ish peak and back, per bar root.
+        const LINE = [
+          [0, 7, 10, 12, 10, 7, 0, 7],
+          [-4, 3, 5, 8, 5, 3, -4, 3],
+          [-2, 5, 8, 10, 8, 5, -2, 5],
+          [0, 7, 10, 12, 10, 7, 0, 7],
+        ];
+        const semi = LINE[bar][s16 / 2];
+        this.sfx._tone({ type: 'triangle', freq: note(-24 + semi), at, dur: d * 1.5, vol: 0.5, out });
         if (s16 === 0) {
-          this.sfx._tone({ type: 'sine', freq: note(root - 12), at, dur: d * 15, vol: 0.24, attack: 0.02, out });
+          this.sfx._tone({ type: 'sine', freq: note(-36 + BASS[bar]), at, dur: d * 7.5, vol: 0.2, attack: 0.015, out });
         }
       }
       // Crash the section entrance.
-      if (((totalBar - 56) % 16) === 8 && s16 === 0) {
+      if (((totalBar - 56) % 32) === 8 && s16 === 0) {
         this.sfx._noise({ at, dur: 0.7, vol: 0.22, freq: 5200, type: 'highpass', out });
       }
     } else if (njs) {
