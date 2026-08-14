@@ -12,7 +12,7 @@
      upgrades to VT323 if/when the font arrives. -->
 <link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
 <noscript><link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet"></noscript>
-<link rel="stylesheet" href="styles.css?v=73">
+<link rel="stylesheet" href="styles.css?v=74">
 </head>
 <body>
 
@@ -34,7 +34,6 @@
     <div class="score-label">You</div>
   </div>
   <div class="score-mid" id="mid-status">WASD / ARROWS — SPACE fires — P pause — R next round</div>
-  <button class="btn-green" id="versus-btn" style="font-size:13px;padding:4px 10px;white-space:nowrap" title="Second player on this keyboard: WASD steers, Q fires. The CPU keeps studying P1 from the bench.">2P (VS HUMAN)</button>
   <div class="score-side">
     <div class="score-label right">Computer</div>
     <div class="score-box" id="cpu-wins">0</div>
@@ -47,6 +46,8 @@
   <div class="game-row">
     <div class="play-column" id="play-column">
       <div class="bezel" id="arena-bezel">
+        <button id="versus-btn" title="Second player on this keyboard: WASD steers, Q fires. The CPU keeps studying P1 from the bench."
+          style="position:fixed;top:10px;left:12px;z-index:1000;font-family:monospace;font-size:12px;padding:4px 10px;background:rgba(6,17,15,0.85);color:#7ddc7d;border:1px solid #2ee6d6;cursor:pointer">2P (VS HUMAN)</button>
         <div class="screen" id="screen">
           <canvas id="game-canvas"></canvas>
           <div id="slipstream-label" class="hidden">◉ SLIPSTREAM</div>
@@ -125,6 +126,6 @@
   <span class="dim">device <span id="device-id">…</span> — your CPU brain lives in this browser (IndexedDB), it only learns <em>you</em>. Finished rounds (your moves + the board seed, nothing else) are sent to the arcade owner to make the CPU smarter.</span>
 </footer>
 
-<script type="module" src="app.js?v=73"></script>
+<script type="module" src="app.js?v=74"></script>
 </body>
 </html>
