@@ -493,7 +493,12 @@ export class Bgm {
                    kit: true, horns: true, strings: true, rise: true, bass: 1 };
     this.scene = mode === 'full' ? full
       : { ...full, mode, counter: false, horns: false, rise: false };
-    this.sceneIdx = ((this.totalSteps || 0) / 128) | 0;
+    this.holdScene = true;   // the mixer's scene sticks until released
+  }
+
+  // Hand control back to the roller (the 'auto' mode).
+  releaseScene() {
+    this.holdScene = false;
   }
 
   _startProcedural() {
@@ -536,9 +541,11 @@ export class Bgm {
     const totalBar = ((this.totalSteps || 0) / 16) | 0;
     this.totalSteps = (this.totalSteps || 0) + 1;
     const sceneIdx = (totalBar / 8) | 0;
-    if (sceneIdx !== this.sceneIdx || !this.scene) {
+    if (!this.scene || (!this.holdScene && sceneIdx !== this.sceneIdx)) {
       this.sceneIdx = sceneIdx;
       this.scene = this._rollScene(sceneIdx);
+    } else {
+      this.sceneIdx = sceneIdx;
     }
     const sc = this.scene;
     const sceneBar = totalBar % 8;
