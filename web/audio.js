@@ -543,17 +543,17 @@ export class Bgm {
           [0, 7, 10, 12, 10, 7, 0, 7],
         ];
         const semi = LINE[bar][s16 / 2];
-        // Bass-guitar stack (owner: 'more masculine'): sine fundamental
-        // a full octave down for chest, sawtooth growl above it with a
-        // pluck slide-in for the finger attack.
-        this.sfx._tone({ type: 'sine', freq: note(-36 + semi), at, dur: d * 1.7, vol: 0.38, attack: 0.004, out });
+        // DRIVING ELECTRIC BASS (owner): pick attack, staccato punch,
+        // relentless 8ths. Saw carries the string bite (near-instant
+        // attack, tight decay), square adds knuckle, sine holds the
+        // octave-down chest. Downbeats and beat 3 accent harder.
+        const acc = s16 % 8 === 0 ? 1.0 : 0.82;
         this.sfx._tone({
-          type: 'sawtooth', freq: note(-24 + semi) * 1.02, slide: note(-24 + semi),
-          at, dur: d * 1.4, vol: 0.24, attack: 0.003, out,
+          type: 'sawtooth', freq: note(-24 + semi) * 1.015, slide: note(-24 + semi),
+          at, dur: d * 1.15, vol: 0.34 * acc, attack: 0.0015, out,
         });
-        if (s16 === 0) {
-          this.sfx._tone({ type: 'sine', freq: note(-36 + BASS[bar]), at, dur: d * 7.5, vol: 0.15, attack: 0.015, out });
-        }
+        this.sfx._tone({ type: 'square', freq: note(-24 + semi), at, dur: d * 0.9, vol: 0.1 * acc, attack: 0.0015, out });
+        this.sfx._tone({ type: 'sine', freq: note(-36 + semi), at, dur: d * 1.5, vol: 0.36 * acc, attack: 0.003, out });
       }
       // Crash the section entrance.
       if (((totalBar - 56) % 32) === 8 && s16 === 0) {
@@ -653,7 +653,7 @@ export class Bgm {
     // THE BREAKDOWN: the bar before each solo entry strips to bass +
     // kick, so the solo slams in over the crash (flags computed at the
     // top of the step).
-    if (!breakdown && !njs && !collins) {
+    if (!breakdown && !njs && !collins && !dnb) {
       const semi = ARPS[bar][LEAD_PAT[s16]] + (s16 % 8 === 0 ? 12 : 0);
       this.sfx._tone({ freq: note(semi), at, dur: d * 0.92, vol: s16 % 4 === 0 ? 0.3 : 0.2, out });
     }
