@@ -403,6 +403,36 @@ export class Bgm {
     gain.gain.value = 0; // opened by _applyGain()
     filter.connect(gain); gain.connect(this.sfx.master);
     this.chain = { filter, gain };
+    // FX buses (the fullness pass): a slap delay for snare/horns, a
+    // longer ping delay for the solo, and a tanh waveshaper that turns
+    // the solo's sawtooth into an actual screaming guitar. Sends run
+    // dry+wet in parallel into the main filter, so the speed-coupled
+    // brightness still governs everything.
+    const ctx = this._ctx;
+    const mkDelay = (time, fb, wet) => {
+      const inp = ctx.createGain();
+      const del = ctx.createDelay(1.0);
+      del.delayTime.value = time;
+      const fbg = ctx.createGain(); fbg.gain.value = fb;
+      const wg = ctx.createGain(); wg.gain.value = wet;
+      inp.connect(filter);                 // dry
+      inp.connect(del); del.connect(fbg); fbg.connect(del);
+      del.connect(wg); wg.connect(filter); // wet
+      return inp;
+    };
+    const snareIn = mkDelay(0.09, 0.22, 0.3);
+    const soloPing = mkDelay(0.28, 0.35, 0.33);
+    const shaper = ctx.createWaveShaper();
+    const curve = new Float32Array(1024);
+    for (let i = 0; i < 1024; i++) {
+      const x = (i / 511.5) - 1;
+      curve[i] = Math.tanh(3.2 * x);
+    }
+    shaper.curve = curve;
+    const soloIn = ctx.createGain(); soloIn.gain.value = 0.55;
+    shaper.connect(soloPing);
+    soloIn.connect(shaper);
+    this.fx = { snareIn, soloIn };
   }
 
   _applyGain() {
@@ -463,14 +493,23 @@ export class Bgm {
     if (s16 % 2 === 0) {                            // bass: 8th-note pump
       const off = BASS[bar] + ((s16 / 2) % 2 ? 12 : 0);
       this.sfx._tone({ type: 'triangle', freq: note(-24 + off), at, dur: d * 1.8, vol: 0.5, out });
-      this.sfx._noise({ at, dur: 0.03, vol: s16 % 4 === 2 ? 0.12 : 0.07, freq: 6500, type: 'highpass', out });
+      if (s16 % 4 === 0) {                          // sine sub: glue + weight
+        this.sfx._tone({ type: 'sine', freq: note(-36 + BASS[bar]), at, dur: d * 3.6, vol: 0.22, attack: 0.01, out });
+      }
+      if (!breakdown) this.sfx._noise({ at, dur: 0.03, vol: s16 % 4 === 2 ? 0.12 : 0.07, freq: 6500, type: 'highpass', out });
     }
-    const semi = ARPS[bar][LEAD_PAT[s16]] + (s16 % 8 === 0 ? 12 : 0);
-    this.sfx._tone({ freq: note(semi), at, dur: d * 0.92, vol: s16 % 4 === 0 ? 0.3 : 0.2, out });
     // The layered build: musical time elapsed decides what has joined.
     const totalBar = ((this.totalSteps || 0) / 16) | 0;
     this.totalSteps = (this.totalSteps || 0) + 1;
-    if (totalBar >= 8 && s16 === 0) {
+    // THE BREAKDOWN (arrangement pass): the bar before each solo entry
+    // strips to bass + kick, so the solo SLAMS in over the crash.
+    const soloOn = totalBar >= 56 && ((totalBar - 56) % 16) < 8;
+    const breakdown = totalBar >= 55 && ((totalBar - 55) % 16) === 0;
+    if (!breakdown) {
+      const semi = ARPS[bar][LEAD_PAT[s16]] + (s16 % 8 === 0 ? 12 : 0);
+      this.sfx._tone({ freq: note(semi), at, dur: d * 0.92, vol: s16 % 4 === 0 ? 0.3 : 0.2, out });
+    }
+    if (totalBar >= 8 && s16 === 0 && !breakdown) {
       // Chord pad: the bar's triad, octave down, whole-bar sustain with
       // a slow attack so it swells in under the arp.
       for (const c of ARPS[bar].slice(0, 3)) {
@@ -480,13 +519,13 @@ export class Bgm {
         });
       }
     }
-    if (totalBar >= 16 && (s16 === 4 || s16 === 12)) {
-      // Counter melody: answers on beats 2 and 4, an octave below the
-      // lead, walking thirds/fifths against the arp.
+    if (totalBar >= 16 && (s16 === 4 || s16 === 12) && !breakdown) {
+      // Counter melody: answers on beats 2 and 4 — and steps back to
+      // half volume while the soloist has the floor.
       const c = COUNTER[bar][s16 === 4 ? 0 : 1];
       this.sfx._tone({
         type: 'sine', freq: note(c - 12), at, dur: d * 3.4,
-        vol: 0.24, attack: 0.02, out,
+        vol: soloOn ? 0.12 : 0.24, attack: 0.02, out,
       });
     }
     if (totalBar >= 24) {
@@ -494,12 +533,14 @@ export class Bgm {
       // snare on 2 and 4 (bandpassed noise burst).
       if (s16 === 0 || s16 === 8) {
         this.sfx._tone({
-          type: 'sine', freq: note(-31), slide: 38, at, dur: 0.14,
-          vol: 0.55, attack: 0.002, out,
+          type: 'sine', freq: note(-31), slide: 34, at, dur: 0.24,
+          vol: 0.6, attack: 0.002, out,
         });
       }
-      if (s16 === 4 || s16 === 12) {
-        this.sfx._noise({ at, dur: 0.09, vol: 0.28, freq: 1800, type: 'bandpass', out });
+      if ((s16 === 4 || s16 === 12) && !breakdown) {
+        const sOut = (this.fx && this.fx.snareIn) || out;
+        this.sfx._noise({ at, dur: 0.09, vol: 0.28, freq: 1800, type: 'bandpass', out: sOut });
+        this.sfx._tone({ type: 'triangle', freq: 195, at, dur: 0.07, vol: 0.14, attack: 0.001, out: sOut });
       }
       // Rising three-hit fill closing every OTHER loop — pre-kit phase
       // only; the full kit replaces it with a real snare roll.
@@ -510,7 +551,7 @@ export class Bgm {
         });
       }
     }
-    if (totalBar >= 32) {
+    if (totalBar >= 32 && !breakdown && !soloOn) {
       const loopIdx = (totalBar / 4) | 0;
       const pat = RISE_PATS[loopIdx % RISE_PATS.length];
       const shifted = loopIdx % 2 === 1;           // displaced loop
@@ -547,7 +588,7 @@ export class Bgm {
         }
       }
     }
-    if (totalBar >= 40) {
+    if (totalBar >= 40 && !breakdown) {
       // Full kit: quiet 16ths between the existing hats, open hats on
       // the off-beats, a ghost snare on the e-of-3, and a descending
       // tom fill closing every 4th bar.
@@ -604,16 +645,17 @@ export class Bgm {
         });
       }
     }
-    if (totalBar >= 48) {
+    if (totalBar >= 48 && !breakdown) {
       // Horn hits: the bar's triad as a tight detuned-saw stack, sharp
       // attack, short — the and-of-2 every bar, doubled in bar 4.
       const stab = s16 === 6 || (bar === 3 && s16 === 4);
       if (stab) {
+        const hOut = (this.fx && this.fx.snareIn) || out;
         for (const c of ARPS[bar].slice(0, 3)) {
           for (const det of [1, 1.006]) {
             this.sfx._tone({
               type: 'sawtooth', freq: note(c) * det, at, dur: 0.16,
-              vol: 0.11, attack: 0.004, out,
+              vol: 0.11, attack: 0.004, out: hOut,
             });
           }
         }
@@ -623,16 +665,30 @@ export class Bgm {
       // THE SOLO: 8 bars on, 8 off. Doubled saw lead with slide bends;
       // the double is detuned and quieter for width.
       const soloBar = (totalBar - 56) % 8;
+      const gOut = (this.fx && this.fx.soloIn) || out;
       for (const [hit, semi, durSteps, from] of SOLO[soloBar]) {
         if (hit === s16) {
           const target = note(semi);
           const start = from != null ? note(from) : target;
-          for (const [det, v] of [[1, 0.27], [1.007, 0.1]]) {
-            this.sfx._tone({
-              type: 'sawtooth', freq: start * det,
-              slide: from != null ? target * det : undefined,
-              at, dur: d * durSteps * 0.95, vol: v, attack: 0.008, out,
-            });
+          if (durSteps >= 4) {
+            // Held note: bend in, then VIBRATO — successive micro
+            // slides above/below pitch for the wail.
+            const seg = d * durSteps / 4;
+            this.sfx._tone({ type: 'sawtooth', freq: start, slide: target, at, dur: seg * 1.05, vol: 0.3, attack: 0.008, out: gOut });
+            for (let i = 1; i < 4; i++) {
+              const wob = i % 2 ? target * 1.012 : target * 0.994;
+              this.sfx._tone({ type: 'sawtooth', freq: i % 2 ? target : wob, slide: i % 2 ? wob : target, at: at + seg * i, dur: seg * 1.05, vol: 0.28, attack: 0.002, out: gOut });
+            }
+            // Octave-down double for power on the holds.
+            this.sfx._tone({ type: 'sawtooth', freq: target / 2, at, dur: d * durSteps * 0.95, vol: 0.1, attack: 0.01, out: gOut });
+          } else {
+            for (const [det, v] of [[1, 0.3], [1.007, 0.12]]) {
+              this.sfx._tone({
+                type: 'sawtooth', freq: start * det,
+                slide: from != null ? target * det : undefined,
+                at, dur: d * durSteps * 0.95, vol: v, attack: 0.006, out: gOut,
+              });
+            }
           }
         }
       }
