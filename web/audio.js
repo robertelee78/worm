@@ -511,9 +511,15 @@ export class Bgm {
     if (this.playing || !this.sfx.ready) return;
     this._ensureChain();
     this.playing = true;
-    this.totalSteps = 0;
-    this.sceneIdx = -1;
-    this.scene = null;
+    // MUSICAL MATURITY PERSISTS ACROSS ROUNDS (the game stops the bgm
+    // at round-over and restarts next round): a session's first round
+    // builds from bare, but later rounds RESUME the arrangement's
+    // maturity — otherwise every round replays the sparse intro and
+    // the special scenes (unlocked ~76s in) are unreachable inside
+    // typical round lengths. Fresh page = fresh session = new show.
+    this.totalSteps = this.totalSteps || 0;
+    if (this.sceneIdx === undefined) this.sceneIdx = -1;
+    if (this.scene === undefined) this.scene = null;
     this.step = 0;
     this.nextT = this._ctx.currentTime + 0.06;
     this._applyGain();
