@@ -282,16 +282,20 @@ const LEAD_PAT = [0, 1, 2, 3, 2, 1, 2, 3, 0, 1, 2, 3, 3, 2, 1, 0]; // up-down
 // Bars 24+ (owner: 'one more layer — make it even more interesting'):
 // the drums arrive — kick thump on the downbeats, snare on 2 and 4,
 // and a three-hit rising fill closing every other 4-bar loop.
-// Bars 32+ (owner: 'maybe some sort of rising line', then 'needs to
-// be more interesting'): the climb alternates contours per loop —
-// straight ascent, zig-zag (two up, one back), wide leaps — phrased
-// as dotted pushes through bars 1-3 (notes slide in from a tone
-// below), then a double-time run to the top in bar 4. Ten entries
-// per contour: six dotted, four for the run.
+// Bars 32+ (owner: 'rising line', 'more interesting', then 'more
+// creative too'): five contours rotate per loop — straight ascent,
+// zig-zag, wide leaps into a DROP-AND-VAULT run (falls, then leaps
+// to the peak), a chromatic snake, and a minor-6 lift. Phrasing:
+// dotted pushes through bars 1-3 (sliding in from a tone below),
+// double-time run in bar 4. Every other loop the pushes DISPLACE by
+// an 8th (pull instead of push) and the line doubles in parallel
+// fifths; every push trails a quiet octave echo three 16ths later.
 const RISE_PATS = [
-  [0, 2, 3, 5, 7, 8,   10, 12, 14, 15],
-  [0, 3, 2, 7, 5, 10,  8, 12, 15, 19],
-  [0, 7, 3, 10, 7, 14, 12, 15, 17, 19],
+  [0, 2, 3, 5, 7, 8,    10, 12, 14, 15],
+  [0, 3, 2, 7, 5, 10,   8, 12, 15, 19],
+  [0, 7, 3, 10, 7, 14,  19, 15, 12, 24],
+  [0, 1, 3, 4, 7, 8,    10, 11, 12, 15],
+  [0, 3, 7, 8, 12, 15,  12, 17, 19, 24],
 ];
 // Bars 40+: the full kit — 16th hats with accents, open hats on the
 // off-beats, a ghost snare, and descending tom fills every 4th bar.
@@ -507,21 +511,40 @@ export class Bgm {
       }
     }
     if (totalBar >= 32) {
-      // The rising line, phrased: dotted pushes (0 and the and-of-2)
-      // through bars 1-3, double-time run in bar 4; contour rotates
-      // each loop; dotted notes bend in from a whole tone below.
-      const pat = RISE_PATS[((totalBar / 4) | 0) % RISE_PATS.length];
+      const loopIdx = (totalBar / 4) | 0;
+      const pat = RISE_PATS[loopIdx % RISE_PATS.length];
+      const shifted = loopIdx % 2 === 1;           // displaced loop
+      const [hitA, hitB] = shifted ? [2, 8] : [0, 6];
       let idx = -1, run = false;
-      if (bar < 3 && (s16 === 0 || s16 === 6)) idx = bar * 2 + (s16 === 6 ? 1 : 0);
+      if (bar < 3 && (s16 === hitA || s16 === hitB)) {
+        idx = bar * 2 + (s16 === hitB ? 1 : 0);
+      }
       if (bar === 3 && s16 % 4 === 0) { idx = 6 + s16 / 4; run = true; }
       if (idx >= 0) {
         const target = note(pat[idx]);
+        const vol = 0.12 + idx * 0.016;
         this.sfx._tone({
           type: 'triangle', freq: run ? target : note(pat[idx] - 2),
           slide: run ? undefined : target,
           at, dur: run ? d * 3.4 : d * 5.2,
-          vol: 0.12 + idx * 0.016, attack: run ? 0.01 : d * 1.2, out,
+          vol, attack: run ? 0.01 : d * 1.2, out,
         });
+        if (shifted) {
+          // Parallel fifths on displaced loops: thicker, hymnal.
+          this.sfx._tone({
+            type: 'triangle', freq: note(pat[idx] + 7),
+            at, dur: run ? d * 3.4 : d * 5.2,
+            vol: vol * 0.55, attack: run ? 0.01 : d * 1.2, out,
+          });
+        }
+        if (!run) {
+          // Octave echo three 16ths behind every push.
+          this.sfx._tone({
+            type: 'triangle', freq: note(pat[idx] + 12),
+            at: at + d * 3, dur: d * 2.2, vol: vol * 0.38,
+            attack: 0.01, out,
+          });
+        }
       }
     }
     if (totalBar >= 40) {
