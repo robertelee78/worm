@@ -76,6 +76,13 @@ export class WasmGame {
         return ret !== 0;
     }
     /**
+     * @returns {boolean}
+     */
+    fire_p2() {
+        const ret = wasm.wasmgame_fire_p2(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
      * @returns {bigint}
      */
     frame_delay_ms() {
@@ -174,6 +181,24 @@ export class WasmGame {
      */
     set_direction(dir) {
         wasm.wasmgame_set_direction(this.__wbg_ptr, dir);
+    }
+    /**
+     * @param {number} dir
+     */
+    set_direction_p2(dir) {
+        wasm.wasmgame_set_direction_p2(this.__wbg_ptr, dir);
+    }
+    /**
+     * HUMAN VS HUMAN: hand cycle 1 to a second keyboard. `learn` keeps
+     * the observation pipeline running for player 0 (shadow learning —
+     * the CPU studies from the bench; its strategy portfolio is
+     * correctly NOT credited for rounds it never steered). learn=false
+     * records nothing.
+     * @param {boolean} on
+     * @param {boolean} learn
+     */
+    set_versus(on, learn) {
+        wasm.wasmgame_set_versus(this.__wbg_ptr, on, learn);
     }
     /**
      * Drain queued sound events as JSON [[kind, freq_hz, duration_ms, delay_ms], ...].

@@ -4,14 +4,14 @@
 // The ?v= must match BUILD below (and index.html's) — an unversioned glue
 // import could pair a cached old worm.js with a fresh wasm on the next
 // rebuild that changes the bindings.
-import init, { WasmGame } from './pkg/worm.js?v=70';
-import { Sfx } from './audio.js?v=70';
+import init, { WasmGame } from './pkg/worm.js?v=71';
+import { Sfx } from './audio.js?v=71';
 import { computeBoardLayout, VIEWPORT_BLOCK_GUTTER } from './layout.js';
 
 let CELL = 14; // recomputed by applyBoardLayout() to fit the measured stage
 // Bump together with the ?v= in index.html whenever the wasm bundle is
 // rebuilt — it keys the cache-busting query on the .wasm fetch.
-const BUILD = 70;
+const BUILD = 71;
 const MATCH_TARGET = 3;
 const STATE_SCHEMA_VERSION = 2;
 const ROUND_SCHEMA_VERSION = 1;
@@ -492,6 +492,19 @@ const KEYMAP = {
   ArrowLeft: 2, KeyA: 2, KeyH: 2,
   ArrowRight: 3, KeyD: 3, KeyL: 3,
 };
+// HUMAN VS HUMAN: in 2P, WASD steers the second worm (arrows/vim stay
+// P1) and Q fires it. The CPU keeps studying P1 from the bench
+// (shadow learning), so the flywheel never stops harvesting.
+const KEYMAP_P2 = { KeyW: 0, KeyS: 1, KeyA: 2, KeyD: 3 };
+let versus = false;
+function setVersus(on) {
+  versus = on;
+  if (game) game.set_versus(on, true);
+  const bp = document.getElementById('brain-panel');
+  if (bp) bp.style.display = on ? 'none' : '';
+  const b = document.getElementById('versus-btn');
+  if (b) b.textContent = on ? '1P (vs CPU)' : '2P (vs human)';
+}
 
 // PowerUpKind wire values from wasm state_json cycles[i].held (null = none).
 const PU_NAMES = ['LASER', 'TRI-SHOT', 'BOMB'];
@@ -500,8 +513,14 @@ window.addEventListener('keydown', (e) => {
   sfx.unlock();
   tryCoin();
   if (!game) return; // wasm module may still be booting
-  if (e.code in KEYMAP) {
+  if (versus && e.code in KEYMAP_P2) {
+    game.set_direction_p2(KEYMAP_P2[e.code]);
+    e.preventDefault();
+  } else if (e.code in KEYMAP) {
     game.set_direction(KEYMAP[e.code]);
+    e.preventDefault();
+  } else if (versus && e.code === 'KeyQ') {
+    if (!paused) game.fire_p2();
     e.preventDefault();
   } else if (e.code === 'Space') {
     // Frozen-time laser kills are forbidden in the terminal client for a
@@ -524,6 +543,9 @@ document.querySelectorAll('.tbtn[data-dir]').forEach((btn) => {
     if (!game) return;
     game.set_direction(Number(btn.dataset.dir));
   });
+});
+document.getElementById('versus-btn').addEventListener('click', () => {
+  setVersus(!versus);
 });
 document.getElementById('fire-btn').addEventListener('pointerdown', (e) => {
   e.preventDefault();

@@ -33,6 +33,7 @@ export class WasmGame {
      */
     brain_save(): Uint8Array;
     fire(): boolean;
+    fire_p2(): boolean;
     frame_delay_ms(): bigint;
     /**
      * Flat row-major cell grid (CellType as u8).
@@ -74,6 +75,15 @@ export class WasmGame {
      * 0=Up 1=Down 2=Left 3=Right (180s rejected game-side).
      */
     set_direction(dir: number): void;
+    set_direction_p2(dir: number): void;
+    /**
+     * HUMAN VS HUMAN: hand cycle 1 to a second keyboard. `learn` keeps
+     * the observation pipeline running for player 0 (shadow learning —
+     * the CPU studies from the bench; its strategy portfolio is
+     * correctly NOT credited for rounds it never steered). learn=false
+     * records nothing.
+     */
+    set_versus(on: boolean, learn: boolean): void;
     /**
      * Drain queued sound events as JSON [[kind, freq_hz, duration_ms, delay_ms], ...].
      * `kind` is `game::SfxKind` as u8 — the wire protocol is documented in game.rs.
@@ -99,6 +109,7 @@ export interface InitOutput {
     readonly wasmgame_brain_restore_was_partial: (a: number) => number;
     readonly wasmgame_brain_save: (a: number) => [number, number];
     readonly wasmgame_fire: (a: number) => number;
+    readonly wasmgame_fire_p2: (a: number) => number;
     readonly wasmgame_frame_delay_ms: (a: number) => bigint;
     readonly wasmgame_grid: (a: number) => [number, number];
     readonly wasmgame_is_over: (a: number) => number;
@@ -110,6 +121,8 @@ export interface InitOutput {
     readonly wasmgame_restart_with_size: (a: number, b: number, c: number) => void;
     readonly wasmgame_rounds_remembered: (a: number) => number;
     readonly wasmgame_set_direction: (a: number, b: number) => void;
+    readonly wasmgame_set_direction_p2: (a: number, b: number) => void;
+    readonly wasmgame_set_versus: (a: number, b: number, c: number) => void;
     readonly wasmgame_sfx_json: (a: number) => [number, number];
     readonly wasmgame_state_json: (a: number) => [number, number];
     readonly wasmgame_update: (a: number) => number;

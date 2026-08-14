@@ -3316,6 +3316,39 @@ fn test_coil_aborts_on_escape_with_cooldown() {
     );
 }
 
+/// HUMAN VS HUMAN: with autopilot off, cycle 1 obeys external steering
+/// and the CPU never decides; shadow learning keeps harvesting player-0
+/// episodes when asked, and records nothing when not.
+#[test]
+fn test_versus_mode_steers_p2_and_learns_optionally() {
+    let run = |learn: bool| -> (bool, usize, worm::Direction) {
+        let mut game = worm::WormGame::with_size_seed(60, 30, 7);
+        game.cpu_autopilot = false;
+        game.shadow_learning = learn;
+        game.food_items.clear();
+        game.powerups.clear();
+        // Steer P2 like a second keyboard: turn Down, hold two frames.
+        game.cycles[1].change_direction(worm::Direction::Down);
+        for _ in 0..2 {
+            if game.game_over {
+                break;
+            }
+            game.update();
+        }
+        (
+            game.cpu_telemetry.decision.is_some(),
+            game.cpu_brain.opp_brain.episodes.len(),
+            game.cycles[1].direction,
+        )
+    };
+    let (cpu_decided, harvested, dir) = run(true);
+    assert!(!cpu_decided, "versus mode: the CPU never decides");
+    assert_eq!(dir, worm::Direction::Down, "P2 keyboard steering applies");
+    assert!(harvested > 0, "learn=true harvests player-0 episodes (shadow)");
+    let (_, harvested_off, _) = run(false);
+    assert_eq!(harvested_off, 0, "learn=false records nothing");
+}
+
 /// ADR-022 / k3 Q6: the session doze-exit latch, exercised through the
 /// REAL production sites (codex verify round: the first version wrote the
 /// latch by hand and could not fail). The latch is set only inside

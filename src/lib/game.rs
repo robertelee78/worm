@@ -1750,12 +1750,14 @@ impl WormGame {
             // mistakes and over-aggressive choices that are most informative
             // about how this human loses. "At this kind of junction they
             // drive into a wall" is exactly the read a dominating CPU wants.
-            crate::cpu_ai::record_player_episode(
-                &mut self.cpu_brain,
-                player_ctx_pre,
-                player_dir_this_frame,
-                true, // a death is always an informative frame
-            );
+            if self.observing() {
+                crate::cpu_ai::record_player_episode(
+                    &mut self.cpu_brain,
+                    player_ctx_pre,
+                    player_dir_this_frame,
+                    true, // a death is always an informative frame
+                );
+            }
             // What killed the player: bomb cell, wall, own trail, or CPU trail.
             // Driving off the board clamps the destination back onto the
             // boundary cell — usually the worm's own head marker — so the
@@ -1977,17 +1979,19 @@ impl WormGame {
         // Store (pre-move player context → direction the player took), encoded
         // at frame start before the tail saw this frame's move.
         // (rps-ai learns from what the HUMAN played next, not what the AI did.)
-        crate::cpu_ai::record_player_episode(
-            &mut self.cpu_brain,
-            player_ctx_pre,
-            player_dir_this_frame,
-            player_had_choice,
-        );
+        if self.observing() {
+            crate::cpu_ai::record_player_episode(
+                &mut self.cpu_brain,
+                player_ctx_pre,
+                player_dir_this_frame,
+                player_had_choice,
+            );
+        }
         // F3 wall-break book: a voluntary lateral taken while driving at
         // a boundary within 4 cells is a wall break — count its side.
         // head_pre = the head at frame start (positions[1] after this
         // frame's insert; the head cell itself when growth kept index 0).
-        if player_had_choice {
+        if player_had_choice && self.observing() {
             let head_pre = self.cycles[self.player]
                 .positions
                 .get(1)
@@ -2002,7 +2006,9 @@ impl WormGame {
             );
         }
         // Player move history feeding the CPU tail (trailing-match bonus).
-        self.cpu_brain.record_player_move(player_dir_this_frame);
+        if self.observing() {
+            self.cpu_brain.record_player_move(player_dir_this_frame);
+        }
 
         // --- The rps-ai ensemble: score last frame's predictions against the
         // actual move, then refresh every model's prediction for next frame
@@ -3050,6 +3056,14 @@ impl WormGame {
                 let (dx, dy) = d.as_delta();
                 (tx as i32 - (hx + dx as i32)).abs() + (ty as i32 - (hy + dy as i32)).abs()
             })
+    }
+
+    /// Is the brain WATCHING this round? Autopilot (live play), shadow
+    /// learning (ghost-eval and versus-with-learning), or a replay
+    /// script (ADR-016 corpus re-drive) all observe; a live versus
+    /// round with learning declined observes nothing.
+    fn observing(&self) -> bool {
+        self.cpu_autopilot || self.shadow_learning || self.script.is_some()
     }
 
     pub fn restart(&mut self) {

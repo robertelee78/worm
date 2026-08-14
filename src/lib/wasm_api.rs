@@ -55,6 +55,26 @@ impl WasmGame {
         self.game.player_fire()
     }
 
+    /// HUMAN VS HUMAN: hand cycle 1 to a second keyboard. `learn` keeps
+    /// the observation pipeline running for player 0 (shadow learning —
+    /// the CPU studies from the bench; its strategy portfolio is
+    /// correctly NOT credited for rounds it never steered). learn=false
+    /// records nothing.
+    pub fn set_versus(&mut self, on: bool, learn: bool) {
+        self.game.cpu_autopilot = !on;
+        self.game.shadow_learning = on && learn;
+    }
+
+    pub fn set_direction_p2(&mut self, dir: u8) {
+        if let Some(d) = dir_from_u8(dir) {
+            self.game.cycles[1].change_direction(d);
+        }
+    }
+
+    pub fn fire_p2(&mut self) -> bool {
+        self.game.fire_powerup(1)
+    }
+
     /// Next game in the match (banks the session scoreboard, keeps the brain).
     pub fn restart(&mut self) {
         self.game.restart();
