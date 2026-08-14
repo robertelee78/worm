@@ -490,6 +490,12 @@ export class Bgm {
     const d = 60 / (126 * this._speedMul()) / 4;
     if (s16 % 2 === 1) t += d * 0.08;              // subtle swing
     const at = t - this._ctx.currentTime, out = this.chain.filter;
+    // The layered build: musical time elapsed decides what has joined.
+    // Computed FIRST — every block below may consult these flags.
+    const totalBar = ((this.totalSteps || 0) / 16) | 0;
+    this.totalSteps = (this.totalSteps || 0) + 1;
+    const soloOn = totalBar >= 56 && ((totalBar - 56) % 16) < 8;
+    const breakdown = totalBar >= 55 && ((totalBar - 55) % 16) === 0;
     if (s16 % 2 === 0) {                            // bass: 8th-note pump
       const off = BASS[bar] + ((s16 / 2) % 2 ? 12 : 0);
       this.sfx._tone({ type: 'triangle', freq: note(-24 + off), at, dur: d * 1.8, vol: 0.5, out });
@@ -498,13 +504,9 @@ export class Bgm {
       }
       if (!breakdown) this.sfx._noise({ at, dur: 0.03, vol: s16 % 4 === 2 ? 0.12 : 0.07, freq: 6500, type: 'highpass', out });
     }
-    // The layered build: musical time elapsed decides what has joined.
-    const totalBar = ((this.totalSteps || 0) / 16) | 0;
-    this.totalSteps = (this.totalSteps || 0) + 1;
-    // THE BREAKDOWN (arrangement pass): the bar before each solo entry
-    // strips to bass + kick, so the solo SLAMS in over the crash.
-    const soloOn = totalBar >= 56 && ((totalBar - 56) % 16) < 8;
-    const breakdown = totalBar >= 55 && ((totalBar - 55) % 16) === 0;
+    // THE BREAKDOWN: the bar before each solo entry strips to bass +
+    // kick, so the solo slams in over the crash (flags computed at the
+    // top of the step).
     if (!breakdown) {
       const semi = ARPS[bar][LEAD_PAT[s16]] + (s16 % 8 === 0 ? 12 : 0);
       this.sfx._tone({ freq: note(semi), at, dur: d * 0.92, vol: s16 % 4 === 0 ? 0.3 : 0.2, out });
