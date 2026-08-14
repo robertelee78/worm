@@ -470,7 +470,13 @@ export class Bgm {
   _rollScene(i) {
     const r = Math.random;
     if (i >= 5 && r() < 0.3) {
-      const mode = ['pocket', 'njs', 'build', 'solo'][(r() * 4) | 0];
+      // The pocket is the favored special (owner: 'don't lose the drum
+      // n bass sequence') — it rolls ~2x as often as the others.
+      const roll = r();
+      const mode = roll < 0.4 ? 'pocket'
+        : roll < 0.6 ? 'njs'
+        : roll < 0.8 ? 'build'
+        : 'solo';
       return { mode, chords: mode !== 'pocket', counter: false, drums: true,
                kit: true, horns: false, strings: r() < 0.5, rise: false, bass: 0 };
     }
