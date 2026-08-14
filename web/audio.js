@@ -520,19 +520,31 @@ export class Bgm {
       // four-on-the-floor kick, tight backbeat, crisp 8th hats, and a
       // syncopated ostinato bassline (original line, scale-fit per
       // bar). Nothing else on top: the pocket IS the section.
-      if (s16 % 4 === 0) {
-        this.sfx._tone({ type: 'sine', freq: note(-31), slide: 36, at, dur: 0.16, vol: 0.56, attack: 0.002, out });
-        this.sfx._noise({ at, dur: 0.01, vol: 0.26, freq: 3500, type: 'highpass', out });
+      // THE KILLER DRUMS (owner: '"in the air tonight" type … epic'):
+      // half-time weight under the driving bass. Giant GATED snare —
+      // a staggered noise bloom chopped dead (the gate) over a deep
+      // shell — huge kick, quiet 8th hats for motion, and gated tom
+      // pickups answering the line every 4th bar.
+      if (s16 === 0 || s16 === 8 || (bar % 2 === 1 && s16 === 10)) {
+        this.sfx._tone({ type: 'sine', freq: note(-33), slide: 30, at, dur: 0.26, vol: 0.62, attack: 0.002, out });
+        this.sfx._noise({ at, dur: 0.014, vol: 0.3, freq: 3000, type: 'highpass', out });
+        this.sfx._noise({ at, dur: 0.09, vol: 0.14, freq: 300, type: 'bandpass', out });
       }
       if (s16 === 4 || s16 === 12) {
-        this.sfx._noise({ at, dur: 0.07, vol: 0.26, freq: 2000, type: 'bandpass', out });
-        this.sfx._tone({ type: 'triangle', freq: 200, at, dur: 0.05, vol: 0.13, attack: 0.001, out });
+        const sOut = (this.fx && this.fx.snareIn) || out;
+        // The gate: three blooms, each bigger band, chopped hard.
+        this.sfx._noise({ at, dur: 0.16, vol: 0.38, freq: 1600, type: 'bandpass', out: sOut });
+        this.sfx._noise({ at: at + 0.02, dur: 0.14, vol: 0.24, freq: 2400, type: 'bandpass', out: sOut });
+        this.sfx._noise({ at: at + 0.04, dur: 0.12, vol: 0.14, freq: 3400, type: 'bandpass', out: sOut });
+        this.sfx._tone({ type: 'triangle', freq: 185, at, dur: 0.09, vol: 0.2, attack: 0.001, out: sOut });
       }
       if (s16 % 2 === 0) {
-        this.sfx._noise({ at, dur: 0.02, vol: s16 % 4 === 2 ? 0.1 : 0.06, freq: 7500, type: 'highpass', out });
+        this.sfx._noise({ at, dur: 0.018, vol: s16 % 4 === 2 ? 0.08 : 0.05, freq: 7500, type: 'highpass', out });
       }
-      if (s16 === 14) {
-        this.sfx._noise({ at, dur: 0.08, vol: 0.09, freq: 6500, type: 'highpass', out });
+      if (bar % 4 === 3 && s16 >= 13) {
+        const sOut = (this.fx && this.fx.snareIn) || out;
+        this.sfx._tone({ type: 'triangle', freq: note([-12, -16, -19][s16 - 13]), slide: 25, at, dur: 0.13, vol: 0.5, attack: 0.002, out: sOut });
+        this.sfx._noise({ at, dur: 0.09, vol: 0.22, freq: 850, type: 'bandpass', out: sOut });
       }
       if (s16 % 2 === 0) {
         // The ostinato: root, 5th, 7th-ish peak and back, per bar root.
