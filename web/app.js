@@ -4,14 +4,14 @@
 // The ?v= must match BUILD below (and index.html's) — an unversioned glue
 // import could pair a cached old worm.js with a fresh wasm on the next
 // rebuild that changes the bindings.
-import init, { WasmGame } from './pkg/worm.js?v=71';
-import { Sfx } from './audio.js?v=71';
+import init, { WasmGame } from './pkg/worm.js?v=72';
+import { Sfx } from './audio.js?v=72';
 import { computeBoardLayout, VIEWPORT_BLOCK_GUTTER } from './layout.js';
 
 let CELL = 14; // recomputed by applyBoardLayout() to fit the measured stage
 // Bump together with the ?v= in index.html whenever the wasm bundle is
 // rebuilt — it keys the cache-busting query on the .wasm fetch.
-const BUILD = 71;
+const BUILD = 72;
 const MATCH_TARGET = 3;
 const STATE_SCHEMA_VERSION = 2;
 const ROUND_SCHEMA_VERSION = 1;
@@ -503,7 +503,7 @@ function setVersus(on) {
   const bp = document.getElementById('brain-panel');
   if (bp) bp.style.display = on ? 'none' : '';
   const b = document.getElementById('versus-btn');
-  if (b) b.textContent = on ? '1P (vs CPU)' : '2P (vs human)';
+  if (b) b.textContent = on ? '1P (VS CPU)' : '2P (VS HUMAN)';
 }
 
 // PowerUpKind wire values from wasm state_json cycles[i].held (null = none).

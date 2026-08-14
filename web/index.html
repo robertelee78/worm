@@ -12,7 +12,7 @@
      upgrades to VT323 if/when the font arrives. -->
 <link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
 <noscript><link href="https://fonts.googleapis.com/css2?family=VT323&display=swap" rel="stylesheet"></noscript>
-<link rel="stylesheet" href="styles.css?v=71">
+<link rel="stylesheet" href="styles.css?v=72">
 </head>
 <body>
 
@@ -78,7 +78,6 @@
           <button class="btn-green tbtn" data-dir="3">▶</button>
         </div>
         <button class="btn-green tbtn fire" id="fire-btn">FIRE</button>
-      <button id="versus-btn" class="hud-btn" title="Second player: WASD steers, Q fires">2P (vs human)</button>
       </div>
     </div>
     <aside class="brain-panel" id="brain-panel">
@@ -112,6 +111,7 @@
 <div class="history-wrap">
   <div class="history-summary" id="history-summary">Loading saved round evidence…</div>
   <button class="btn-green" id="export-rounds-btn" title="Download your saved rounds (with ghost replays) for the offline evaluator">EXPORT MY ROUNDS</button>
+  <button class="btn-green" id="versus-btn" title="Second player on this keyboard: WASD steers, Q fires. The CPU keeps studying P1 from the bench.">2P (VS HUMAN)</button>
   <table class="history">
     <thead>
       <tr><th>Round</th><th>Result</th><th>Cause</th><th>Frames</th><th>Your food</th><th>CPU food</th><th>Round prediction</th><th>Prediction source</th><th>CPU action</th><th>Memory</th></tr>
@@ -125,6 +125,6 @@
   <span class="dim">device <span id="device-id">…</span> — your CPU brain lives in this browser (IndexedDB), it only learns <em>you</em>. Finished rounds (your moves + the board seed, nothing else) are sent to the arcade owner to make the CPU smarter.</span>
 </footer>
 
-<script type="module" src="app.js?v=71"></script>
+<script type="module" src="app.js?v=72"></script>
 </body>
 </html>
