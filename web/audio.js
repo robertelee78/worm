@@ -282,6 +282,11 @@ const LEAD_PAT = [0, 1, 2, 3, 2, 1, 2, 3, 0, 1, 2, 3, 3, 2, 1, 0]; // up-down
 // Bars 24+ (owner: 'one more layer — make it even more interesting'):
 // the drums arrive — kick thump on the downbeats, snare on 2 and 4,
 // and a three-hit rising fill closing every other 4-bar loop.
+// Bars 32+ (owner: 'maybe some sort of rising line'): a triangle
+// voice climbs the A natural-minor scale one octave across each
+// 4-bar loop, two notes per bar, swelling as it rises — then
+// restarts the climb with the loop.
+const RISE = [0, 2, 3, 5, 7, 8, 10, 12];
 const COUNTER = [
   [7, 3],    // over Am: E then C
   [3, 0],    // over F:  C then A
@@ -477,6 +482,15 @@ export class Bgm {
           freq: 2400 + (s16 - 13) * 900, type: 'bandpass', out,
         });
       }
+    }
+    if (totalBar >= 32 && (s16 === 0 || s16 === 8)) {
+      // The rising line: octave climb across the loop, swelling as it
+      // goes, reset by the next loop.
+      const idx = (bar * 2 + (s16 === 8 ? 1 : 0)) % RISE.length;
+      this.sfx._tone({
+        type: 'triangle', freq: note(RISE[idx]), at, dur: d * 7.2,
+        vol: 0.12 + idx * 0.018, attack: d * 1.5, out,
+      });
     }
   }
 }
