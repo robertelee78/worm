@@ -11,6 +11,10 @@
 # Promotion stays HUMAN (ADR-015 discipline): this never edits defaults.
 set -uo pipefail
 cd "$(dirname "$0")/.."
+# Cron's PATH carries the distro cargo (1.75, cannot read lockfile v4);
+# the toolchain that built this repo lives in ~/.cargo/bin. Eight
+# nights of Aug 2026 failed on exactly this split.
+export PATH="$HOME/.cargo/bin:$PATH"
 
 mkdir -p .darwin
 STAMP=$(date +%Y-%m-%dT%H:%M)
@@ -23,9 +27,27 @@ fi
 HEAD=$(git rev-parse --short HEAD)
 
 echo "$STAMP sweep starting at champion $HEAD" >> "$LOG"
+SWEEP_START=$(mktemp .darwin/.start-XXXX)
 python3 scripts/darwin.py >> "$LOG" 2>&1
 STATUS=$?
 echo "$STAMP sweep finished (exit $STATUS)" >> "$LOG"
+
+# WITNESS DISCIPLINE (2026-08-15 incident: eight consecutive nights
+# re-reported the Aug-7 winner off a stale last-run.json while the
+# sweep itself crashed on the cargo split): a failed sweep records a
+# FAILURE, never winners — and winners only count from a last-run.json
+# this very sweep wrote.
+if [ "$STATUS" -ne 0 ]; then
+  echo "$STAMP SWEEP FAILED (exit $STATUS) — no winners recorded; fix me" >> "$LOG"
+  rm -f "$SWEEP_START"
+  exit "$STATUS"
+fi
+if [ ! .darwin/last-run.json -nt "$SWEEP_START" ]; then
+  echo "$STAMP sweep wrote no fresh last-run.json — no winners recorded" >> "$LOG"
+  rm -f "$SWEEP_START"
+  exit 1
+fi
+rm -f "$SWEEP_START"
 
 WINNERS=$(python3 - << 'EOF'
 import json
