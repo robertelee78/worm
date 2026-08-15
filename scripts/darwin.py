@@ -146,8 +146,8 @@ def main():
                  "fix the champion before sweeping")
     stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
     receipts.write(f"{stamp},baseline,,,{json.dumps(base)}\n")
-    print(f"  warm {base['warm']['win']}% lift {base['warm']['lift']}% · "
-          f"habitual {base['habitual']['win']}% · fitness {base_fit}", flush=True)
+    print(f"  habitual {base['habitual']['win']}% lift {base['habitual']['lift']}% · "
+          f"five-seed trimmed mean {base['seed_trimmed_mean']} · fitness {base_fit}", flush=True)
 
     results = []
     for knob in knobs:
@@ -164,8 +164,8 @@ def main():
             verdict = ("DISQUALIFIED (beyond non-inferiority margin)" if fit is None
                        else "beats champion" if fit > base_fit
                        else "no improvement")
-            print(f"   warm {r['warm']['win']}% lift {r['warm']['lift']}% · "
-                  f"habitual {r['habitual']['win']}% · {verdict}", flush=True)
+            print(f"   habitual {r['habitual']['win']}% lift {r['habitual']['lift']}% · "
+                  f"five-seed trimmed mean {r['seed_trimmed_mean']} · {verdict}", flush=True)
             results.append({"knob": knob, "value": value, "default": default,
                             "result": r, "fitness": fit, "verdict": verdict})
 
