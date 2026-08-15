@@ -26,7 +26,7 @@ if ! git diff --quiet -- src tests examples 2>/dev/null; then
 fi
 HEAD=$(git rev-parse --short HEAD)
 
-echo "$STAMP sweep starting at champion $HEAD" >> "$LOG"
+echo "$STAMP sweep starting at champion $HEAD ($(cargo --version 2>&1))" >> "$LOG"
 SWEEP_START=$(mktemp .darwin/.start-XXXX)
 python3 scripts/darwin.py >> "$LOG" 2>&1
 STATUS=$?
@@ -61,8 +61,15 @@ EOF
 )
 
 if [ -n "$WINNERS" ]; then
+  # Repeat tripwire (2026-08-15 incident: eight byte-identical stale
+  # entries went unflagged): a winners block identical to the previous
+  # one is possible but suspicious — say so in the ledger.
+  SUSPICIOUS=""
+  if [ -f .darwin/WINNERS.md ] && LAST=$(grep -B1 -A3 '^```$' .darwin/WINNERS.md | tail -8 | grep '^WORM_TUNE' | tail -1)      && [ -n "$LAST" ] && [ "$LAST" = "$(echo "$WINNERS" | head -1)" ]; then
+    SUSPICIOUS=" — IDENTICAL to the previous entry; verify the sweep actually ran"
+  fi
   {
-    echo "## $STAMP · champion $HEAD"
+    echo "## $STAMP · champion $HEAD$SUSPICIOUS"
     echo '```'
     echo "$WINNERS"
     echo '```'
