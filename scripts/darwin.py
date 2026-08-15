@@ -84,9 +84,17 @@ def make_knobs(seed):
         knobs[name] = (d, [lo, hi])
     return knobs
 
-LINE = re.compile(
-    r"(COLD \(cannot learn\)|WARM \(remembers you\)|WARM vs habitual)\s+cpu\s+(\d+)\s+player\s+(\d+).*?win\s+(\d+)%(?:.*?lift\s+(-?\d+)%)?"
+# 2026-08-15: the parser tracks the CURRENT sanctioned instruments.
+# The COLD/WARM receipt arms went #[ignore] in the five-seed
+# re-baseline (ADR-022) and stopped printing — the old three-arm
+# contract silently unparseable (found by the first honest proof run
+# after the stale-winners incident). Today's gauntlet: the habitual
+# arm + the five-seed trimmed-mean line, with the suite's own asserts
+# (exit code) as the hard gate.
+LINE_HAB = re.compile(
+    r"WARM vs habitual\s+cpu\s+(\d+)\s+player\s+(\d+).*?win\s+(\d+)%(?:.*?lift\s+(-?\d+)%)?"
 )
+LINE_SEED = re.compile(r"trimmed mean\s+(-?[\d.]+)")
 
 
 def run_gauntlet(env_overrides):
@@ -99,25 +107,24 @@ def run_gauntlet(env_overrides):
         cwd=ROOT, env=env, capture_output=True, text=True, timeout=600,
     )
     text = "".join(ch for ch in p.stdout + p.stderr if ch.isprintable() or ch == "\n")
-    out = {}
-    for m in LINE.finditer(text):
-        key = {"COLD (cannot learn)": "cold", "WARM (remembers you)": "warm",
-               "WARM vs habitual": "habitual"}[m.group(1)]
-        out[key] = {"cpu": int(m.group(2)), "player": int(m.group(3)),
-                    "win": int(m.group(4)), "lift": int(m.group(5) or 0)}
-    ok = {"cold", "warm", "habitual"} <= out.keys()
-    return out if ok else None
+    if p.returncode != 0:
+        return None            # a failing suite is a failing candidate
+    hab = LINE_HAB.search(text)
+    seed = LINE_SEED.search(text)
+    if not hab or not seed:
+        return None
+    return {
+        "habitual": {"cpu": int(hab.group(1)), "player": int(hab.group(2)),
+                     "win": int(hab.group(3)), "lift": int(hab.group(4) or 0)},
+        "seed_trimmed_mean": float(seed.group(1)),
+    }
 
 
 def fitness(r):
-    # Wins are the objective; lift is the tiebreaker. The ADR-009 gate is
-    # the NON-INFERIORITY margin from tests/domination.rs (ADR-020: under
-    # honest evidence warm arms spend their opening earning the read, so
-    # a strict warm >= cold disqualified the committed champion itself
-    # and crashed every nightly sweep on `fit > None`).
-    if r["warm"]["win"] < r["cold"]["win"] - 5:
-        return None
-    return (r["warm"]["cpu"] + r["habitual"]["cpu"], r["warm"]["lift"])
+    # Wins are the objective; lift is the tiebreaker. The five-seed
+    # trimmed-mean gate rides inside the suite's own asserts (a failing
+    # candidate never parses), so fitness reads the habitual arm alone.
+    return (r["habitual"]["cpu"], r["habitual"]["lift"])
 
 
 def main():
