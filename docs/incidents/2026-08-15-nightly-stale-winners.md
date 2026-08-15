@@ -84,9 +84,17 @@ LANDED (cfcae65 + this change):
    from cargo probes (stderr now lands in the audit log); an empty
    probe section is announced as A FAILURE line, not silence.
 6. WINNERS.md correction entry over the stale rows.
+PROOF COMPLETED same day (owner: 'why wait'): three consecutive
+manual runs under a cron-shaped env (env -i, bare PATH):
+- run 1: honest SWEEP FAILED — exposed ROOT C, parser drift (the
+  COLD/WARM arms went #[ignore] in the ADR-022 re-baseline; the
+  three-arm contract silently unparseable since).
+- run 2: honest SWEEP FAILED — residual r['warm'] reporting sites.
+- run 3: FULL PASS. Baseline of champion 9b49da1: habitual 79-10
+  (88%), lift 68, five-seed trimmed mean -35.0. Six single-knob
+  winners recorded from a same-run last-run.json (14:27), no
+  suspicious flag. First real measurement since 08-07.
 REMAINING (accepted risks / follow-ups):
-- Verify tonight's 03:41 run end-to-end (first honest sweep in 9
-  days) — the real proof of fix.
 - Dream Machine adoption for worm would make "witness every
   quantitative claim" structural rather than per-script discipline;
   /opt/dream-machine is on the machine, unconfigured for worm.
